@@ -24,7 +24,6 @@ import com.alibaba.fluss.connector.flink.sink.FlinkTableSink;
 import com.alibaba.fluss.connector.flink.source.FlinkTableSource;
 import com.alibaba.fluss.connector.flink.utils.FlinkConnectorOptionsUtils;
 import com.alibaba.fluss.metadata.TablePath;
-
 import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.CoreOptions;
@@ -71,7 +70,7 @@ public class FlinkTableFactory implements DynamicTableSourceFactory, DynamicTabl
         }
 
         FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
-        helper.validate();
+        helper.validateExcept("table.", "client.");
 
         boolean isStreamingMode =
                 context.getConfiguration().get(ExecutionOptions.RUNTIME_MODE)
@@ -135,7 +134,7 @@ public class FlinkTableFactory implements DynamicTableSourceFactory, DynamicTabl
     @Override
     public DynamicTableSink createDynamicTableSink(Context context) {
         FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
-        helper.validate();
+        helper.validateExcept("table.", "client.");
 
         boolean isStreamingMode =
                 context.getConfiguration().get(ExecutionOptions.RUNTIME_MODE)
