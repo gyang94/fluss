@@ -935,7 +935,7 @@ public class ConfigOptions {
     public static final ConfigOption<AutoPartitionTimeUnit> TABLE_AUTO_PARTITION_TIME_UNIT =
             key("table.auto-partition.time-unit")
                     .enumType(AutoPartitionTimeUnit.class)
-                    .noDefaultValue()
+                    .defaultValue(AutoPartitionTimeUnit.DAY)
                     .withDescription(
                             "The time granularity for auto created partitions. "
                                     + "Valid values are 'HOUR', 'DAY', 'MONTH', 'QUARTER', 'YEAR'. "
@@ -960,7 +960,7 @@ public class ConfigOptions {
     public static final ConfigOption<Integer> TABLE_AUTO_PARTITION_NUM_PRECREATE =
             key("table.auto-partition.num-precreate")
                     .intType()
-                    .defaultValue(4)
+                    .defaultValue(2)
                     .withDescription(
                             "The number of partitions to pre-create for auto created partitions in each check for auto partition. "
                                     + "For example, if the current check time is 2024-11-11 and the value is "
@@ -970,10 +970,10 @@ public class ConfigOptions {
     public static final ConfigOption<Integer> TABLE_AUTO_PARTITION_NUM_RETENTION =
             key("table.auto-partition.num-retention")
                     .intType()
-                    .defaultValue(-1)
+                    .defaultValue(7)
                     .withDescription(
                             "The number of history partitions to retain for auto created partitions in each check for auto partition. "
-                                    + "The default value is -1 which means retain all partitions. "
+                                    + "The default value is 7 which means retains 7 partitions. "
                                     + "For example, if the current check time is 2024-11-11, time-unit is DAY, and the value is "
                                     + "configured as 3, then the history partitions 20241108, 20241109, 20241110 will be retained. "
                                     + "The partitions earlier than 20241108 will be deleted.");
