@@ -976,7 +976,7 @@ public class ConfigOptions {
                     .defaultValue(7)
                     .withDescription(
                             "The number of history partitions to retain for auto created partitions in each check for auto partition. "
-                                    + "The default value is 7 which means retains 7 partitions. "
+                                    + "The default value is 7, which means that 7 partitions will be retained. "
                                     + "For example, if the current check time is 2024-11-11, time-unit is DAY, and the value is "
                                     + "configured as 3, then the history partitions 20241108, 20241109, 20241110 will be retained. "
                                     + "The partitions earlier than 20241108 will be deleted.");
