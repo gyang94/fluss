@@ -14,13 +14,12 @@
  * limitations under the License.
  */
 
-package com.alibaba.fluss.client.table;
+package com.alibaba.fluss.client.table.scanner.log;
 
 import com.alibaba.fluss.client.Connection;
 import com.alibaba.fluss.client.ConnectionFactory;
 import com.alibaba.fluss.client.admin.Admin;
-import com.alibaba.fluss.client.table.scanner.log.LogScanner;
-import com.alibaba.fluss.client.table.scanner.log.ScanRecords;
+import com.alibaba.fluss.client.table.Table;
 import com.alibaba.fluss.client.table.writer.AppendWriter;
 import com.alibaba.fluss.config.ConfigOptions;
 import com.alibaba.fluss.config.Configuration;
@@ -31,6 +30,7 @@ import com.alibaba.fluss.metadata.TableDescriptor;
 import com.alibaba.fluss.metadata.TablePath;
 import com.alibaba.fluss.server.testutils.FlussClusterExtension;
 import com.alibaba.fluss.types.DataTypes;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -38,8 +38,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.time.Duration;
 
 import static com.alibaba.fluss.testutils.DataTestUtils.row;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/** IT case for subscribing ttl log. */
 public class FlussLogITCase {
     @RegisterExtension
     public static final FlussClusterExtension FLUSS_CLUSTER_EXTENSION =
@@ -96,12 +97,14 @@ public class FlussLogITCase {
             try (LogScanner logScanner = table.newScan().createLogScanner()) {
                 logScanner.subscribe(0, 2);
 
-                assertThrows(
-                        IllegalStateException.class,
-                        () -> {
-                            ScanRecords scanRecords = logScanner.poll(Duration.ofSeconds(1));
-                            System.out.println(scanRecords);
-                        });
+                assertThatThrownBy(
+                                () -> {
+                                    ScanRecords scanRecords =
+                                            logScanner.poll(Duration.ofSeconds(1));
+                                    System.out.println(scanRecords);
+                                })
+                        .isInstanceOf(IllegalStateException.class)
+                        .hasMessageContaining("LogOffsetOutOfRangeException");
             }
         }
     }
