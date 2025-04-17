@@ -20,6 +20,7 @@ import com.alibaba.fluss.annotation.PublicStable;
 import com.alibaba.fluss.types.TimestampType;
 
 import java.io.Serializable;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -124,6 +125,18 @@ public class TimestampNtz implements Comparable<TimestampNtz>, Serializable {
         LocalDate localDate = LocalDate.ofEpochDay(date);
         LocalTime localTime = LocalTime.ofNanoOfDay(nanoOfDay);
         return LocalDateTime.of(localDate, localTime);
+    }
+
+    /** Converts this {@link TimestampNtz} object to a {@link Instant}. */
+    public Instant toInstant() {
+        long epochSecond = millisecond / 1000;
+        int milliOfSecond = (int) (millisecond % 1000);
+        if (milliOfSecond < 0) {
+            --epochSecond;
+            milliOfSecond += 1000;
+        }
+        long nanoAdjustment = milliOfSecond * 1_000_000 + nanoOfMillisecond;
+        return Instant.ofEpochSecond(epochSecond, nanoAdjustment);
     }
 
     /**
