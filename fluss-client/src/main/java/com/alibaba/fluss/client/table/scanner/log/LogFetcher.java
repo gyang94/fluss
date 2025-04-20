@@ -35,7 +35,6 @@ import com.alibaba.fluss.metadata.TableInfo;
 import com.alibaba.fluss.metadata.TablePartition;
 import com.alibaba.fluss.metadata.TablePath;
 import com.alibaba.fluss.record.LogRecordReadContext;
-import com.alibaba.fluss.record.LogRecords;
 import com.alibaba.fluss.remote.RemoteLogFetchInfo;
 import com.alibaba.fluss.remote.RemoteLogSegment;
 import com.alibaba.fluss.rpc.GatewayClientProxy;
@@ -342,7 +341,6 @@ public class LogFetcher implements Closeable {
                                             isCheckCrcs,
                                             fetchOffset);
                             logFetchBuffer.add(completedFetch);
-                            //                            }
                         }
                     }
                 }
