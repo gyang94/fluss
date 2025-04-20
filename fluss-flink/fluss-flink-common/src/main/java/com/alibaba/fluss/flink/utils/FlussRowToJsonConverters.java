@@ -16,13 +16,17 @@
 
 package com.alibaba.fluss.flink.utils;
 
+import com.alibaba.fluss.row.InternalRow;
 import com.alibaba.fluss.row.TimestampNtz;
 import com.alibaba.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import com.alibaba.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import com.alibaba.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 import com.alibaba.fluss.types.ArrayType;
+import com.alibaba.fluss.types.DataField;
 import com.alibaba.fluss.types.DataType;
 import com.alibaba.fluss.types.MapType;
 import com.alibaba.fluss.types.RowType;
+
 import org.apache.flink.table.api.TableException;
 import org.apache.flink.table.data.DecimalData;
 
@@ -31,6 +35,7 @@ import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 
 import static com.alibaba.fluss.flink.utils.TimeFormats.ISO8601_TIMESTAMP_FORMAT;
 import static com.alibaba.fluss.flink.utils.TimeFormats.ISO8601_TIMESTAMP_WITH_LOCAL_TIMEZONE_FORMAT;
@@ -59,7 +64,7 @@ public class FlussRowToJsonConverters {
         JsonNode convert(ObjectMapper mapper, JsonNode reuse, Object value);
     }
 
-    public FlussRowDataToJsonConverter createConverter(DataType flussDataType) {
+    public FlussRowDataToJsonConverter createNullableConverter(DataType flussDataType) {
         return wrapIntoNullableConverter(createNotNullConverter(flussDataType));
     }
 
@@ -198,8 +203,42 @@ public class FlussRowToJsonConverters {
     }
 
     private FlussRowDataToJsonConverter createRowConverter(RowType type) {
-        // TODO
-        return null;
+        final String[] fieldNames = type.getFieldNames().toArray(new String[0]);
+        final DataType[] fieldTypes =
+                type.getFields().stream().map(DataField::getType).toArray(DataType[]::new);
+        final FlussRowDataToJsonConverter[] fieldConverters =
+                Arrays.stream(fieldTypes)
+                        .map(this::createNullableConverter)
+                        .toArray(FlussRowDataToJsonConverter[]::new);
+        final int fieldCount = type.getFieldCount();
+        final InternalRow.FieldGetter[] fieldGetters = new InternalRow.FieldGetter[fieldCount];
+        for (int i = 0; i < fieldCount; i++) {
+            fieldGetters[i] = InternalRow.createFieldGetter(fieldTypes[i], i);
+        }
+        return ((mapper, reuse, value) -> {
+            ObjectNode node;
+            if (reuse == null || reuse.isNull()) {
+                node = mapper.createObjectNode();
+            } else {
+                node = (ObjectNode) reuse;
+            }
+            InternalRow row = (InternalRow) value;
+            for (int i = 0; i < fieldCount; i++) {
+                String fieldName = fieldNames[i];
+                try {
+                    Object field = fieldGetters[i].getFieldOrNull(row);
+                    if (field != null) {
+                        node.set(
+                                fieldName,
+                                fieldConverters[i].convert(mapper, node.get(fieldName), field));
+                    }
+                } catch (Throwable t) {
+                    throw new RuntimeException(
+                            String.format("Fail to convert to json at field: %s.", fieldName), t);
+                }
+            }
+            return node;
+        });
     }
 
     private FlussRowDataToJsonConverter wrapIntoNullableConverter(

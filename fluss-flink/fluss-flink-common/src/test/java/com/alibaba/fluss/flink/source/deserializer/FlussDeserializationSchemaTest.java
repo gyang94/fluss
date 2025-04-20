@@ -22,10 +22,18 @@ import com.alibaba.fluss.flink.source.testutils.OrderDeserializationSchema;
 import com.alibaba.fluss.record.ChangeType;
 import com.alibaba.fluss.row.BinaryString;
 import com.alibaba.fluss.row.GenericRow;
+import com.alibaba.fluss.types.DataField;
+import com.alibaba.fluss.types.DataTypes;
+import com.alibaba.fluss.types.RowType;
 
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.PojoTypeInfo;
+import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Test;
+
+import java.util.Arrays;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -112,6 +120,13 @@ public class FlussDeserializationSchemaTest {
 
     @Test
     public void testJsonStringDeserialize() throws Exception {
+        List<DataField> fields =
+                Arrays.asList(
+                        new DataField("orderId", DataTypes.BIGINT()),
+                        new DataField("itemId", DataTypes.STRING()));
+
+        RowType rowType = new RowType(fields);
+
         // Create test data
         GenericRow row = new GenericRow(2);
         row.setField(0, 42L);
@@ -121,14 +136,30 @@ public class FlussDeserializationSchemaTest {
         // Create deserializer
         JsonStringDeserializationSchema deserializer = new JsonStringDeserializationSchema();
         // Test deserialization
-        deserializer.open(null);
+        deserializer.open(
+                new FlussDeserializationSchema.InitializationContext() {
+                    @Override
+                    public MetricGroup getMetricGroup() {
+                        return null;
+                    }
+
+                    @Override
+                    public UserCodeClassLoader getUserCodeClassLoader() {
+                        return null;
+                    }
+
+                    @Override
+                    public RowType getRowSchema() {
+                        return rowType;
+                    }
+                });
         String result = deserializer.deserialize(scanRecord);
 
         // Verify result
         assertThat(result).isNotNull();
         assertThat(result)
                 .isEqualTo(
-                        "{\"offset\":-1,\"timestamp\":-1,\"change_type\":\"INSERT\",\"row\":\"(42,test value)\"}");
+                        "{\"offset\":-1,\"timestamp\":-1,\"change_type\":\"INSERT\",\"row\":{\"orderId\":42,\"itemId\":\"test value\"}}");
 
         // Verify with offset and timestamp
         ScanRecord scanRecord2 = new ScanRecord(1001, 1743261788400L, ChangeType.DELETE, row);
@@ -136,7 +167,7 @@ public class FlussDeserializationSchemaTest {
         assertThat(result2).isNotNull();
         assertThat(result2)
                 .isEqualTo(
-                        "{\"offset\":1001,\"timestamp\":1743261788400,\"change_type\":\"DELETE\",\"row\":\"(42,test value)\"}");
+                        "{\"offset\":1001,\"timestamp\":1743261788400,\"change_type\":\"DELETE\",\"row\":{\"orderId\":42,\"itemId\":\"test value\"}}");
     }
 
     @Test
