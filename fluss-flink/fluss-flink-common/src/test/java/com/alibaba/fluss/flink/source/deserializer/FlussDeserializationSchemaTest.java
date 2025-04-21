@@ -21,7 +21,10 @@ import com.alibaba.fluss.flink.source.testutils.Order;
 import com.alibaba.fluss.flink.source.testutils.OrderDeserializationSchema;
 import com.alibaba.fluss.record.ChangeType;
 import com.alibaba.fluss.row.BinaryString;
+import com.alibaba.fluss.row.Decimal;
 import com.alibaba.fluss.row.GenericRow;
+import com.alibaba.fluss.row.TimestampLtz;
+import com.alibaba.fluss.row.TimestampNtz;
 import com.alibaba.fluss.types.DataField;
 import com.alibaba.fluss.types.DataTypes;
 import com.alibaba.fluss.types.RowType;
@@ -32,6 +35,9 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.List;
 
@@ -122,15 +128,46 @@ public class FlussDeserializationSchemaTest {
     public void testJsonStringDeserialize() throws Exception {
         List<DataField> fields =
                 Arrays.asList(
-                        new DataField("orderId", DataTypes.BIGINT()),
-                        new DataField("itemId", DataTypes.STRING()));
+                        new DataField("char", DataTypes.CHAR(64)),
+                        new DataField("string", DataTypes.STRING()),
+                        new DataField("boolean", DataTypes.BOOLEAN()),
+                        new DataField("binary", DataTypes.BINARY(64)),
+                        new DataField("bytes", DataTypes.BYTES()),
+                        new DataField("decimal", DataTypes.DECIMAL(1, 1)),
+                        new DataField("tinyInt", DataTypes.TINYINT()),
+                        new DataField("smallInt", DataTypes.SMALLINT()),
+                        new DataField("integer", DataTypes.INT()),
+                        new DataField("bigInt", DataTypes.BIGINT()),
+                        new DataField("float", DataTypes.FLOAT()),
+                        new DataField("double", DataTypes.DOUBLE()),
+                        new DataField("date", DataTypes.DATE()),
+                        new DataField("timeWithoutTimeZone", DataTypes.TIME()),
+                        new DataField("timestampWithoutTimeZone", DataTypes.TIMESTAMP()),
+                        new DataField("timestampWithLocalTimeZone", DataTypes.TIMESTAMP_LTZ()));
 
         RowType rowType = new RowType(fields);
 
+        // Mon Apr 21 2025 10:00:00 GMT+0000
+        long testTimestampInSeconds = 1745229600;
+
         // Create test data
-        GenericRow row = new GenericRow(2);
-        row.setField(0, 42L);
+        GenericRow row = new GenericRow(16);
+        row.setField(0, BinaryString.fromString("a"));
         row.setField(1, BinaryString.fromString("test value"));
+        row.setField(2, false);
+        row.setField(3, "test binary".getBytes(StandardCharsets.UTF_8));
+        row.setField(4, "test bytes".getBytes(StandardCharsets.UTF_8));
+        row.setField(5, Decimal.fromBigDecimal(BigDecimal.valueOf(1_000_000L), 1, 1));
+        row.setField(6, (byte) 1);
+        row.setField(7, (short) 64);
+        row.setField(8, 1024);
+        row.setField(9, 2048L);
+        row.setField(10, 1.1f);
+        row.setField(11, 3.14d);
+        row.setField(12, (int) LocalDate.of(2025, 4, 21).toEpochDay());
+        row.setField(13, 36000);
+        row.setField(14, TimestampNtz.fromMillis(testTimestampInSeconds * 1000));
+        row.setField(15, TimestampLtz.fromEpochMillis(testTimestampInSeconds * 1000));
         ScanRecord scanRecord = new ScanRecord(row);
 
         // Create deserializer
@@ -155,11 +192,16 @@ public class FlussDeserializationSchemaTest {
                 });
         String result = deserializer.deserialize(scanRecord);
 
+        String rowJson =
+                "{\"char\":\"a\",\"string\":\"test value\",\"boolean\":false,\"binary\":\"dGVzdCBiaW5hcnk=\",\"bytes\":\"dGVzdCBieXRlcw==\",\"tinyInt\":1,\"smallInt\":64,\"integer\":1024,\"bigInt\":2048,\"float\":1.1,\"double\":3.14,\"date\":\"2025-04-21\",\"timeWithoutTimeZone\":\"10:00:00\",\"timestampWithoutTimeZone\":\"2025-04-21T10:00:00\",\"timestampWithLocalTimeZone\":\"2025-04-21T10:00:00Z\"}";
+
         // Verify result
         assertThat(result).isNotNull();
         assertThat(result)
                 .isEqualTo(
-                        "{\"offset\":-1,\"timestamp\":-1,\"change_type\":\"INSERT\",\"row\":{\"orderId\":42,\"itemId\":\"test value\"}}");
+                        "{\"offset\":-1,\"timestamp\":-1,\"change_type\":\"INSERT\",\"row\":"
+                                + rowJson
+                                + "}");
 
         // Verify with offset and timestamp
         ScanRecord scanRecord2 = new ScanRecord(1001, 1743261788400L, ChangeType.DELETE, row);
@@ -167,7 +209,9 @@ public class FlussDeserializationSchemaTest {
         assertThat(result2).isNotNull();
         assertThat(result2)
                 .isEqualTo(
-                        "{\"offset\":1001,\"timestamp\":1743261788400,\"change_type\":\"DELETE\",\"row\":{\"orderId\":42,\"itemId\":\"test value\"}}");
+                        "{\"offset\":1001,\"timestamp\":1743261788400,\"change_type\":\"DELETE\",\"row\":"
+                                + rowJson
+                                + "}");
     }
 
     @Test

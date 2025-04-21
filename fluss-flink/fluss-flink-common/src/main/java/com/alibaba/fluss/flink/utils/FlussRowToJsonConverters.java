@@ -17,6 +17,7 @@
 package com.alibaba.fluss.flink.utils;
 
 import com.alibaba.fluss.row.InternalRow;
+import com.alibaba.fluss.row.TimestampLtz;
 import com.alibaba.fluss.row.TimestampNtz;
 import com.alibaba.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import com.alibaba.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
@@ -137,8 +138,8 @@ public class FlussRowToJsonConverters {
 
     private FlussRowDataToJsonConverter createTimeConverter() {
         return (mapper, reuse, value) -> {
-            int millisecond = (int) value;
-            LocalTime time = LocalTime.ofSecondOfDay(millisecond / 1000L);
+            int seconds = (int) value;
+            LocalTime time = LocalTime.ofSecondOfDay(seconds);
             return mapper.getNodeFactory().textNode(SQL_TIME_FORMAT.format(time));
         };
     }
@@ -167,7 +168,7 @@ public class FlussRowToJsonConverters {
         switch (timestampFormat) {
             case ISO_8601:
                 return (mapper, reuse, value) -> {
-                    TimestampNtz timestampWithLocalZone = (TimestampNtz) value;
+                    TimestampLtz timestampWithLocalZone = (TimestampLtz) value;
                     return mapper.getNodeFactory()
                             .textNode(
                                     ISO8601_TIMESTAMP_WITH_LOCAL_TIMEZONE_FORMAT.format(
@@ -177,7 +178,7 @@ public class FlussRowToJsonConverters {
                 };
             case SQL:
                 return (mapper, reuse, value) -> {
-                    TimestampNtz timestampWithLocalZone = (TimestampNtz) value;
+                    TimestampLtz timestampWithLocalZone = (TimestampLtz) value;
                     return mapper.getNodeFactory()
                             .textNode(
                                     SQL_TIMESTAMP_WITH_LOCAL_TIMEZONE_FORMAT.format(

@@ -139,7 +139,7 @@ public class JsonStringDeserializationSchema implements FlussDeserializationSche
         recordMap.put("offset", record.logOffset());
         recordMap.put("timestamp", record.timestamp());
         recordMap.put("change_type", record.getChangeType().toString());
-        // TODO: convert row into JSON https://github.com/alibaba/fluss/issues/678
+
         if (node == null) {
             node = objectMapper.createObjectNode();
         }
