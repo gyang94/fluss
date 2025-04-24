@@ -19,7 +19,7 @@ package com.alibaba.fluss.server.coordinator.event;
 import java.util.Objects;
 
 /** An event for drop a partition of a table. */
-public class DropPartitionEvent implements CoordinatorEvent {
+public class DropPartitionEvent extends CoordinatorEvent {
 
     private final long tableId;
 

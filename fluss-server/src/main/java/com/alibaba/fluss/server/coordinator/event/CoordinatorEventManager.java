@@ -53,6 +53,7 @@ public final class CoordinatorEventManager implements EventManager {
 
     // metrics
     private Histogram eventProcessTime;
+    private Histogram eventQueueTime;
 
     private static final int WINDOW_SIZE = 1024;
 
@@ -69,6 +70,11 @@ public final class CoordinatorEventManager implements EventManager {
         eventProcessTime =
                 coordinatorMetricGroup.histogram(
                         MetricNames.EVENT_PROCESS_TIME_MS,
+                        new DescriptiveStatisticsHistogram(WINDOW_SIZE));
+
+        eventQueueTime =
+                coordinatorMetricGroup.histogram(
+                        MetricNames.EVENT_QUEUE_TIME_MS,
                         new DescriptiveStatisticsHistogram(WINDOW_SIZE));
     }
 
@@ -91,6 +97,7 @@ public final class CoordinatorEventManager implements EventManager {
                 putLock,
                 () -> {
                     try {
+                        event.setEnqueueTimeMs(System.currentTimeMillis());
                         queue.put(event);
                     } catch (InterruptedException e) {
                         LOG.error("Fail to put coordinator event {}.", event, e);
@@ -116,6 +123,10 @@ public final class CoordinatorEventManager implements EventManager {
         @Override
         public void doWork() throws Exception {
             CoordinatorEvent event = queue.take();
+
+            long eventDequeueTimeMs = System.currentTimeMillis();
+            event.setDequeueTimeMs(eventDequeueTimeMs);
+            eventQueueTime.update(eventDequeueTimeMs - event.getEnqueueTimeMs());
 
             long eventStartTimeMs = System.currentTimeMillis();
 

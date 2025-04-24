@@ -22,7 +22,7 @@ import com.alibaba.fluss.server.entity.CommitLakeTableSnapshotData;
 import java.util.concurrent.CompletableFuture;
 
 /** An event for receiving the request of commit lakehouse data to coordinator server. */
-public class CommitLakeTableSnapshotEvent implements CoordinatorEvent {
+public class CommitLakeTableSnapshotEvent extends CoordinatorEvent {
 
     private final CommitLakeTableSnapshotData commitLakeTableSnapshotData;
 

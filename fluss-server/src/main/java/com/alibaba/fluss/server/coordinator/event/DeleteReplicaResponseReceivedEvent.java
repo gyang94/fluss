@@ -21,7 +21,7 @@ import com.alibaba.fluss.server.entity.DeleteReplicaResultForBucket;
 import java.util.List;
 
 /** A {@link CoordinatorEvent} for receive the response of delete replicas. */
-public class DeleteReplicaResponseReceivedEvent implements CoordinatorEvent {
+public class DeleteReplicaResponseReceivedEvent extends CoordinatorEvent {
 
     private final List<DeleteReplicaResultForBucket> deleteReplicaResultForBuckets;
 

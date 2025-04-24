@@ -23,7 +23,7 @@ import com.alibaba.fluss.server.entity.CommitRemoteLogManifestData;
 import java.util.concurrent.CompletableFuture;
 
 /** An event for receiving the request of updating remote log metadata to coordinator server. */
-public class CommitRemoteLogManifestEvent implements FencedCoordinatorEvent {
+public class CommitRemoteLogManifestEvent extends FencedCoordinatorEvent {
     private final CommitRemoteLogManifestData commitRemoteLogManifestData;
     private final CompletableFuture<CommitRemoteLogManifestResponse> respCallback;
 

@@ -22,7 +22,7 @@ import com.alibaba.fluss.server.zk.data.TableAssignment;
 import java.util.Objects;
 
 /** An event for create table. */
-public class CreateTableEvent implements CoordinatorEvent {
+public class CreateTableEvent extends CoordinatorEvent {
 
     private final TableInfo tableInfo;
     private final TableAssignment tableAssignment;

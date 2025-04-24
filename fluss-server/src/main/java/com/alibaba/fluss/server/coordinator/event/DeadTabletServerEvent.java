@@ -19,7 +19,7 @@ package com.alibaba.fluss.server.coordinator.event;
 import java.util.Objects;
 
 /** An event for tablet server became dead. */
-public class DeadTabletServerEvent implements CoordinatorEvent {
+public class DeadTabletServerEvent extends CoordinatorEvent {
 
     private final int serverId;
 
