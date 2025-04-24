@@ -17,23 +17,4 @@
 package com.alibaba.fluss.server.coordinator.event;
 
 /** A base interface for the events to be handled by Coordinator server. */
-public abstract class CoordinatorEvent {
-    protected long enqueueTimeMs;
-    protected long dequeueTimeMs;
-
-    public long getEnqueueTimeMs() {
-        return enqueueTimeMs;
-    }
-
-    public void setEnqueueTimeMs(long enqueueTimeMs) {
-        this.enqueueTimeMs = enqueueTimeMs;
-    }
-
-    public long getDequeueTimeMs() {
-        return dequeueTimeMs;
-    }
-
-    public void setDequeueTimeMs(long dequeueTimeMs) {
-        this.dequeueTimeMs = dequeueTimeMs;
-    }
-}
+public interface CoordinatorEvent {}

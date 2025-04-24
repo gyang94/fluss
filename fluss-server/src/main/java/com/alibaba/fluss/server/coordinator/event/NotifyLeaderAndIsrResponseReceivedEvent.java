@@ -22,7 +22,7 @@ import com.alibaba.fluss.server.entity.NotifyLeaderAndIsrResultForBucket;
 import java.util.List;
 
 /** An event for receive the response of {@link NotifyLeaderAndIsrRequest} from tablet server. */
-public class NotifyLeaderAndIsrResponseReceivedEvent extends CoordinatorEvent {
+public class NotifyLeaderAndIsrResponseReceivedEvent implements CoordinatorEvent {
 
     private final List<NotifyLeaderAndIsrResultForBucket> notifyLeaderAndIsrResultForBuckets;
 

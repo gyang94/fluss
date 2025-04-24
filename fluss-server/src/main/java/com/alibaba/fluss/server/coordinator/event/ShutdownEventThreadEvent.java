@@ -17,4 +17,4 @@
 package com.alibaba.fluss.server.coordinator.event;
 
 /** An event to shut down event thread. */
-public class ShutdownEventThreadEvent extends CoordinatorEvent {}
+public class ShutdownEventThreadEvent implements CoordinatorEvent {}

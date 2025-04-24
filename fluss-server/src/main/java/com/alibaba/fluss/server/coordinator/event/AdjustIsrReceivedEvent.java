@@ -24,7 +24,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 /** An event for receive the request of adjust isr to coordinator server. */
-public class AdjustIsrReceivedEvent extends CoordinatorEvent {
+public class AdjustIsrReceivedEvent implements CoordinatorEvent {
     private final Map<TableBucket, LeaderAndIsr> leaderAndIsrMap;
     private final CompletableFuture<AdjustIsrResponse> respCallback;
 

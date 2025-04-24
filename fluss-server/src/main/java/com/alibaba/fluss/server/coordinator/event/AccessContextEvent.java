@@ -29,7 +29,7 @@ import java.util.function.Function;
  *
  * @param <T> the type of the result of the access operation
  */
-public class AccessContextEvent<T> extends CoordinatorEvent {
+public class AccessContextEvent<T> implements CoordinatorEvent {
 
     private final Function<CoordinatorContext, T> accessFunction;
     private final CompletableFuture<T> resultFuture;

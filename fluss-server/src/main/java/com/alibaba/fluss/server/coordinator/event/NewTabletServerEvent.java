@@ -21,7 +21,7 @@ import com.alibaba.fluss.server.metadata.ServerInfo;
 import java.util.Objects;
 
 /** An event for new tablet server. */
-public class NewTabletServerEvent extends CoordinatorEvent {
+public class NewTabletServerEvent implements CoordinatorEvent {
 
     private final ServerInfo serverInfo;
 

@@ -19,7 +19,7 @@ package com.alibaba.fluss.server.coordinator.event;
 import java.util.Objects;
 
 /** An event for delete table. */
-public class DropTableEvent extends CoordinatorEvent {
+public class DropTableEvent implements CoordinatorEvent {
 
     private final long tableId;
 

@@ -23,7 +23,7 @@ import com.alibaba.fluss.server.entity.CommitKvSnapshotData;
 import java.util.concurrent.CompletableFuture;
 
 /** An event for receiving the request of commiting a completed snapshot to coordinator server. */
-public class CommitKvSnapshotEvent extends FencedCoordinatorEvent {
+public class CommitKvSnapshotEvent implements FencedCoordinatorEvent {
 
     private final CommitKvSnapshotData commitKvSnapshotData;
 

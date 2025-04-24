@@ -19,26 +19,26 @@ package com.alibaba.fluss.server.coordinator.event;
 import com.alibaba.fluss.metadata.TableBucket;
 
 /** A base interface for the events to be handled by Coordinator server with fenced attributes. */
-public abstract class FencedCoordinatorEvent extends CoordinatorEvent {
+public interface FencedCoordinatorEvent extends CoordinatorEvent {
 
     /**
      * Get the table bucket of the event.
      *
      * @return the table bucket of the event.
      */
-    abstract TableBucket getTableBucket();
+    TableBucket getTableBucket();
 
     /**
      * Get the coordinator epoch of the event.
      *
      * @return the coordinator epoch of the event.
      */
-    abstract int getCoordinatorEpoch();
+    int getCoordinatorEpoch();
 
     /**
      * Get the bucket leader epoch of the bucket when the event is triggered.
      *
      * @return the bucket leader epoch of the bucket when the event is triggered.
      */
-    abstract int getBucketLeaderEpoch();
+    int getBucketLeaderEpoch();
 }

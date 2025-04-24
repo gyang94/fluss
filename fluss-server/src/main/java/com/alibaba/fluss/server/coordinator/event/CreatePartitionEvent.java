@@ -22,7 +22,7 @@ import com.alibaba.fluss.server.zk.data.PartitionAssignment;
 import java.util.Objects;
 
 /** An event for create a partition for a table. */
-public class CreatePartitionEvent extends CoordinatorEvent {
+public class CreatePartitionEvent implements CoordinatorEvent {
 
     private final TablePath tablePath;
     private final long tableId;
