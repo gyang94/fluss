@@ -21,7 +21,6 @@ import com.alibaba.fluss.client.table.Table;
 import com.alibaba.fluss.client.table.scanner.ScanRecord;
 import com.alibaba.fluss.client.table.writer.AppendWriter;
 import com.alibaba.fluss.client.table.writer.UpsertWriter;
-import com.alibaba.fluss.config.ConfigOptions;
 import com.alibaba.fluss.exception.FetchException;
 import com.alibaba.fluss.metadata.Schema;
 import com.alibaba.fluss.metadata.TableDescriptor;
@@ -436,7 +435,7 @@ public class LogScannerITCase extends ClientToServerITCaseBase {
         }
     }
 
-    @Test()
+    @Test
     void testSubscribeOutOfRangeLog() throws Exception {
         TablePath tablePath = TablePath.of("test_db_1", "test_subscribe_out_of_range_log");
         TableDescriptor tableDescriptor =
@@ -446,8 +445,6 @@ public class LogScannerITCase extends ClientToServerITCaseBase {
                                         .column("a", DataTypes.INT())
                                         .column("b", DataTypes.STRING())
                                         .build())
-                        // ttl eagerly
-                        .property(ConfigOptions.TABLE_LOG_TTL, Duration.ofSeconds(1))
                         .distributedBy(1)
                         .build();
         createTable(tablePath, tableDescriptor, false);
@@ -461,12 +458,7 @@ public class LogScannerITCase extends ClientToServerITCaseBase {
             try (LogScanner logScanner = table.newScan().createLogScanner()) {
                 logScanner.subscribe(0, Long.MIN_VALUE);
 
-                assertThatThrownBy(
-                                () -> {
-                                    ScanRecords scanRecords =
-                                            logScanner.poll(Duration.ofSeconds(1));
-                                    System.out.println(scanRecords);
-                                })
+                assertThatThrownBy(() -> logScanner.poll(Duration.ofSeconds(1)))
                         .isInstanceOf(FetchException.class)
                         .hasMessageContaining(
                                 String.format(
