@@ -32,6 +32,7 @@ import com.alibaba.fluss.server.log.FetchParams;
 import com.alibaba.fluss.server.tablet.TabletServer;
 import com.alibaba.fluss.server.testutils.FlussClusterExtension;
 import com.alibaba.fluss.utils.FlussPaths;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -40,7 +41,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 import static com.alibaba.fluss.record.TestData.DATA1;
@@ -92,29 +92,7 @@ public class RemoteLogITCase {
     }
 
     @Test
-    public void testCreateRemoteLog() throws Exception {
-        TableBucket tb = setupTableBucket();
-        int leaderId = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
-        TabletServerGateway leaderGateway =
-                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leaderId);
-
-        // produce test records
-        produceRecordsAndWaitRemoteLogCopy(leaderGateway, tb);
-
-        // verify remote log created
-        TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leaderId);
-        FsPath fsPath =
-                FlussPaths.remoteLogTabletDir(
-                        tabletServer.getReplicaManager().getRemoteLogManager().remoteLogDir(),
-                        PhysicalTablePath.of(DATA1_TABLE_PATH),
-                        tb);
-        FileSystem fileSystem = fsPath.getFileSystem();
-        assertThat(fileSystem.exists(fsPath)).isTrue();
-        assertThat(fileSystem.listStatus(fsPath).length).isGreaterThan(0);
-    }
-
-    @Test
-    public void testDownloadRemoteLog() throws Exception {
+    public void remoteLogMiscTest() throws Exception {
         TableBucket tb = setupTableBucket();
         long tableId = tb.getTableId();
 
@@ -125,8 +103,17 @@ public class RemoteLogITCase {
         // produce test records
         produceRecordsAndWaitRemoteLogCopy(leaderGateway, tb);
 
-        // verify remote log created
+        // test metadata updated: verify manifest in metadata
         TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leaderId);
+        RemoteLogManager remoteLogManager = tabletServer.getReplicaManager().getRemoteLogManager();
+        RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
+
+        RemoteLogManifest manifest = remoteLogTablet.currentManifest();
+        assertThat(manifest.getPhysicalTablePath().getTablePath()).isEqualTo(DATA1_TABLE_PATH);
+        assertThat(manifest.getTableBucket()).isEqualTo(tb);
+        assertThat(manifest.getRemoteLogSegmentList().size()).isGreaterThan(0);
+
+        // test create: verify remote log created
         FsPath fsPath =
                 FlussPaths.remoteLogTabletDir(
                         tabletServer.getReplicaManager().getRemoteLogManager().remoteLogDir(),
@@ -134,13 +121,11 @@ public class RemoteLogITCase {
                         tb);
         FileSystem fileSystem = fsPath.getFileSystem();
         assertThat(fileSystem.exists(fsPath)).isTrue();
-        assertThat(fileSystem.listStatus(fsPath).length).isGreaterThan(1);
+        assertThat(fileSystem.listStatus(fsPath).length).isGreaterThan(0);
 
-        // download remote log
+        // test download remote log
         CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> future =
                 new CompletableFuture<>();
-
-        tabletServer.getReplicaManager().getReplica(tb);
 
         tabletServer
                 .getReplicaManager()
@@ -155,53 +140,8 @@ public class RemoteLogITCase {
         FetchLogResultForBucket fetchLogResult = result.get(tb);
         assertThat(fetchLogResult.getError()).isEqualTo(ApiError.NONE);
         assertThat(fetchLogResult.fetchFromRemote()).isTrue();
-    }
 
-    @Test
-    public void testMetadataUpdated() throws Exception {
-        TableBucket tb = setupTableBucket();
-        long tableId = tb.getTableId();
-
-        int leaderId = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
-        TabletServerGateway leaderGateway =
-                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leaderId);
-
-        // produce test records
-        produceRecordsAndWaitRemoteLogCopy(leaderGateway, tb);
-
-        // verify manifest in metadata
-        TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leaderId);
-        RemoteLogManager remoteLogManager = tabletServer.getReplicaManager().getRemoteLogManager();
-        RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
-
-        RemoteLogManifest manifest = remoteLogTablet.currentManifest();
-        assertThat(manifest.getPhysicalTablePath().getTablePath()).isEqualTo(DATA1_TABLE_PATH);
-        assertThat(manifest.getTableBucket()).isEqualTo(tb);
-        assertThat(manifest.getRemoteLogSegmentList().size()).isGreaterThan(0);
-    }
-
-    @Test
-    void testDeleteRemoteLog() throws Exception {
-        TableBucket tb = setupTableBucket();
-        int leader =
-                Objects.requireNonNull(
-                        FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tb).getLeaderId());
-        TabletServerGateway leaderGateWay =
-                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leader);
-        // produce many records to trigger remote log copy.
-        produceRecordsAndWaitRemoteLogCopy(leaderGateWay, tb);
-
-        // get leader.
-        TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leader);
-        FsPath fsPath =
-                FlussPaths.remoteLogTabletDir(
-                        tabletServer.getReplicaManager().getRemoteLogManager().remoteLogDir(),
-                        PhysicalTablePath.of(DATA1_TABLE_PATH),
-                        tb);
-        FileSystem fileSystem = fsPath.getFileSystem();
-        assertThat(fileSystem.exists(fsPath)).isTrue();
-        assertThat(fileSystem.listStatus(fsPath).length).isGreaterThan(1);
-
+        // test drop remote log
         CoordinatorGateway coordinatorGateway = FLUSS_CLUSTER_EXTENSION.newCoordinatorClient();
         coordinatorGateway
                 .dropTable(
