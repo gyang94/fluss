@@ -85,7 +85,7 @@ public class JsonStringDeserializationSchema implements FlussDeserializationSche
      * Converter responsible for transforming Fluss row data into json. Initialized during {@link
      * #open(InitializationContext)}.
      */
-    private transient FlussRowToJsonConverters.FlussRowDataToJsonConverter runtimeConverter;
+    private transient FlussRowToJsonConverters.FlussRowToJsonConverter runtimeConverter;
 
     /** Timestamp format specification which is used to parse timestamp. */
     private final TimestampFormat timestampFormat;
@@ -94,7 +94,7 @@ public class JsonStringDeserializationSchema implements FlussDeserializationSche
         this(TimestampFormat.ISO_8601);
     }
 
-    public JsonStringDeserializationSchema(TimestampFormat timestampFormat) {
+    private JsonStringDeserializationSchema(TimestampFormat timestampFormat) {
         this.timestampFormat = timestampFormat;
     }
 

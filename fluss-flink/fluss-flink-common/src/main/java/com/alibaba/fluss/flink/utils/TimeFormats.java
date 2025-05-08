@@ -27,7 +27,7 @@ import java.time.temporal.ChronoField;
  * and SQL specification.
  */
 @Internal
-public class TimeFormats {
+class TimeFormats {
 
     /** Formatter for RFC 3339-compliant string representation of a time value. */
     public static final DateTimeFormatter RFC3339_TIME_FORMAT =

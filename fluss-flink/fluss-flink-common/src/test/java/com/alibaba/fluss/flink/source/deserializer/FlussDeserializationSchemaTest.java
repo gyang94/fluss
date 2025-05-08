@@ -31,8 +31,6 @@ import com.alibaba.fluss.types.RowType;
 
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.typeutils.PojoTypeInfo;
-import org.apache.flink.metrics.MetricGroup;
-import org.apache.flink.util.UserCodeClassLoader;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
@@ -133,7 +131,7 @@ public class FlussDeserializationSchemaTest {
                         new DataField("boolean", DataTypes.BOOLEAN()),
                         new DataField("binary", DataTypes.BINARY(64)),
                         new DataField("bytes", DataTypes.BYTES()),
-                        new DataField("decimal", DataTypes.DECIMAL(1, 1)),
+                        new DataField("decimal", DataTypes.DECIMAL(6, 3)),
                         new DataField("tinyInt", DataTypes.TINYINT()),
                         new DataField("smallInt", DataTypes.SMALLINT()),
                         new DataField("integer", DataTypes.INT()),
@@ -143,7 +141,8 @@ public class FlussDeserializationSchemaTest {
                         new DataField("date", DataTypes.DATE()),
                         new DataField("timeWithoutTimeZone", DataTypes.TIME()),
                         new DataField("timestampWithoutTimeZone", DataTypes.TIMESTAMP()),
-                        new DataField("timestampWithLocalTimeZone", DataTypes.TIMESTAMP_LTZ()));
+                        new DataField("timestampWithLocalTimeZone", DataTypes.TIMESTAMP_LTZ()),
+                        new DataField("nullVal", DataTypes.STRING()));
 
         RowType rowType = new RowType(fields);
 
@@ -151,13 +150,13 @@ public class FlussDeserializationSchemaTest {
         long testTimestampInSeconds = 1745229600;
 
         // Create test data
-        GenericRow row = new GenericRow(16);
+        GenericRow row = new GenericRow(17);
         row.setField(0, BinaryString.fromString("a"));
         row.setField(1, BinaryString.fromString("test value"));
         row.setField(2, false);
         row.setField(3, "test binary".getBytes(StandardCharsets.UTF_8));
         row.setField(4, "test bytes".getBytes(StandardCharsets.UTF_8));
-        row.setField(5, Decimal.fromBigDecimal(BigDecimal.valueOf(1_000_000L), 1, 1));
+        row.setField(5, Decimal.fromBigDecimal(BigDecimal.valueOf(123), 6, 3));
         row.setField(6, (byte) 1);
         row.setField(7, (short) 64);
         row.setField(8, 1024);
@@ -165,36 +164,38 @@ public class FlussDeserializationSchemaTest {
         row.setField(10, 1.1f);
         row.setField(11, 3.14d);
         row.setField(12, (int) LocalDate.of(2025, 4, 21).toEpochDay());
-        row.setField(13, 36000);
+        row.setField(13, 36000000);
         row.setField(14, TimestampNtz.fromMillis(testTimestampInSeconds * 1000));
         row.setField(15, TimestampLtz.fromEpochMillis(testTimestampInSeconds * 1000));
+        row.setField(16, null);
         ScanRecord scanRecord = new ScanRecord(row);
 
         // Create deserializer
         JsonStringDeserializationSchema deserializer = new JsonStringDeserializationSchema();
         // Test deserialization
-        deserializer.open(
-                new FlussDeserializationSchema.InitializationContext() {
-                    @Override
-                    public MetricGroup getMetricGroup() {
-                        return null;
-                    }
-
-                    @Override
-                    public UserCodeClassLoader getUserCodeClassLoader() {
-                        return null;
-                    }
-
-                    @Override
-                    public RowType getRowSchema() {
-                        return rowType;
-                    }
-                });
+        deserializer.open(new InitializationContextImpl(null, null, rowType));
         String result = deserializer.deserialize(scanRecord);
 
         String rowJson =
-                "{\"char\":\"a\",\"string\":\"test value\",\"boolean\":false,\"binary\":\"dGVzdCBiaW5hcnk=\",\"bytes\":\"dGVzdCBieXRlcw==\",\"tinyInt\":1,\"smallInt\":64,\"integer\":1024,\"bigInt\":2048,\"float\":1.1,\"double\":3.14,\"date\":\"2025-04-21\",\"timeWithoutTimeZone\":\"10:00:00\",\"timestampWithoutTimeZone\":\"2025-04-21T10:00:00\",\"timestampWithLocalTimeZone\":\"2025-04-21T10:00:00Z\"}";
-
+                "{"
+                        + "\"char\":\"a\","
+                        + "\"string\":\"test value\","
+                        + "\"boolean\":false,"
+                        + "\"binary\":\"dGVzdCBiaW5hcnk=\","
+                        + "\"bytes\":\"dGVzdCBieXRlcw==\","
+                        + "\"decimal\":123,"
+                        + "\"tinyInt\":1,"
+                        + "\"smallInt\":64,"
+                        + "\"integer\":1024,"
+                        + "\"bigInt\":2048,"
+                        + "\"float\":1.1,"
+                        + "\"double\":3.14,"
+                        + "\"date\":\"2025-04-21\","
+                        + "\"timeWithoutTimeZone\":\"10:00:00\","
+                        + "\"timestampWithoutTimeZone\":\"2025-04-21T10:00:00\","
+                        + "\"timestampWithLocalTimeZone\":\"2025-04-21T10:00:00Z\","
+                        + "\"nullVal\":null"
+                        + "}";
         // Verify result
         assertThat(result).isNotNull();
         assertThat(result)
@@ -211,6 +212,40 @@ public class FlussDeserializationSchemaTest {
                 .isEqualTo(
                         "{\"offset\":1001,\"timestamp\":1743261788400,\"change_type\":\"DELETE\",\"row\":"
                                 + rowJson
+                                + "}");
+
+        // change several value to test reuse node
+        row.setField(0, BinaryString.fromString("b"));
+        row.setField(2, true);
+        row.setField(8, 512);
+        row.setField(13, 72000000);
+        ScanRecord changedRecord = new ScanRecord(row);
+        String changedResult = deserializer.deserialize(changedRecord);
+        String changedRowJson =
+                "{"
+                        + "\"char\":\"b\","
+                        + "\"string\":\"test value\","
+                        + "\"boolean\":true,"
+                        + "\"binary\":\"dGVzdCBiaW5hcnk=\","
+                        + "\"bytes\":\"dGVzdCBieXRlcw==\","
+                        + "\"decimal\":123,"
+                        + "\"tinyInt\":1,"
+                        + "\"smallInt\":64,"
+                        + "\"integer\":512,"
+                        + "\"bigInt\":2048,"
+                        + "\"float\":1.1,"
+                        + "\"double\":3.14,"
+                        + "\"date\":\"2025-04-21\","
+                        + "\"timeWithoutTimeZone\":\"20:00:00\","
+                        + "\"timestampWithoutTimeZone\":\"2025-04-21T10:00:00\","
+                        + "\"timestampWithLocalTimeZone\":\"2025-04-21T10:00:00Z\","
+                        + "\"nullVal\":null"
+                        + "}";
+        assertThat(changedResult).isNotNull();
+        assertThat(changedResult)
+                .isEqualTo(
+                        "{\"offset\":-1,\"timestamp\":-1,\"change_type\":\"INSERT\",\"row\":"
+                                + changedRowJson
                                 + "}");
     }
 

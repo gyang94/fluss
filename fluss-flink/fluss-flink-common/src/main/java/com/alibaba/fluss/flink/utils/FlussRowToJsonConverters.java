@@ -16,6 +16,7 @@
 
 package com.alibaba.fluss.flink.utils;
 
+import com.alibaba.fluss.row.Decimal;
 import com.alibaba.fluss.row.InternalRow;
 import com.alibaba.fluss.row.TimestampLtz;
 import com.alibaba.fluss.row.TimestampNtz;
@@ -27,9 +28,6 @@ import com.alibaba.fluss.types.DataField;
 import com.alibaba.fluss.types.DataType;
 import com.alibaba.fluss.types.MapType;
 import com.alibaba.fluss.types.RowType;
-
-import org.apache.flink.table.api.TableException;
-import org.apache.flink.table.data.DecimalData;
 
 import java.io.Serializable;
 import java.math.BigDecimal;
@@ -61,15 +59,15 @@ public class FlussRowToJsonConverters {
      * JsonNode}s.
      */
     @FunctionalInterface
-    public interface FlussRowDataToJsonConverter extends Serializable {
+    public interface FlussRowToJsonConverter extends Serializable {
         JsonNode convert(ObjectMapper mapper, JsonNode reuse, Object value);
     }
 
-    public FlussRowDataToJsonConverter createNullableConverter(DataType flussDataType) {
+    public FlussRowToJsonConverter createNullableConverter(DataType flussDataType) {
         return wrapIntoNullableConverter(createNotNullConverter(flussDataType));
     }
 
-    private FlussRowDataToJsonConverter createNotNullConverter(DataType type) {
+    private FlussRowToJsonConverter createNotNullConverter(DataType type) {
         switch (type.getTypeRoot()) {
             case CHAR:
             case STRING:
@@ -103,7 +101,7 @@ public class FlussRowToJsonConverters {
             case TIMESTAMP_WITHOUT_TIME_ZONE:
                 return createTimestampConverter();
             case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
-                return createTimestampWithLocalZone();
+                return createTimestampLtzConverter();
             case ARRAY:
                 return createArrayConverter((ArrayType) type);
             case MAP:
@@ -117,9 +115,9 @@ public class FlussRowToJsonConverters {
         }
     }
 
-    private FlussRowDataToJsonConverter createDecimalConverter() {
+    private FlussRowToJsonConverter createDecimalConverter() {
         return (mapper, reuse, value) -> {
-            BigDecimal bd = ((DecimalData) value).toBigDecimal();
+            BigDecimal bd = ((Decimal) value).toBigDecimal();
             return mapper.getNodeFactory()
                     .numberNode(
                             mapper.isEnabled(WRITE_BIGDECIMAL_AS_PLAIN)
@@ -128,7 +126,7 @@ public class FlussRowToJsonConverters {
         };
     }
 
-    private FlussRowDataToJsonConverter createDateConverter() {
+    private FlussRowToJsonConverter createDateConverter() {
         return ((mapper, reuse, value) -> {
             int days = (int) value;
             LocalDate date = LocalDate.ofEpochDay(days);
@@ -136,15 +134,15 @@ public class FlussRowToJsonConverters {
         });
     }
 
-    private FlussRowDataToJsonConverter createTimeConverter() {
+    private FlussRowToJsonConverter createTimeConverter() {
         return (mapper, reuse, value) -> {
-            int seconds = (int) value;
-            LocalTime time = LocalTime.ofSecondOfDay(seconds);
+            int milliseconds = (int) value;
+            LocalTime time = LocalTime.ofSecondOfDay(milliseconds / 1000L);
             return mapper.getNodeFactory().textNode(SQL_TIME_FORMAT.format(time));
         };
     }
 
-    private FlussRowDataToJsonConverter createTimestampConverter() {
+    private FlussRowToJsonConverter createTimestampConverter() {
         switch (timestampFormat) {
             case ISO_8601:
                 return (mapper, reuse, value) -> {
@@ -159,12 +157,12 @@ public class FlussRowToJsonConverters {
                             .textNode(SQL_TIMESTAMP_FORMAT.format(timestamp.toLocalDateTime()));
                 };
             default:
-                throw new TableException(
-                        "Unsupported timestamp format. Validator should have checked that.");
+                throw new UnsupportedOperationException(
+                        String.format("Unsupported timestamp format %s", timestampFormat));
         }
     }
 
-    private FlussRowDataToJsonConverter createTimestampWithLocalZone() {
+    private FlussRowToJsonConverter createTimestampLtzConverter() {
         switch (timestampFormat) {
             case ISO_8601:
                 return (mapper, reuse, value) -> {
@@ -187,30 +185,30 @@ public class FlussRowToJsonConverters {
                                                     .atOffset(ZoneOffset.UTC)));
                 };
             default:
-                throw new TableException(
-                        "Unsupported timestamp format. Validator should have checked that.");
+                throw new UnsupportedOperationException(
+                        String.format("Unsupported timestamp format %s", timestampFormat));
         }
     }
 
-    private FlussRowDataToJsonConverter createArrayConverter(ArrayType type) {
+    private FlussRowToJsonConverter createArrayConverter(ArrayType type) {
         // TODO
         return null;
     }
 
-    private FlussRowDataToJsonConverter createMapConverter(
+    private FlussRowToJsonConverter createMapConverter(
             String typeSummary, DataType keyType, DataType valueType) {
         // TODO
         return null;
     }
 
-    private FlussRowDataToJsonConverter createRowConverter(RowType type) {
+    private FlussRowToJsonConverter createRowConverter(RowType type) {
         final String[] fieldNames = type.getFieldNames().toArray(new String[0]);
         final DataType[] fieldTypes =
                 type.getFields().stream().map(DataField::getType).toArray(DataType[]::new);
-        final FlussRowDataToJsonConverter[] fieldConverters =
+        final FlussRowToJsonConverter[] fieldConverters =
                 Arrays.stream(fieldTypes)
                         .map(this::createNullableConverter)
-                        .toArray(FlussRowDataToJsonConverter[]::new);
+                        .toArray(FlussRowToJsonConverter[]::new);
         final int fieldCount = type.getFieldCount();
         final InternalRow.FieldGetter[] fieldGetters = new InternalRow.FieldGetter[fieldCount];
         for (int i = 0; i < fieldCount; i++) {
@@ -228,11 +226,9 @@ public class FlussRowToJsonConverters {
                 String fieldName = fieldNames[i];
                 try {
                     Object field = fieldGetters[i].getFieldOrNull(row);
-                    if (field != null) {
-                        node.set(
-                                fieldName,
-                                fieldConverters[i].convert(mapper, node.get(fieldName), field));
-                    }
+                    node.set(
+                            fieldName,
+                            fieldConverters[i].convert(mapper, node.get(fieldName), field));
                 } catch (Throwable t) {
                     throw new RuntimeException(
                             String.format("Fail to convert to json at field: %s.", fieldName), t);
@@ -242,13 +238,13 @@ public class FlussRowToJsonConverters {
         });
     }
 
-    private FlussRowDataToJsonConverter wrapIntoNullableConverter(
-            FlussRowDataToJsonConverter flussRowDataToJsonConverter) {
+    private FlussRowToJsonConverter wrapIntoNullableConverter(
+            FlussRowToJsonConverter flussRowToJsonConverter) {
         return ((mapper, reuse, value) -> {
             if (value == null) {
                 return mapper.getNodeFactory().nullNode();
             } else {
-                return flussRowDataToJsonConverter.convert(mapper, reuse, value);
+                return flussRowToJsonConverter.convert(mapper, reuse, value);
             }
         });
     }

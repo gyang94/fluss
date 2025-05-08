@@ -16,10 +16,10 @@
 
 package com.alibaba.fluss.flink.utils;
 
-import com.alibaba.fluss.annotation.Internal;
+import com.alibaba.fluss.annotation.PublicEvolving;
 
 /** Timestamp format Enums. */
-@Internal
+@PublicEvolving
 public enum TimestampFormat {
     /**
      * Options to specify TIMESTAMP/TIMESTAMP_WITH_LOCAL_ZONE format. It will parse TIMESTAMP in
