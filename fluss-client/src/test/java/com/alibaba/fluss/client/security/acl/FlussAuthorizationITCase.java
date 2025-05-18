@@ -450,6 +450,9 @@ public class FlussAuthorizationITCase {
         TablePath writeAclTable = TablePath.of("test_db_1", "write_acl_table");
         TablePath noWriteAclTable = TablePath.of("test_db_1", "no_write_acl_table");
 
+        TableDescriptor descriptor =
+                TableDescriptor.builder().schema(DATA1_SCHEMA).distributedBy(1).build();
+        rootAdmin.createTable(writeAclTable, descriptor, false).get();
         // create acl to allow guest write.
         rootAdmin
                 .createAcls(
@@ -463,6 +466,9 @@ public class FlussAuthorizationITCase {
                                                 PermissionType.ALLOW))))
                 .all()
                 .get();
+
+        FLUSS_CLUSTER_EXTENSION.waitUtilTableReady(
+                rootAdmin.getTableInfo(writeAclTable).get().getTableId());
 
         FlussConnection flussConnection = (FlussConnection) guestConn;
         TabletServerGateway tabletServerGateway =
