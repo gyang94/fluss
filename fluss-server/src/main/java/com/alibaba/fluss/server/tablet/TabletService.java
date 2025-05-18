@@ -48,7 +48,6 @@ import com.alibaba.fluss.rpc.messages.NotifyLeaderAndIsrRequest;
 import com.alibaba.fluss.rpc.messages.NotifyLeaderAndIsrResponse;
 import com.alibaba.fluss.rpc.messages.NotifyRemoteLogOffsetsRequest;
 import com.alibaba.fluss.rpc.messages.NotifyRemoteLogOffsetsResponse;
-import com.alibaba.fluss.rpc.messages.PbTablePath;
 import com.alibaba.fluss.rpc.messages.PrefixLookupRequest;
 import com.alibaba.fluss.rpc.messages.PrefixLookupResponse;
 import com.alibaba.fluss.rpc.messages.ProduceLogRequest;
@@ -70,6 +69,7 @@ import com.alibaba.fluss.server.log.FetchParams;
 import com.alibaba.fluss.server.log.ListOffsetsParam;
 import com.alibaba.fluss.server.metadata.ServerMetadataCache;
 import com.alibaba.fluss.server.replica.ReplicaManager;
+import com.alibaba.fluss.server.utils.ServerRpcMessageUtils;
 import com.alibaba.fluss.server.zk.ZooKeeperClient;
 
 import javax.annotation.Nullable;
@@ -314,38 +314,11 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
 
     @Override
     public CompletableFuture<InitWriterResponse> initWriter(InitWriterRequest request) {
-        List<PbTablePath> tablePathsList = request.getTablePathsList();
-        if (authorizer != null) {
-            if (tablePathsList == null || tablePathsList.isEmpty()) {
-                throw new UnknownTableOrBucketException(
-                        "The table paths can not be null or empty when initWriter.");
-            }
-
-            boolean hasAuthorizedPath = false;
-            for (PbTablePath pbTablePath : tablePathsList) {
-                if (authorizer.isAuthorized(
-                        currentSession(),
-                        WRITE,
-                        Resource.table(
-                                pbTablePath.getDatabaseName(), pbTablePath.getTableName()))) {
-                    hasAuthorizedPath = true;
-                    break;
-                }
-            }
-            if (!hasAuthorizedPath) {
-                throw new AuthorizationException(
-                        String.format(
-                                "No %s permission to table paths: %s",
-                                WRITE,
-                                tablePathsList.stream()
-                                        .map(
-                                                pbTablePath ->
-                                                        Resource.table(
-                                                                pbTablePath.getDatabaseName(),
-                                                                pbTablePath.getTableName()))
-                                        .collect(Collectors.toList())));
-            }
-        }
+        List<TablePath> tablePathsList =
+                request.getTablePathsList().stream()
+                        .map(ServerRpcMessageUtils::toTablePath)
+                        .collect(Collectors.toList());
+        authorizeAnyTable(WRITE, tablePathsList);
         CompletableFuture<InitWriterResponse> response = new CompletableFuture<>();
         response.complete(makeInitWriterResponse(metadataManager.initWriterId()));
         return response;
@@ -383,17 +356,36 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
             throw new UnknownTableOrBucketException(
                     String.format("This server does not host this table ID %s.", tableId));
         }
-        authorizeTable(operationType, tablePath.getTablePath());
-    }
-
-    private void authorizeTable(OperationType operationType, TablePath tablePath) {
         if (authorizer != null
                 && !authorizer.isAuthorized(
-                        currentSession(), operationType, Resource.table(tablePath))) {
+                        currentSession(),
+                        operationType,
+                        Resource.table(tablePath.getTablePath()))) {
             throw new AuthorizationException(
                     String.format(
                             "No permission to %s table %s in database %s",
                             operationType, tablePath.getTableName(), tablePath.getDatabaseName()));
+        }
+    }
+
+    private void authorizeAnyTable(OperationType operationType, List<TablePath> tablePaths) {
+        if (authorizer != null) {
+            if (tablePaths.isEmpty()) {
+                throw new AuthorizationException(
+                        "The request of InitWriter requires non empty table paths for authorization.");
+            }
+
+            for (TablePath tablePath : tablePaths) {
+                Resource tableResource = Resource.table(tablePath);
+                if (authorizer.isAuthorized(currentSession(), operationType, tableResource)) {
+                    // authorized success if one of the tables has the permission
+                    return;
+                }
+            }
+            throw new AuthorizationException(
+                    String.format(
+                            "No %s permission among all the tables: %s",
+                            operationType, tablePaths));
         }
     }
 
