@@ -314,13 +314,36 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
 
     @Override
     public CompletableFuture<InitWriterResponse> initWriter(InitWriterRequest request) {
-        // todo: add authorization for table acl until https://github.com/alibaba/fluss/issues/756.
         List<PbTablePath> tablePathsList = request.getTablePathsList();
-        if (tablePathsList != null && !tablePathsList.isEmpty()) {
+        if (authorizer != null) {
+            if (tablePathsList == null || tablePathsList.isEmpty()) {
+                throw new UnknownTableOrBucketException(
+                        "The table paths can not be null or empty when initWriter.");
+            }
+
+            boolean hasAuthorizedPath = false;
             for (PbTablePath pbTablePath : tablePathsList) {
-                authorizeTable(
+                if (authorizer.isAuthorized(
+                        currentSession(),
                         WRITE,
-                        TablePath.of(pbTablePath.getDatabaseName(), pbTablePath.getTableName()));
+                        Resource.table(
+                                pbTablePath.getDatabaseName(), pbTablePath.getTableName()))) {
+                    hasAuthorizedPath = true;
+                    break;
+                }
+            }
+            if (!hasAuthorizedPath) {
+                throw new AuthorizationException(
+                        String.format(
+                                "No %s permission to table paths: %s",
+                                WRITE,
+                                tablePathsList.stream()
+                                        .map(
+                                                pbTablePath ->
+                                                        Resource.table(
+                                                                pbTablePath.getDatabaseName(),
+                                                                pbTablePath.getTableName()))
+                                        .collect(Collectors.toList())));
             }
         }
         CompletableFuture<InitWriterResponse> response = new CompletableFuture<>();
@@ -364,10 +387,6 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
     }
 
     private void authorizeTable(OperationType operationType, TablePath tablePath) {
-        if (tablePath == null) {
-            throw new UnknownTableOrBucketException(
-                    "The table path for authorization can not be null.");
-        }
         if (authorizer != null
                 && !authorizer.isAuthorized(
                         currentSession(), operationType, Resource.table(tablePath))) {

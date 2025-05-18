@@ -18,6 +18,7 @@ package com.alibaba.fluss.client.security.acl;
 
 import com.alibaba.fluss.client.Connection;
 import com.alibaba.fluss.client.ConnectionFactory;
+import com.alibaba.fluss.client.FlussConnection;
 import com.alibaba.fluss.client.admin.Admin;
 import com.alibaba.fluss.client.table.Table;
 import com.alibaba.fluss.client.table.scanner.batch.BatchScanner;
@@ -30,10 +31,14 @@ import com.alibaba.fluss.metadata.DataLakeFormat;
 import com.alibaba.fluss.metadata.DatabaseDescriptor;
 import com.alibaba.fluss.metadata.TableBucket;
 import com.alibaba.fluss.metadata.TableDescriptor;
+import com.alibaba.fluss.metadata.TablePath;
 import com.alibaba.fluss.row.InternalRow;
 import com.alibaba.fluss.rpc.GatewayClientProxy;
 import com.alibaba.fluss.rpc.RpcClient;
 import com.alibaba.fluss.rpc.gateway.AdminGateway;
+import com.alibaba.fluss.rpc.gateway.TabletServerGateway;
+import com.alibaba.fluss.rpc.messages.InitWriterRequest;
+import com.alibaba.fluss.rpc.messages.InitWriterResponse;
 import com.alibaba.fluss.rpc.messages.MetadataRequest;
 import com.alibaba.fluss.rpc.metrics.TestingClientMetricGroup;
 import com.alibaba.fluss.security.acl.AccessControlEntry;
@@ -60,6 +65,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
 
 import static com.alibaba.fluss.record.TestData.DATA1_SCHEMA;
 import static com.alibaba.fluss.record.TestData.DATA1_TABLE_DESCRIPTOR;
@@ -69,6 +75,7 @@ import static com.alibaba.fluss.record.TestData.DATA1_TABLE_PATH_PK;
 import static com.alibaba.fluss.security.acl.AccessControlEntry.WILD_CARD_HOST;
 import static com.alibaba.fluss.security.acl.FlussPrincipal.WILD_CARD_PRINCIPAL;
 import static com.alibaba.fluss.security.acl.OperationType.READ;
+import static com.alibaba.fluss.security.acl.OperationType.WRITE;
 import static com.alibaba.fluss.testutils.DataTestUtils.row;
 import static com.alibaba.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -190,6 +197,14 @@ public class FlussAuthorizationITCase {
                                             .get();
                                 })
                         .hasMessageContaining("No Authorizer is configured.");
+
+                // test initWriter without authorizer and empty table paths
+                FlussConnection flussConnection = (FlussConnection) connection;
+                TabletServerGateway tabletServerGateway =
+                        flussConnection.getMetadataUpdater().newTabletServerClientForNode(0);
+                InitWriterResponse response =
+                        tabletServerGateway.initWriter(new InitWriterRequest()).get();
+                assertThat(response.getWriterId()).isEqualTo(0);
             }
 
         } finally {
@@ -428,6 +443,69 @@ public class FlussAuthorizationITCase {
             assertThat(guestGateway.metadata(metadataRequest).get().getTableMetadatasList())
                     .hasSize(1);
         }
+    }
+
+    @Test
+    void testInitWriter() throws Exception {
+        TablePath writeAclTable = TablePath.of("test_db_1", "write_acl_table");
+        TablePath noWriteAclTable = TablePath.of("test_db_1", "no_write_acl_table");
+
+        // create acl to allow guest write.
+        rootAdmin
+                .createAcls(
+                        Collections.singletonList(
+                                new AclBinding(
+                                        Resource.table(writeAclTable),
+                                        new AccessControlEntry(
+                                                guestPrincipal,
+                                                "*",
+                                                OperationType.WRITE,
+                                                PermissionType.ALLOW))))
+                .all()
+                .get();
+
+        FlussConnection flussConnection = (FlussConnection) guestConn;
+        TabletServerGateway tabletServerGateway =
+                flussConnection.getMetadataUpdater().newTabletServerClientForNode(0);
+
+        // test 1: empty table paths
+        assertThatThrownBy(() -> tabletServerGateway.initWriter(new InitWriterRequest()).get())
+                .hasMessageContaining("The table paths can not be null or empty when initWriter.");
+
+        // request contains a table path without permission
+        InitWriterRequest noAclRequest = new InitWriterRequest();
+        noAclRequest
+                .addTablePath()
+                .setDatabaseName(noWriteAclTable.getDatabaseName())
+                .setTableName(noWriteAclTable.getTableName());
+
+        // request contains both a table path with/without permission
+        InitWriterRequest request = new InitWriterRequest();
+        request.addTablePath()
+                .setTableName(writeAclTable.getTableName())
+                .setDatabaseName(writeAclTable.getDatabaseName());
+        request.addTablePath()
+                .setTableName(noWriteAclTable.getTableName())
+                .setDatabaseName(noWriteAclTable.getDatabaseName());
+
+        // test 2: one table has write permission, the other doesn't have permission
+        InitWriterResponse response = tabletServerGateway.initWriter(request).get();
+        assertThat(response.getWriterId()).isEqualTo(0);
+
+        // test 3: no table has write permission
+        //   The current session is internal session, the authorizeTable is always true.
+        assertThatThrownBy(() -> tabletServerGateway.initWriter(noAclRequest).get())
+                .hasMessageContaining(
+                        String.format(
+                                "No %s permission to table paths: %s",
+                                WRITE,
+                                noAclRequest.getTablePathsList().stream()
+                                        .map(
+                                                pbTablePath ->
+                                                        Resource.table(
+                                                                pbTablePath.getDatabaseName(),
+                                                                pbTablePath.getTableName()))
+                                        .collect(Collectors.toList())));
     }
 
     @Test

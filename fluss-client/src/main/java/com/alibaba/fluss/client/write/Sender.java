@@ -30,7 +30,6 @@ import com.alibaba.fluss.metadata.PhysicalTablePath;
 import com.alibaba.fluss.metadata.TableBucket;
 import com.alibaba.fluss.metadata.TableInfo;
 import com.alibaba.fluss.rpc.gateway.TabletServerGateway;
-import com.alibaba.fluss.rpc.messages.InitWriterRequest;
 import com.alibaba.fluss.rpc.messages.PbProduceLogRespForBucket;
 import com.alibaba.fluss.rpc.messages.PbPutKvRespForBucket;
 import com.alibaba.fluss.rpc.messages.ProduceLogRequest;
@@ -173,23 +172,13 @@ public class Sender implements Runnable {
     public void runOnce() throws Exception {
         if (idempotenceManager.idempotenceEnabled()) {
             // may be wait for writer id.
-            idempotenceManager.maybeWaitForWriterId(prepareInitWriterRequest());
+            Set<PhysicalTablePath> physicalTablePaths =
+                    accumulator.getPhysicalTablePathsInBatches();
+            idempotenceManager.maybeWaitForWriterId(physicalTablePaths);
         }
 
         // do send.
         sendWriteData();
-    }
-
-    InitWriterRequest prepareInitWriterRequest() {
-        Set<PhysicalTablePath> physicalTablePaths = accumulator.getPhysicalTablePathsInBatches();
-        InitWriterRequest initWriterRequest = new InitWriterRequest();
-        for (PhysicalTablePath tablePath : physicalTablePaths) {
-            initWriterRequest
-                    .addTablePath()
-                    .setDatabaseName(tablePath.getDatabaseName())
-                    .setTableName(tablePath.getTableName());
-        }
-        return initWriterRequest;
     }
 
     public boolean isRunning() {
