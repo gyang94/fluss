@@ -19,10 +19,10 @@ package com.alibaba.fluss.utils.concurrent;
 import com.alibaba.fluss.exception.FlussException;
 import com.alibaba.fluss.testutils.common.OneShotLatch;
 import com.alibaba.fluss.testutils.common.TestExecutorExtension;
-
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.fluss.testutils.common.FlussAssertions.assertThatFuture;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
 
 /** Tests for the utility methods in {@link FutureUtils}. */
 class FutureUtilsTest {
@@ -425,9 +426,12 @@ class FutureUtilsTest {
     @Test
     void testRunIfNotDoneAndGet() throws Exception {
         FutureUtils.runIfNotDoneAndGet(null);
-        Runnable task = () -> System.out.println("Fluss");
+        List<String> list = new ArrayList<>();
+        Runnable task = () -> list.add("Fluss");
         FutureTask<String> futureTask = new FutureTask<>(task, "Hello Fluss");
         FutureUtils.runIfNotDoneAndGet(futureTask);
+        assertThat(futureTask.get()).isEqualTo("Hello Fluss");
+        assertThat(list.contains("Fluss")).isTrue();
     }
 
     @Test
@@ -476,6 +480,7 @@ class FutureUtilsTest {
         assertThatFuture(emptyConjunctFuture).isDone();
         assertThatFuture(emptyConjunctFuture).eventuallySucceeds().isNull();
 
+        List<String> successRes = new ArrayList<>();
         CompletableFuture<String> future1 = new CompletableFuture<String>();
         CompletableFuture<String> future2 = new CompletableFuture<String>();
         FutureUtils.ConjunctFuture<Void> conjunctFuture =
@@ -483,7 +488,7 @@ class FutureUtilsTest {
                         Arrays.asList(future1, future2),
                         (val, throwable) -> {
                             if (throwable == null) {
-                                System.out.println(val + " Fluss");
+                                successRes.add(val);
                             } else {
                                 throw new RuntimeException(throwable);
                             }
@@ -496,11 +501,15 @@ class FutureUtilsTest {
         future1.complete("Hello");
         future2.complete("World");
         assertThatFuture(conjunctFuture).eventuallySucceeds();
-
         assertThatFuture(conjunctFuture).isDone();
         assertThat(conjunctFuture.getNumFuturesTotal()).isEqualTo(2);
         assertThat(conjunctFuture.getNumFuturesCompleted()).isEqualTo(2);
 
+        assertThat(successRes.size()).isEqualTo(2);
+        assertThat(successRes.contains("Hello")).isTrue();
+        assertThat(successRes.contains("World")).isTrue();
+
+        List<String> failureRes = new ArrayList<>();
         CompletableFuture<String> successFuture = new CompletableFuture<String>();
         CompletableFuture<String> failureFuture = new CompletableFuture<String>();
         FutureUtils.ConjunctFuture<Void> failureConjunctFuture =
@@ -508,13 +517,12 @@ class FutureUtilsTest {
                         Arrays.asList(successFuture, failureFuture),
                         (val, throwable) -> {
                             if (throwable == null) {
-                                System.out.println(val + " Fluss");
+                                failureRes.add(val);
                             } else {
                                 throw new RuntimeException(throwable);
                             }
                         });
 
-        successFuture.complete("success");
         failureFuture.completeExceptionally(new RuntimeException("mock runtime exception"));
 
         assertThatFuture(failureConjunctFuture).isDone();
@@ -524,6 +532,7 @@ class FutureUtilsTest {
                 .eventuallyFailsWith(ExecutionException.class)
                 .withCauseInstanceOf(RuntimeException.class)
                 .withMessageContaining("mock runtime exception");
+        assertThat(failureRes.isEmpty()).isTrue();
     }
 
     @Test
@@ -534,6 +543,6 @@ class FutureUtilsTest {
                 };
 
         Runnable catchingRunnable = FutureUtils.catchingAndLoggingThrowables(task);
-        catchingRunnable.run();
+        assertThatNoException().isThrownBy(catchingRunnable::run);
     }
 }
