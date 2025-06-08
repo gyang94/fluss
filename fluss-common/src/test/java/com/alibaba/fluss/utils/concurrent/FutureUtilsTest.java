@@ -19,6 +19,7 @@ package com.alibaba.fluss.utils.concurrent;
 import com.alibaba.fluss.exception.FlussException;
 import com.alibaba.fluss.testutils.common.OneShotLatch;
 import com.alibaba.fluss.testutils.common.TestExecutorExtension;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
