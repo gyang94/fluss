@@ -436,7 +436,7 @@ class FutureUtilsTest {
     }
 
     @Test
-    void combineAll() {
+    void combineAll() throws Exception {
         FutureUtils.ConjunctFuture<Collection<String>> emptyConjunctFuture =
                 FutureUtils.combineAll(Collections.emptyList());
         assertThatFuture(emptyConjunctFuture).isDone();
@@ -458,13 +458,13 @@ class FutureUtilsTest {
         assertThatFuture(conjunctFuture).isDone();
         assertThat(conjunctFuture.getNumFuturesTotal()).isEqualTo(2);
         assertThat(conjunctFuture.getNumFuturesCompleted()).isEqualTo(2);
+        assertThat(conjunctFuture.get()).containsExactly("Hello", "World");
 
         CompletableFuture<String> successFuture = new CompletableFuture<String>();
         CompletableFuture<String> failureFuture = new CompletableFuture<String>();
         FutureUtils.ConjunctFuture<Collection<String>> failureConjunctFuture =
                 FutureUtils.combineAll(Arrays.asList(successFuture, failureFuture));
 
-        successFuture.complete("success");
         failureFuture.completeExceptionally(new RuntimeException("mock runtime exception"));
 
         assertThatFuture(failureConjunctFuture).isDone();
