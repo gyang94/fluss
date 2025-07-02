@@ -59,7 +59,7 @@ The **TieringSource** operator reads records from the Fluss tiering table and wr
 Built on Flink’s Source V2 API ([FLIP-27](https://cwiki.apache.org/confluence/display/FLINK/FLIP-238:+Introduce+FLIP-27-based+Data+Generator+Source)), it breaks down into two core components: the **TieringSourceEnumerator** and the **TieringSourceReader**. 
 The high-level workflow is as follows:
 
-1. tHE **Enumerator** queries the **CoordinatorService** for current tiering table metadata.
+1. The **Enumerator** queries the **CoordinatorService** for current tiering table metadata.
 2. Once it receives the table information, the Enumerator generates `“splits”` (data partitions) and assigns them to the **Reader**.
 3. The **Reader** fetches the actual data for each split.
 4. Finally the **Reader** writes those records into the data lake.
@@ -97,13 +97,6 @@ The **TieringSplitGenerator** is an important component that orchestrates effici
 It precisely calculates the data `"delta"`, i.e what's new or changed in Fluss but not yet committed to the lake and then generates **TieringSplit** tasks for each segment requiring synchronization.
 
 To achieve this, the `TieringSplitGenerator` leverages the `FlussAdminClient` to fetch three essential pieces of metadata:
-
-Let's reformat and enhance the description of the TieringSplitGenerator for better clarity and impact.
-
-Understanding the TieringSplitGenerator
-The TieringSplitGenerator is a crucial component that orchestrates efficient data synchronization between your real-time Fluss cluster and your lakehouse. It precisely calculates the data "delta"—what's new or changed in Fluss but not yet committed to the lake—and then generates TieringSplit tasks for each segment requiring synchronization.
-
-To achieve this, the TieringSplitGenerator leverages the FlussAdminClient to fetch three essential pieces of metadata:
 
 **Lake Snapshot**
 
