@@ -29,11 +29,17 @@ toc_max_heading_level: 5
 
 ![](assets/tiering_service/background.png)
 
-At the core of Fluss’s Lakehouse architecture sits the Tiering Service—a smart, policy-driven data pipeline that seamlessly bridges your real-time Fluss cluster and your cost-efficient lakehouse storage. It continuously ingests fresh events from the fluss cluster, automatically migrating older or less-frequently accessed data into colder storage tiers without interrupting ongoing queries. By balancing hot, warm, and cold storage according to configurable rules, the Tiering Service ensures that recent data remains instantly queryable while historical records are archived economically. In this deep dive, we’ll explore how Fluss’s Tiering Service orchestrates data movement, preserves consistency, and empowers you to scale analytics workloads with both performance and cost in mind.
+At the core of Fluss’s Lakehouse architecture sits the **Tiering Service:** a smart,
+policy-driven data pipeline that seamlessly bridges your real-time Fluss cluster and your cost-efficient lakehouse storage. It continuously ingests fresh events from the fluss cluster, automatically migrating older or less-frequently accessed data into colder storage tiers without interrupting ongoing queries. By balancing hot, warm, and cold storage according to configurable rules, the Tiering Service ensures that recent data remains instantly queryable while historical records are archived economically. 
+
+In this blog post we will take a deep dive and explore how Fluss’s Tiering Service `orchestrates data movement`, `preserves consistency`, and empowers `scalable`, `high-performance` analytics at `optimized costs`.
+
+<!-- truncate -->
 
 ## Flink Tiering Service
 
-Fluss tiering service is an flink job, which keeps moving data from fluss cluster to data lake. The execution plan is quite straight forward. It has a three operators: a source, a committer and a empty sink writer.
+Fluss tiering service is an Apache Flink job, which keeps moving data from fluss cluster to data lake. 
+The execution plan is quite straight forward. It has a three operators: a `source`, a `committer` and an empty `sink writer`.
 
 ```
  Source: TieringSource -> TieringCommitter -> Sink: Writer
@@ -43,20 +49,22 @@ Fluss tiering service is an flink job, which keeps moving data from fluss cluste
 - **TieringCommitter**: Commits each sync batch by advancing offsets in both the lakehouse and the Fluss cluster.
 - **No-Op Sink**: A dummy sink that performs no action.
 
-In the sections that follow, we’ll dive into the TieringSource and TieringCommitter to see exactly how they orchestrate seamless data movement between real-time and historical storage.
+In the sections that follow, we’ll dive into the **TieringSource** and **TieringCommitter** to see exactly how they orchestrate seamless data movement between real-time and historical storage.
 
 ## TieringSource
 
 ![](assets/tiering_service/tiering-source.png)
 
-The **TieringSource** operator reads records from the Fluss tiering table and writes them into your data lake. Built on Flink’s Source V2 API (FLIP-27), it breaks down into two core components: the **TieringSourceEnumerator** and the **TieringSourceReader**. The high-level workflow is:
+The **TieringSource** operator reads records from the Fluss tiering table and writes them into your data lake. 
+Built on Flink’s Source V2 API ([FLIP-27](https://cwiki.apache.org/confluence/display/FLINK/FLIP-238:+Introduce+FLIP-27-based+Data+Generator+Source)), it breaks down into two core components: the **TieringSourceEnumerator** and the **TieringSourceReader**. 
+The high-level workflow is as follows:
 
-1. **Enumerator** queries the CoordinatorService for current tiering table metadata.
-2. Once it receives the table information, the Enumerator generates “splits” (data partitions) and assigns them to the Reader.
-3. **Reader** fetches the actual data for each split.
-4. The Reader then writes those records into the data lake.
+1. tHE **Enumerator** queries the **CoordinatorService** for current tiering table metadata.
+2. Once it receives the table information, the Enumerator generates `“splits”` (data partitions) and assigns them to the **Reader**.
+3. The **Reader** fetches the actual data for each split.
+4. Finally the **Reader** writes those records into the data lake.
 
-In the following sections, we’ll explore how the TieringSourceEnumerator and TieringSourceReader work under the hood to deliver reliable, scalable ingestion from Fluss into your lakehouse.
+In the following sections, we’ll explore how the **TieringSourceEnumerator** and **TieringSourceReader** work under the hood to deliver reliable, scalable ingestion from Fluss into your lakehouse.
 
 ### TieringSourceEnumerator
 
@@ -65,9 +73,9 @@ In the following sections, we’ll explore how the TieringSourceEnumerator and T
 The **TieringSourceEnumerator** orchestrates split creation and assignment in five key steps:
 
 1. **Heartbeat Request**: Uses an RPC client to send a `lakeTieringHeartbeatRequest` to the Fluss server.
-2. **Heartbeat Response**: Receives a `lakeTieringHeartbeatResponse` containing tiering table metadata and sync statuses for completed, failed, and in-progress tables.
+2. **Heartbeat Response**: Receives a `lakeTieringHeartbeatResponse` that contains the tiering table metadata and sync statuses for `completed`, `failed`, and `in-progress` tables.
 3. **Lake Tiering Info**: Forwards the returned `lakeTieringInfo` to the `TieringSplitGenerator`.
-4. **Split Generation**: The `TieringSplitGenerator` produces a set of `TieringSplits`—each representing a data partition to process.
+4. **Split Generation**: The `TieringSplitGenerator` produces a set of `TieringSplits`, each representing a data partition to process.
 5. **Split Assignment**: Assigns those `TieringSplits` to `TieringSourceReader` instances for downstream ingestion into the data lake.
 
 #### RpcClient
@@ -85,21 +93,38 @@ The `RpcClient` inside the `TieringSourceEnumerator` handles all RPC communicati
 
 ![](assets/tiering_service/tiering-split-generator.png)
 
-The **TieringSplitGenerator** calculates the precise data delta between your lakehouse and the Fluss cluster, then emits `TieringSplit` tasks for each segment that needs syncing. It uses a `FlussAdminClient` to fetch three core pieces of metadata:
+The **TieringSplitGenerator** is an important component that orchestrates efficient data synchronization between your real-time Fluss cluster and your lakehouse.
+It precisely calculates the data `"delta"`, i.e what's new or changed in Fluss but not yet committed to the lake and then generates **TieringSplit** tasks for each segment requiring synchronization.
 
-1. **Lake Snapshot**
-    - Invokes the lake metadata API to retrieve a `LakeSnapshot` object, which includes:
-        - `snapshotId` (the latest committed snapshot in the data lake)
-        - `tableBucketsOffset` (a map from each `TableBucket` to its log offset in the lakehouse)
-2. **Current Bucket Offsets**
-    - Queries the Fluss server for each bucket’s current log end offset, capturing the high-water mark of incoming streams.
-3. **KV Snapshots (for primary-keyed tables)**
-    - Retrieves a `KvSnapshots` record containing:
-        - `tableId` and optional `partitionId`
-        - `snapshotIds` (latest snapshot ID per bucket)
-        - `logOffsets` (the log position to resume reading after that snapshot)
+To achieve this, the `TieringSplitGenerator` leverages the `FlussAdminClient` to fetch three essential pieces of metadata:
 
-With the `LakeSnapshot`, the live bucket offsets, and (when applicable) the `KvSnapshots`, the generator computes which log segments exist in Fluss but aren’t yet committed to the lake. It then produces one `TieringSplit` per segment—each split precisely defines the bucket and offset range to ingest—enabling incremental, efficient synchronization between real-time and historical storage.
+Let's reformat and enhance the description of the TieringSplitGenerator for better clarity and impact.
+
+Understanding the TieringSplitGenerator
+The TieringSplitGenerator is a crucial component that orchestrates efficient data synchronization between your real-time Fluss cluster and your lakehouse. It precisely calculates the data "delta"—what's new or changed in Fluss but not yet committed to the lake—and then generates TieringSplit tasks for each segment requiring synchronization.
+
+To achieve this, the TieringSplitGenerator leverages the FlussAdminClient to fetch three essential pieces of metadata:
+
+**Lake Snapshot**
+
+The generator first invokes the lake metadata API to retrieve a **LakeSnapshot** object. This snapshot provides a complete picture of the current state of your data in the lakehouse, including:
+   * `snapshotId:` The identifier for the latest committed snapshot in your data lake.
+   * `tableBucketsOffset:` A map that details the log offset in the lakehouse for each `TableBucket`.
+
+**Current Bucket Offsets**
+
+Next, the `TieringSplitGenerator` queries the Fluss server to determine the **current log end offset** for each bucket. This effectively captures the high-water mark of incoming data streams in real time within your Fluss cluster.
+
+**KV Snapshots (for primary-keyed tables)**
+
+For tables that utilize primary keys, the generator also retrieves a **KvSnapshots** record. This record contains vital information for maintaining consistency with key-value stores:
+     * `tableId` and an optional `partitionId`.
+     * `snapshotIds:` The latest snapshot ID specific to each bucket.
+     * `logOffsets:` The exact log position from which to resume reading after that snapshot, ensuring seamless data ingestion.
+
+With the `LakeSnapshot`, the live bucket offsets from the Fluss cluster, and (where applicable) the `KvSnapshots`, the `TieringSplitGenerator` performs its core function: it computes which log segments are present in Fluss but have not yet been committed to the lakehouse.
+
+Finally, for each identified segment, it produces a distinct **TieringSplit**. Each `TieringSplit` precisely defines the specific bucket and the exact offset range that needs to be ingested. This meticulous process ensures incremental, highly efficient synchronization, seamlessly bridging your real-time operational data with your historical, cost-optimized storage.
 
 #### TieringSplit
 
@@ -128,24 +153,12 @@ By breaking each table into these well-defined splits, the Tiering Service can i
 
 The **TieringSourceReader** pulls assigned splits from the enumerator, uses a `TieringSplitReader` to fetch the corresponding records from the Fluss server, and then writes them into the data lake. Its workflow breaks down as follows:
 
-1. **Split Selection**
-
-   The reader picks an assigned `TieringSplit` from its queue.
-
-2. **Reader Dispatch**
-
-   Depending on the split type, it instantiates either:
-
-    - **LogScanner** for `TieringLogSplit` (append-only tables)
-    - **BoundedSplitReader** for `TieringSnapshotSplit` (primary-keyed tables)
-3. **Data Fetch**
-
-   The chosen reader fetches the records defined by the split’s offset or snapshot boundaries from the Fluss server.
-
-4. **Lake Writing**
-
-   Retrieved records are handed off to the lake writer, which persists them into the data lake.
-
+- **Split Selection:** The reader picks an assigned `TieringSplit` from its queue.
+- **Reader Dispatch:** Depending on the split type, it instantiates either:
+  - **LogScanner** for `TieringLogSplit` (append-only tables)
+  - **BoundedSplitReader** for `TieringSnapshotSplit` (primary-keyed tables)
+- **Data Fetch:** The chosen reader fetches the records defined by the split’s offset or snapshot boundaries from the Fluss server.
+- **Lake Writing"** Retrieved records are handed off to the lake writer, which persists them into the data lake.
 
 By cleanly separating split assignment, reader selection, data fetching, and lake writing, the TieringSourceReader ensures scalable, parallel ingestion of streaming and snapshot data into your lakehouse.
 
@@ -191,7 +204,8 @@ By delegating split assignment entirely to the Enumerator, the reader remains li
 
 ![](assets/tiering_service/tiering-committer.png)
 
-The **TieringCommitter** operator wraps up each sync cycle by taking the `WriteResult` outputs from the TieringSourceReader and committing them in two phases—first to the data lake, then back to Fluss—before emitting status events to the Flink coordinator. It leverages two  components:
+The **TieringCommitter** operator wraps up each sync cycle by taking the `WriteResult` outputs from the TieringSourceReader and committing them in two phases:
+first to the data lake, then back to Fluss, before emitting status events to the Flink coordinator. It leverages two  components:
 
 - **LakeCommitter**: Provided by the pluggable `LakeTieringFactory`, this component atomically commits the written files into the lakehouse and returns the new snapshot ID.
 - **FlussTableLakeSnapshotCommitter**: Using that snapshot ID, it updates the Fluss cluster’s tiering table status so that the Fluss server and lakehouse remain in sync.
@@ -207,5 +221,9 @@ This TieringCommitter operator ensures exactly-once consistent synchronization b
 
 ## Conclusion
 
-In this deep dive, we dissected every layer of Fluss’s Tiering Service—starting with the TieringSource (Enumerator, RpcClient, and SplitGenerator), moving through split types and the stateless TieringSourceReader, and exploring the pluggable LakeWriter/LakeCommitter integration. We then saw how the TieringCommitter (with its LakeCommitter and FlussTableLakeSnapshotCommitter) ensures atomic, exactly-once commits across both your data lake and Fluss cluster. Together, these components deliver a robust pipeline that reliably syncs real-time streams and historical snapshots, giving you seamless, scalable consistency between live workloads and analytical storage.
+In this deep dive, we thoroughly explored every facet of Fluss's **Tiering Service**. 
+We began by dissecting the **TieringSource**, understanding the critical roles of its Enumerator, RpcClient, and SplitGenerator. From there, we examined the various split types and the efficiency of the stateless **TieringSourceReader**.
 
+Our journey then led us to the flexible, pluggable integration of the **LakeWriter** and **LakeCommitter**. Finally, we saw how the **TieringCommitter**, with its LakeCommitter and FlussTableLakeSnapshotCommitter, orchestrates **atomic**, **exactly-once commits** across both your data lake and Fluss cluster.
+
+Together, these components form a robust pipeline. This pipeline reliably synchronizes real-time streams with historical snapshots, ensuring **seamless**, **scalable consistency** between your live workloads and analytical storage.
