@@ -31,6 +31,7 @@ import java.math.BigDecimal;
 
 import static com.alibaba.fluss.types.DataTypeChecks.getPrecision;
 
+/** Util class to create {@link IndexedRow} with different data types. */
 public class RowUtils {
 
     // ---- Helper methods to create IndexedRow instances ----
