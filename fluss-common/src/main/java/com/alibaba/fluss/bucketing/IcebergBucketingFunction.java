@@ -17,13 +17,16 @@
 
 package com.alibaba.fluss.bucketing;
 
-import com.alibaba.fluss.utils.MurmurHashUtils;
+import com.alibaba.fluss.shaded.guava32.com.google.common.hash.HashFunction;
+import com.alibaba.fluss.shaded.guava32.com.google.common.hash.Hashing;
 
 /** An implementation of {@link BucketingFunction} to follow Iceberg's bucketing strategy. */
 public class IcebergBucketingFunction implements BucketingFunction {
 
+    private static final HashFunction MURMUR3 = Hashing.murmur3_32_fixed();
+
     @Override
     public int bucketing(byte[] bucketKey, int numBuckets) {
-        return (MurmurHashUtils.hashBytes(bucketKey) & Integer.MAX_VALUE) % numBuckets;
+        return (MURMUR3.hashBytes(bucketKey).asInt() & Integer.MAX_VALUE) % numBuckets;
     }
 }
