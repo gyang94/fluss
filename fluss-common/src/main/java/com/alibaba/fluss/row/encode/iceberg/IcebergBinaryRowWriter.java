@@ -108,6 +108,10 @@ class IcebergBinaryRowWriter {
         cursor += 4;
     }
 
+    public void writeIntAsLong(int value) {
+        writeLong(value);
+    }
+
     public void writeLong(long value) {
         ensureCapacity(8);
         UnsafeUtils.putLong(buffer, cursor, value);
@@ -163,10 +167,6 @@ class IcebergBinaryRowWriter {
     public void writeDecimal(Decimal value, int precision, boolean skipPrefix) {
         byte[] unscaled = value.toUnscaledBytes();
         writeBytes(unscaled, skipPrefix); // Adds 4-byte length prefix before the actual bytes
-    }
-
-    public void writeIntAsLong(int value) {
-        writeLong(value);
     }
 
     private void ensureCapacity(int neededSize) {
