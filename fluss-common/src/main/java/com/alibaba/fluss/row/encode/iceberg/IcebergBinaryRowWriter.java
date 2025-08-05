@@ -27,36 +27,31 @@ import com.alibaba.fluss.utils.UnsafeUtils;
 import java.io.Serializable;
 import java.util.Arrays;
 
-import static com.alibaba.fluss.types.DataTypeChecks.getPrecision;
-
 /**
  * A writer to encode Fluss's {@link com.alibaba.fluss.row.InternalRow} using Iceberg's binary
  * encoding format.
  *
- * <p>The encoding logic is based on Iceberg's Conversions.toByteBuffer() implementation:
- * https://github.com/apache/iceberg/blob/main/api/src/main/java/org/apache/iceberg/types/Conversions.java
- *
- * <p>Key encoding principles from Iceberg's Conversions class:
+ * <p>The encoding logic is to encode different types of keys into bytes array, which will have the
+ * same hash value with iceberg's bucketing hash function.
  *
  * <ul>
- *   <li>All numeric types (int, long, float, double, timestamps) use LITTLE-ENDIAN byte order
+ *   <li>For int type, it is treated as a long value for encoding
+ *   <li>All numeric types (long, float, double, timestamps) use LITTLE-ENDIAN byte order
  *   <li>Decimal types use BIG-ENDIAN byte order
  *   <li>Strings are encoded as UTF-8 bytes
  *   <li>Timestamps are stored as long values (microseconds since epoch)
  * </ul>
  *
  * <p>Note: This implementation uses Fluss's MemorySegment instead of ByteBuffer for performance,
- * but maintains byte-level compatibility with Iceberg's encoding.
+ * but maintains byte-level compatibility.
  */
 class IcebergBinaryRowWriter {
 
-    private final int arity;
     private byte[] buffer;
     private MemorySegment segment;
     private int cursor;
 
     public IcebergBinaryRowWriter(int arity) {
-        this.arity = arity;
         // Conservative initial size to avoid frequent resizing
         int initialSize = 8 + (arity * 8);
         setBuffer(new byte[initialSize]);
@@ -64,24 +59,17 @@ class IcebergBinaryRowWriter {
     }
 
     public void reset() {
-        this.cursor = 0;
         // Clear only the used portion for efficiency
         if (cursor > 0) {
             Arrays.fill(buffer, 0, Math.min(cursor, buffer.length), (byte) 0);
         }
+        this.cursor = 0;
     }
 
     public byte[] toBytes() {
         byte[] result = new byte[cursor];
         System.arraycopy(buffer, 0, result, 0, cursor);
         return result;
-    }
-
-    public void setNullAt(int pos) {
-        // For Iceberg key encoding, null values should not occur
-        // This is validated at the encoder level
-        throw new UnsupportedOperationException(
-                "Null values are not supported in Iceberg key encoding");
     }
 
     public void writeBoolean(boolean value) {
@@ -134,10 +122,10 @@ class IcebergBinaryRowWriter {
         writeString(value, false);
     }
 
-    public void writeString(BinaryString value, boolean skipPrefix) {
+    public void writeString(BinaryString value, boolean skipEncodeLength) {
         // Convert to UTF-8 byte array
         byte[] bytes = BinaryString.encodeUTF8(value.toString());
-        if (!skipPrefix) {
+        if (!skipEncodeLength) {
             // Write length prefix followed by UTF-8 bytes
             writeInt(bytes.length); // 4-byte length prefix
         }
@@ -150,8 +138,8 @@ class IcebergBinaryRowWriter {
         writeBytes(bytes, false);
     }
 
-    public void writeBytes(byte[] bytes, boolean skipPrefix) {
-        if (!skipPrefix) {
+    public void writeBytes(byte[] bytes, boolean skipEncodeLength) {
+        if (!skipEncodeLength) {
             // Write length prefix followed by binary data
             writeInt(bytes.length); // 4-byte length prefix
         }
@@ -160,13 +148,13 @@ class IcebergBinaryRowWriter {
         cursor += bytes.length;
     }
 
-    public void writeDecimal(Decimal value, int precision) {
-        writeDecimal(value, precision, false);
+    public void writeDecimal(Decimal value) {
+        writeDecimal(value, false);
     }
 
-    public void writeDecimal(Decimal value, int precision, boolean skipPrefix) {
+    public void writeDecimal(Decimal value, boolean skipEncodeLength) {
         byte[] unscaled = value.toUnscaledBytes();
-        writeBytes(unscaled, skipPrefix); // Adds 4-byte length prefix before the actual bytes
+        writeBytes(unscaled, skipEncodeLength); // Adds 4-byte length prefix before the actual bytes
     }
 
     private void ensureCapacity(int neededSize) {
@@ -219,9 +207,7 @@ class IcebergBinaryRowWriter {
                 };
 
             case DECIMAL:
-                final int decimalPrecision = getPrecision(fieldType);
-                return (writer, value) ->
-                        writer.writeDecimal((Decimal) value, decimalPrecision, true);
+                return (writer, value) -> writer.writeDecimal((Decimal) value, true);
 
             case STRING:
             case CHAR:

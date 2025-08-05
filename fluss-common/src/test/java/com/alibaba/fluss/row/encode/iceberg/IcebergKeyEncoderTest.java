@@ -23,7 +23,6 @@ import com.alibaba.fluss.types.DataTypes;
 import com.alibaba.fluss.types.RowType;
 
 import org.apache.iceberg.types.Conversions;
-import org.apache.iceberg.types.Type;
 import org.apache.iceberg.types.Types;
 import org.junit.jupiter.api.Test;
 
@@ -46,12 +45,7 @@ import static com.alibaba.fluss.testutils.RowUtils.createRowWithTimestampNtz;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/**
- * Unit tests for {@link IcebergKeyEncoder} to verify the encoding matches Iceberg's format.
- *
- * <p>This test uses Iceberg's actual Conversions class to ensure our encoding is byte-for-byte
- * compatible with Iceberg's implementation.
- */
+/** Unit tests for {@link IcebergKeyEncoder} to verify the encoding matches Iceberg's format. */
 class IcebergKeyEncoderTest {
 
     @Test
@@ -85,20 +79,6 @@ class IcebergKeyEncoderTest {
         // This is the equivalent bytes array which the key should be encoded to.
         byte[] equivalentBytes = toBytes(testValue);
         assertThat(ourEncoded).isEqualTo(equivalentBytes);
-
-        // Encode with Iceberg's implementation
-        ByteBuffer icebergBuffer = Conversions.toByteBuffer(Types.IntegerType.get(), testValue);
-        byte[] icebergEncoded = toByteArray(icebergBuffer);
-
-        // In Iceberg `Conversions` class, it treats the 'testValue' as an integer, the output bytes
-        // array is 4 bytes length. (e.g. icebergEncoded = [42, 0, 0, 0])
-        // But in key encoding, iceberg treats an integer as a long value, the output is a 8 bytes
-        // array. (e.g. ourEncoded = [42, 0, 0, 0, 0, 0, 0, 0])
-        // Thus we need to extract the first 4 bytes first from key encoded bytes array, and then
-        // check the values.
-        byte[] actualContent = Arrays.copyOfRange(ourEncoded, 0, 4);
-
-        assertThat(actualContent).isEqualTo(icebergEncoded);
     }
 
     @Test
@@ -138,18 +118,6 @@ class IcebergKeyEncoderTest {
         // This is the equivalent bytes array which the key should be encoded to.
         byte[] equivalentBytes = testValue.getBytes(StandardCharsets.UTF_8);
         assertThat(ourEncoded).isEqualTo(equivalentBytes);
-
-        // Decode length prefix
-        int length = equivalentBytes.length;
-        byte[] actualContent = Arrays.copyOfRange(ourEncoded, 0, length);
-
-        // Encode with Iceberg's Conversions
-        byte[] expectedContent =
-                toByteArray(Conversions.toByteBuffer(Types.StringType.get(), testValue));
-
-        // Validate length and content
-        assertThat(length).isEqualTo(expectedContent.length);
-        assertThat(actualContent).isEqualTo(expectedContent);
     }
 
     @Test
@@ -168,19 +136,6 @@ class IcebergKeyEncoderTest {
         // This is the equivalent bytes array which the key should be encoded to.
         byte[] equivalentBytes = testValue.unscaledValue().toByteArray();
         assertThat(ourEncoded).isEqualTo(equivalentBytes);
-
-        // Extract the decimal length prefix and bytes from ourEncoded
-        int length = equivalentBytes.length;
-        byte[] actualDecimal = Arrays.copyOfRange(ourEncoded, 0, length);
-
-        // Encode the same value with Iceberg's implementation (no prefix)
-        Type.PrimitiveType decimalType = Types.DecimalType.of(10, 2);
-        ByteBuffer icebergBuffer = Conversions.toByteBuffer(decimalType, testValue);
-        byte[] icebergEncoded = toByteArray(icebergBuffer);
-
-        // Validate that our content (excluding the prefix) matches Iceberg's encoding
-        assertThat(length).isEqualTo(icebergEncoded.length);
-        assertThat(actualDecimal).isEqualTo(icebergEncoded);
     }
 
     @Test
@@ -202,13 +157,6 @@ class IcebergKeyEncoderTest {
         // This is the equivalent bytes array which the key should be encoded to.
         byte[] equivalentBytes = toBytes(micros);
         assertThat(ourEncoded).isEqualTo(equivalentBytes);
-
-        // Encode with Iceberg's implementation
-        ByteBuffer icebergBuffer =
-                Conversions.toByteBuffer(Types.TimestampType.withoutZone(), micros);
-        byte[] icebergEncoded = toByteArray(icebergBuffer);
-
-        assertThat(ourEncoded).isEqualTo(icebergEncoded);
     }
 
     @Test
@@ -227,20 +175,6 @@ class IcebergKeyEncoderTest {
         // This is the equivalent bytes array which the key should be encoded to.
         byte[] equivalentBytes = toBytes(dateValue);
         assertThat(ourEncoded).isEqualTo(equivalentBytes);
-
-        // Encode with Iceberg's implementation
-        ByteBuffer icebergBuffer = Conversions.toByteBuffer(Types.DateType.get(), dateValue);
-        byte[] icebergEncoded = toByteArray(icebergBuffer);
-
-        // In Iceberg `Conversions` class, it treats the 'testValue' as an integer, the output bytes
-        // array is 4 bytes length. (e.g. icebergEncoded = [42, 0, 0, 0])
-        // But in key encoding, iceberg treats an integer as a long value, the output is a 8 bytes
-        // array. (e.g. ourEncoded = [42, 0, 0, 0, 0, 0, 0, 0])
-        // Thus we need to extract the first 4 bytes first from key encoded bytes array, and then
-        // check the values.
-        byte[] actualContent = Arrays.copyOfRange(ourEncoded, 0, 4);
-
-        assertThat(actualContent).isEqualTo(icebergEncoded);
     }
 
     @Test
@@ -259,11 +193,6 @@ class IcebergKeyEncoderTest {
         byte[] ourEncoded = encoder.encodeKey(row);
         byte[] equivalentBytes = toBytes(timeMicros);
         assertThat(ourEncoded).isEqualTo(equivalentBytes);
-        // Encode with Iceberg's implementation (expects microseconds as long)
-        ByteBuffer icebergBuffer = Conversions.toByteBuffer(Types.TimeType.get(), timeMicros);
-        byte[] icebergEncoded = toByteArray(icebergBuffer);
-
-        assertThat(ourEncoded).isEqualTo(icebergEncoded);
     }
 
     @Test
@@ -277,19 +206,7 @@ class IcebergKeyEncoderTest {
 
         // Encode with our implementation
         byte[] ourEncoded = encoder.encodeKey(row);
-
-        // Decode length prefix
-        int length = testValue.length;
-        byte[] actualContent = Arrays.copyOfRange(ourEncoded, 0, length);
-
-        // Encode using Iceberg's Conversions (input should be ByteBuffer)
-        ByteBuffer icebergBuffer =
-                Conversions.toByteBuffer(Types.BinaryType.get(), ByteBuffer.wrap(testValue));
-        byte[] expectedContent = toByteArray(icebergBuffer);
-
-        // Validate length and content
-        assertThat(length).isEqualTo(expectedContent.length);
-        assertThat(actualContent).isEqualTo(expectedContent);
+        assertThat(ourEncoded).isEqualTo(testValue);
     }
 
     // Helper method to convert ByteBuffer to byte array

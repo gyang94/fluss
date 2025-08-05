@@ -31,7 +31,7 @@ import java.util.Arrays;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Unit tests for {@link IcebergBinaryRowWriter}. */
-public class IcebergBinaryRowWriterTest {
+class IcebergBinaryRowWriterTest {
 
     @Test
     void testWriteBoolean() {
@@ -202,7 +202,7 @@ public class IcebergBinaryRowWriterTest {
         Decimal value = Decimal.fromBigDecimal(bigDecimal, 10, 2);
 
         IcebergBinaryRowWriter writer = new IcebergBinaryRowWriter(1);
-        writer.writeDecimal(value, 10);
+        writer.writeDecimal(value);
         byte[] writerBytes = writer.toBytes();
         byte[] expectedBytes = bigDecimal.unscaledValue().toByteArray();
 
@@ -214,7 +214,7 @@ public class IcebergBinaryRowWriterTest {
 
         writer.reset();
 
-        writer.writeDecimal(value, 3, true);
+        writer.writeDecimal(value, true);
         byte[] writerBytesWithoutPrefix = writer.toBytes();
         assertThat(writerBytesWithoutPrefix).isEqualTo(expectedBytes);
     }

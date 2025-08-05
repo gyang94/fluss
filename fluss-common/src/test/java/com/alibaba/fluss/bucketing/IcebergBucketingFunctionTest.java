@@ -17,6 +17,7 @@
 
 package com.alibaba.fluss.bucketing;
 
+import com.alibaba.fluss.row.GenericRow;
 import com.alibaba.fluss.row.encode.iceberg.IcebergKeyEncoder;
 import com.alibaba.fluss.row.indexed.IndexedRow;
 import com.alibaba.fluss.types.DataType;
@@ -38,7 +39,6 @@ import java.util.Collections;
 import static com.alibaba.fluss.testutils.RowUtils.createRowWithBytes;
 import static com.alibaba.fluss.testutils.RowUtils.createRowWithDate;
 import static com.alibaba.fluss.testutils.RowUtils.createRowWithDecimal;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithInt;
 import static com.alibaba.fluss.testutils.RowUtils.createRowWithLong;
 import static com.alibaba.fluss.testutils.RowUtils.createRowWithString;
 import static com.alibaba.fluss.testutils.RowUtils.createRowWithTime;
@@ -46,7 +46,7 @@ import static com.alibaba.fluss.testutils.RowUtils.createRowWithTimestampNtz;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Unit test for {@link IcebergBucketingFunction}. */
-public class IcebergBucketingFunctionTest {
+class IcebergBucketingFunctionTest {
 
     @Test
     void testIntegerHash() throws IOException {
@@ -55,7 +55,8 @@ public class IcebergBucketingFunctionTest {
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.INT()}, new String[] {"id"});
 
-        IndexedRow row = createRowWithInt(testValue);
+        //        IndexedRow row = createRowWithInt(testValue);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder = new IcebergKeyEncoder(rowType, Collections.singletonList("id"));
 
         // Encode with our implementation
