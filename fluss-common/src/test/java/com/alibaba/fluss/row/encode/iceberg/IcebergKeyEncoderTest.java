@@ -17,7 +17,10 @@
 
 package com.alibaba.fluss.row.encode.iceberg;
 
-import com.alibaba.fluss.row.indexed.IndexedRow;
+import com.alibaba.fluss.row.BinaryString;
+import com.alibaba.fluss.row.Decimal;
+import com.alibaba.fluss.row.GenericRow;
+import com.alibaba.fluss.row.TimestampNtz;
 import com.alibaba.fluss.types.DataType;
 import com.alibaba.fluss.types.DataTypes;
 import com.alibaba.fluss.types.RowType;
@@ -34,14 +37,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
 
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithBytes;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithDate;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithDecimal;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithInt;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithLong;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithString;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithTime;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithTimestampNtz;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -70,7 +65,7 @@ class IcebergKeyEncoderTest {
         RowType rowType = RowType.of(new DataType[] {DataTypes.INT()}, new String[] {"id"});
 
         int testValue = 42;
-        IndexedRow row = createRowWithInt(testValue);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder = new IcebergKeyEncoder(rowType, Collections.singletonList("id"));
 
         // Encode with our implementation
@@ -86,7 +81,7 @@ class IcebergKeyEncoderTest {
         RowType rowType = RowType.of(new DataType[] {DataTypes.BIGINT()}, new String[] {"id"});
 
         long testValue = 1234567890123456789L;
-        IndexedRow row = createRowWithLong(testValue);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder = new IcebergKeyEncoder(rowType, Collections.singletonList("id"));
 
         // Encode with our implementation
@@ -108,7 +103,7 @@ class IcebergKeyEncoderTest {
         RowType rowType = RowType.of(new DataType[] {DataTypes.STRING()}, new String[] {"name"});
 
         String testValue = "Hello Iceberg, Fluss this side!";
-        IndexedRow row = createRowWithString(testValue);
+        GenericRow row = GenericRow.of(BinaryString.fromString(testValue));
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("name"));
 
@@ -126,7 +121,8 @@ class IcebergKeyEncoderTest {
                 RowType.of(new DataType[] {DataTypes.DECIMAL(10, 2)}, new String[] {"amount"});
 
         BigDecimal testValue = new BigDecimal("123.45");
-        IndexedRow row = createRowWithDecimal(testValue, 10, 2);
+        Decimal decimal = Decimal.fromBigDecimal(testValue, 10, 2);
+        GenericRow row = GenericRow.of(decimal);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("amount"));
 
@@ -148,7 +144,8 @@ class IcebergKeyEncoderTest {
         int nanos = 123456;
         long micros = millis * 1000 + (nanos / 1000);
 
-        IndexedRow row = createRowWithTimestampNtz(millis, nanos);
+        TimestampNtz testValue = TimestampNtz.fromMillis(millis, nanos);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("event_time"));
 
@@ -165,7 +162,7 @@ class IcebergKeyEncoderTest {
 
         // Date value as days since epoch
         int dateValue = 19655; // 2023-10-25
-        IndexedRow row = createRowWithDate(dateValue);
+        GenericRow row = GenericRow.of(dateValue);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("date"));
 
@@ -185,7 +182,8 @@ class IcebergKeyEncoderTest {
         int timeMillis = 34200000;
         long timeMicros = timeMillis * 1000L; // Convert to microseconds for Iceberg
 
-        IndexedRow row = createRowWithTime(timeMillis);
+        GenericRow row = GenericRow.of(timeMillis);
+
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("time"));
 
@@ -200,7 +198,7 @@ class IcebergKeyEncoderTest {
         RowType rowType = RowType.of(new DataType[] {DataTypes.BYTES()}, new String[] {"data"});
 
         byte[] testValue = "Hello i only understand binary data".getBytes();
-        IndexedRow row = createRowWithBytes(testValue);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("data"));
 

@@ -17,9 +17,11 @@
 
 package com.alibaba.fluss.bucketing;
 
+import com.alibaba.fluss.row.BinaryString;
+import com.alibaba.fluss.row.Decimal;
 import com.alibaba.fluss.row.GenericRow;
+import com.alibaba.fluss.row.TimestampNtz;
 import com.alibaba.fluss.row.encode.iceberg.IcebergKeyEncoder;
-import com.alibaba.fluss.row.indexed.IndexedRow;
 import com.alibaba.fluss.types.DataType;
 import com.alibaba.fluss.types.DataTypes;
 import com.alibaba.fluss.types.RowType;
@@ -36,13 +38,6 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithBytes;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithDate;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithDecimal;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithLong;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithString;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithTime;
-import static com.alibaba.fluss.testutils.RowUtils.createRowWithTimestampNtz;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Unit test for {@link IcebergBucketingFunction}. */
@@ -55,7 +50,6 @@ class IcebergBucketingFunctionTest {
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.INT()}, new String[] {"id"});
 
-        //        IndexedRow row = createRowWithInt(testValue);
         GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder = new IcebergKeyEncoder(rowType, Collections.singletonList("id"));
 
@@ -81,7 +75,7 @@ class IcebergBucketingFunctionTest {
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.BIGINT()}, new String[] {"id"});
 
-        IndexedRow row = createRowWithLong(testValue);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder = new IcebergKeyEncoder(rowType, Collections.singletonList("id"));
 
         // Encode with our implementation
@@ -106,7 +100,7 @@ class IcebergBucketingFunctionTest {
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.STRING()}, new String[] {"name"});
 
-        IndexedRow row = createRowWithString(testValue);
+        GenericRow row = GenericRow.of(BinaryString.fromString(testValue));
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("name"));
 
@@ -128,12 +122,13 @@ class IcebergBucketingFunctionTest {
     @Test
     void testDecimalHash() throws IOException {
         BigDecimal testValue = new BigDecimal("123.45");
+        Decimal decimal = Decimal.fromBigDecimal(testValue, 10, 2);
         int bucketNum = 10;
 
         RowType rowType =
                 RowType.of(new DataType[] {DataTypes.DECIMAL(10, 2)}, new String[] {"amount"});
 
-        IndexedRow row = createRowWithDecimal(testValue, 10, 2);
+        GenericRow row = GenericRow.of(decimal);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("amount"));
 
@@ -158,13 +153,13 @@ class IcebergBucketingFunctionTest {
         long millis = 1698235273182L;
         int nanos = 123456;
         long micros = millis * 1000 + (nanos / 1000);
-
+        TimestampNtz testValue = TimestampNtz.fromMillis(millis, nanos);
         int bucketNum = 10;
 
         RowType rowType =
                 RowType.of(new DataType[] {DataTypes.TIMESTAMP(6)}, new String[] {"event_time"});
 
-        IndexedRow row = createRowWithTimestampNtz(millis, nanos);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("event_time"));
 
@@ -189,7 +184,7 @@ class IcebergBucketingFunctionTest {
         int bucketNum = 10;
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.DATE()}, new String[] {"date"});
-        IndexedRow row = createRowWithDate(dateValue);
+        GenericRow row = GenericRow.of(dateValue);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("date"));
 
@@ -217,7 +212,7 @@ class IcebergBucketingFunctionTest {
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.TIME()}, new String[] {"time"});
 
-        IndexedRow row = createRowWithTime(timeMillis);
+        GenericRow row = GenericRow.of(timeMillis);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("time"));
 
@@ -242,7 +237,7 @@ class IcebergBucketingFunctionTest {
 
         RowType rowType = RowType.of(new DataType[] {DataTypes.BYTES()}, new String[] {"data"});
 
-        IndexedRow row = createRowWithBytes(testValue);
+        GenericRow row = GenericRow.of(testValue);
         IcebergKeyEncoder encoder =
                 new IcebergKeyEncoder(rowType, Collections.singletonList("data"));
 

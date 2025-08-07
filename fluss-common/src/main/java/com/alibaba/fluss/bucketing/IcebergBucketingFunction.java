@@ -27,6 +27,12 @@ public class IcebergBucketingFunction implements BucketingFunction {
 
     @Override
     public int bucketing(byte[] bucketKey, int numBuckets) {
+        if (bucketKey == null || bucketKey.length == 0) {
+            throw new IllegalArgumentException("bucketKey must not be null or empty");
+        }
+        if (numBuckets <= 0) {
+            throw new IllegalArgumentException("numBuckets must be positive");
+        }
         return (MURMUR3.hashBytes(bucketKey).asInt() & Integer.MAX_VALUE) % numBuckets;
     }
 }

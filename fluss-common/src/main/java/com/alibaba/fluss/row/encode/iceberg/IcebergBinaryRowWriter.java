@@ -125,13 +125,7 @@ class IcebergBinaryRowWriter {
     public void writeString(BinaryString value, boolean skipEncodeLength) {
         // Convert to UTF-8 byte array
         byte[] bytes = BinaryString.encodeUTF8(value.toString());
-        if (!skipEncodeLength) {
-            // Write length prefix followed by UTF-8 bytes
-            writeInt(bytes.length); // 4-byte length prefix
-        }
-        ensureCapacity(bytes.length); // Ensure space for actual string bytes
-        segment.put(cursor, bytes, 0, bytes.length);
-        cursor += bytes.length;
+        writeByteArray(bytes, skipEncodeLength);
     }
 
     public void writeBytes(byte[] bytes) {
@@ -139,6 +133,10 @@ class IcebergBinaryRowWriter {
     }
 
     public void writeBytes(byte[] bytes, boolean skipEncodeLength) {
+        writeByteArray(bytes, skipEncodeLength);
+    }
+
+    private void writeByteArray(byte[] bytes, boolean skipEncodeLength) {
         if (!skipEncodeLength) {
             // Write length prefix followed by binary data
             writeInt(bytes.length); // 4-byte length prefix
