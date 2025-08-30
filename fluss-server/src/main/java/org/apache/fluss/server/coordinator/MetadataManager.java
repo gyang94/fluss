@@ -34,6 +34,7 @@ import org.apache.fluss.exception.TooManyBucketsException;
 import org.apache.fluss.exception.TooManyPartitionsException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
+import org.apache.fluss.metadata.FlussTableChange;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -61,8 +62,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 
-import static org.apache.fluss.server.utils.TableDescriptorValidation.validateTableDescriptor;
+import static org.apache.fluss.config.FlussConfigUtils.ALTERABLE_CLIENT_OPTIONS;
+import static org.apache.fluss.config.FlussConfigUtils.ALTERABLE_TABLE_CONFIG;
 import static org.apache.fluss.server.utils.TableDescriptorValidation.validateAlterTableProperties;
+import static org.apache.fluss.server.utils.TableDescriptorValidation.validateTableDescriptor;
 
 /** A manager for metadata. */
 public class MetadataManager {
@@ -301,8 +304,11 @@ public class MetadataManager {
                 "Fail to create table " + tablePath);
     }
 
-    public void alterTable(
-            TablePath tablePath, TableDescriptor tableDescriptor, boolean ignoreIfNotExists) {
+    public void alterTableProperties(
+            TablePath tablePath,
+            List<FlussTableChange.SetOption> setOptions,
+            List<FlussTableChange.ResetOption> resetOptions,
+            boolean ignoreIfNotExists) {
 
         if (!databaseExists(tablePath.getDatabaseName())) {
             throw new DatabaseNotExistException(
@@ -318,7 +324,7 @@ public class MetadataManager {
 
         try {
             TableRegistration updatedTableRegistration =
-                    getUpdatedTableRegistration(tablePath, tableDescriptor);
+                    getUpdatedTableRegistration(tablePath, setOptions, resetOptions);
             if (updatedTableRegistration != null) {
                 zookeeperClient.updateTable(tablePath, updatedTableRegistration);
             } else {
@@ -338,39 +344,49 @@ public class MetadataManager {
     }
 
     private TableRegistration getUpdatedTableRegistration(
-            TablePath tablePath, TableDescriptor updateTableDescriptor) {
-        validateAlterTableProperties(updateTableDescriptor);
+            TablePath tablePath,
+            List<FlussTableChange.SetOption> setOptions,
+            List<FlussTableChange.ResetOption> resetOptions) {
 
         TableRegistration existTableReg = getTableRegistration(tablePath);
-        Map<String, String> updateProperties = updateTableDescriptor.getProperties();
-        Map<String, String> updateCustomProperties = updateTableDescriptor.getCustomProperties();
 
         Map<String, String> newProperties = new HashMap<>(existTableReg.properties);
+        Map<String, String> newCustomProperties = new HashMap<>(existTableReg.customProperties);
+
         boolean propertiesChanged = false;
-        for (Map.Entry<String, String> updateProperty : updateProperties.entrySet()) {
-            // only alterable configs can be updated, other properties keep unchanged.
-            if (FlussConfigUtils.ALTERABLE_CONFIG_OPTIONS.contains(updateProperty.getKey())) {
-                String curValue = newProperties.get(updateProperty.getKey());
-                String updatedValue = updateProperty.getValue();
-                // check whether the value was updated
+        boolean customPropertiesChanged = false;
+        for (FlussTableChange.SetOption setOption : setOptions) {
+            String key = setOption.getKey();
+            if (ALTERABLE_TABLE_CONFIG.contains(key)) {
+                // only alterable configs can be updated, other properties keep unchanged.
+                String curValue = newProperties.get(key);
+                String updatedValue = setOption.getValue();
                 if (!updatedValue.equals(curValue)) {
                     propertiesChanged = true;
-                    newProperties.put(updateProperty.getKey(), updateProperty.getValue());
+                    newProperties.put(key, updatedValue);
+                }
+            } else if (ALTERABLE_CLIENT_OPTIONS.contains(key)) {
+                String curValue = newProperties.get(key);
+                String updatedValue = setOption.getValue();
+                if (!updatedValue.equals(curValue)) {
+                    customPropertiesChanged = true;
+                    newCustomProperties.put(key, updatedValue);
                 }
             }
         }
 
-        Map<String, String> newCustomProperties = new HashMap<>(existTableReg.customProperties);
-        boolean customPropertiesChanged = false;
-        for (Map.Entry<String, String> updateCustomProperty : updateCustomProperties.entrySet()) {
-            if (FlussConfigUtils.ALTERABLE_CONFIG_OPTIONS.contains(updateCustomProperty.getKey())) {
-                String curValue = newCustomProperties.get(updateCustomProperty.getKey());
-                String updatedValue = updateCustomProperty.getValue();
-                // check whether the value was updated
-                if (!updatedValue.equals(curValue)) {
+        for (FlussTableChange.ResetOption resetOption : resetOptions) {
+            String key = resetOption.getKey();
+            if (ALTERABLE_TABLE_CONFIG.contains(key)) {
+                // only alterable configs can be updated, other properties keep unchanged.
+                if (newProperties.containsKey(key)) {
+                    propertiesChanged = true;
+                    newProperties.remove(key);
+                }
+            } else if (ALTERABLE_CLIENT_OPTIONS.contains(key)) {
+                if (newCustomProperties.containsKey(key)) {
                     customPropertiesChanged = true;
-                    newCustomProperties.put(
-                            updateCustomProperty.getKey(), updateCustomProperty.getValue());
+                    newCustomProperties.remove(key);
                 }
             }
         }
@@ -379,6 +395,7 @@ public class MetadataManager {
             // if no properties updated, return null to represent no new TableRegistration
             return null;
         }
+        validateAlterTableProperties(newProperties);
         return existTableReg.newProperties(newProperties, newCustomProperties);
     }
 
