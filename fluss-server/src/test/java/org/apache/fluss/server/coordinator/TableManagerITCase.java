@@ -32,6 +32,7 @@ import org.apache.fluss.exception.PartitionNotExistException;
 import org.apache.fluss.exception.SchemaNotExistException;
 import org.apache.fluss.exception.TableAlreadyExistException;
 import org.apache.fluss.exception.TableNotExistException;
+import org.apache.fluss.metadata.AlterTableConfigsOpType;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -48,12 +49,10 @@ import org.apache.fluss.rpc.messages.GetTableSchemaRequest;
 import org.apache.fluss.rpc.messages.ListDatabasesRequest;
 import org.apache.fluss.rpc.messages.MetadataRequest;
 import org.apache.fluss.rpc.messages.MetadataResponse;
+import org.apache.fluss.rpc.messages.PbAlterConfigsRequestInfo;
 import org.apache.fluss.rpc.messages.PbBucketMetadata;
-import org.apache.fluss.rpc.messages.PbFlussTableChange;
 import org.apache.fluss.rpc.messages.PbPartitionMetadata;
-import org.apache.fluss.rpc.messages.PbResetOption;
 import org.apache.fluss.rpc.messages.PbServerNode;
-import org.apache.fluss.rpc.messages.PbSetOption;
 import org.apache.fluss.rpc.messages.PbTableMetadata;
 import org.apache.fluss.rpc.messages.UpdateMetadataRequest;
 import org.apache.fluss.rpc.metrics.ClientMetricGroup;
@@ -89,7 +88,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.apache.fluss.config.ConfigOptions.DEFAULT_LISTENER_NAME;
-import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newAlterTableRequest;
+import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newAlterTableConfigsRequest;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newCreateDatabaseRequest;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newCreateTableRequest;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newDatabaseExistsRequest;
@@ -296,7 +295,7 @@ class TableManagerITCase {
 
         adminGateway
                 .alterTable(
-                        newAlterTableRequest(
+                        newAlterTableConfigsRequest(
                                 tablePath,
                                 alterTableProperties(setProperties, resetProperties),
                                 false))
@@ -760,29 +759,23 @@ class TableManagerITCase {
                 .build();
     }
 
-    private static List<PbFlussTableChange> alterTableProperties(
+    private static List<PbAlterConfigsRequestInfo> alterTableProperties(
             Map<String, String> setProperties, List<String> resetProperties) {
-        List<PbFlussTableChange> res = new ArrayList<>();
+        List<PbAlterConfigsRequestInfo> res = new ArrayList<>();
 
         for (Map.Entry<String, String> entry : setProperties.entrySet()) {
-            PbSetOption pbSetOption = new PbSetOption();
-            pbSetOption.setKey(entry.getKey());
-            pbSetOption.setValue(entry.getValue());
-
-            PbFlussTableChange pbFlussTableChange = new PbFlussTableChange();
-            pbFlussTableChange.setChangeType(PbFlussTableChange.ChangeType.SET_OPTION);
-            pbFlussTableChange.setSetOption(pbSetOption);
-            res.add(pbFlussTableChange);
+            PbAlterConfigsRequestInfo info = new PbAlterConfigsRequestInfo();
+            info.setConfigKey(entry.getKey());
+            info.setConfigValue(entry.getValue());
+            info.setOpType(AlterTableConfigsOpType.SET.toInt());
+            res.add(info);
         }
 
         for (String resetProperty : resetProperties) {
-            PbResetOption pbresetOption = new PbResetOption();
-            pbresetOption.setKey(resetProperty);
-
-            PbFlussTableChange pbFlussTableChange = new PbFlussTableChange();
-            pbFlussTableChange.setChangeType(PbFlussTableChange.ChangeType.RESET_OPTION);
-            pbFlussTableChange.setResetOption(pbresetOption);
-            res.add(pbFlussTableChange);
+            PbAlterConfigsRequestInfo info = new PbAlterConfigsRequestInfo();
+            info.setConfigKey(resetProperty);
+            info.setOpType(AlterTableConfigsOpType.DELETE.toInt());
+            res.add(info);
         }
 
         return res;

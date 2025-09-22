@@ -81,6 +81,7 @@ import org.apache.fluss.rpc.messages.PbAdjustIsrReqForBucket;
 import org.apache.fluss.rpc.messages.PbAdjustIsrReqForTable;
 import org.apache.fluss.rpc.messages.PbAdjustIsrRespForBucket;
 import org.apache.fluss.rpc.messages.PbAdjustIsrRespForTable;
+import org.apache.fluss.rpc.messages.PbAlterConfigsRequestInfo;
 import org.apache.fluss.rpc.messages.PbBucketMetadata;
 import org.apache.fluss.rpc.messages.PbCreateAclRespInfo;
 import org.apache.fluss.rpc.messages.PbDropAclsFilterResult;
@@ -89,7 +90,6 @@ import org.apache.fluss.rpc.messages.PbFetchLogReqForBucket;
 import org.apache.fluss.rpc.messages.PbFetchLogReqForTable;
 import org.apache.fluss.rpc.messages.PbFetchLogRespForBucket;
 import org.apache.fluss.rpc.messages.PbFetchLogRespForTable;
-import org.apache.fluss.rpc.messages.PbFlussTableChange;
 import org.apache.fluss.rpc.messages.PbKeyValue;
 import org.apache.fluss.rpc.messages.PbKvSnapshot;
 import org.apache.fluss.rpc.messages.PbLakeSnapshotForBucket;
@@ -112,9 +112,7 @@ import org.apache.fluss.rpc.messages.PbPutKvReqForBucket;
 import org.apache.fluss.rpc.messages.PbPutKvRespForBucket;
 import org.apache.fluss.rpc.messages.PbRemoteLogSegment;
 import org.apache.fluss.rpc.messages.PbRemotePathAndLocalFile;
-import org.apache.fluss.rpc.messages.PbResetOption;
 import org.apache.fluss.rpc.messages.PbServerNode;
-import org.apache.fluss.rpc.messages.PbSetOption;
 import org.apache.fluss.rpc.messages.PbStopReplicaReqForBucket;
 import org.apache.fluss.rpc.messages.PbStopReplicaRespForBucket;
 import org.apache.fluss.rpc.messages.PbTableBucket;
@@ -242,18 +240,19 @@ public class ServerRpcMessageUtils {
                 pbServerNode.hasRack() ? pbServerNode.getRack() : null);
     }
 
-    public static FlussTableChange toFlussTableChange(PbFlussTableChange pbFlussTableChange) {
-        switch (pbFlussTableChange.getChangeType()) {
-            case SET_OPTION:
-                PbSetOption pbSetOption = pbFlussTableChange.getSetOption();
-                return FlussTableChange.set(pbSetOption.getKey(), pbSetOption.getValue());
-            case RESET_OPTION:
-                PbResetOption pbResetOption = pbFlussTableChange.getResetOption();
-                return FlussTableChange.reset(pbResetOption.getKey());
+    public static FlussTableChange toFlussTableChange(
+            PbAlterConfigsRequestInfo pbAlterConfigsRequestInfo) {
+        switch (pbAlterConfigsRequestInfo.getOpType()) {
+            case 1: // SET_OPTION
+                return FlussTableChange.set(
+                        pbAlterConfigsRequestInfo.getConfigKey(),
+                        pbAlterConfigsRequestInfo.getConfigValue());
+            case 2: // RESET_OPTION
+                return FlussTableChange.reset(pbAlterConfigsRequestInfo.getConfigKey());
             default:
                 throw new IllegalArgumentException(
-                        "Unsupported fluss table change type "
-                                + pbFlussTableChange.getChangeType());
+                        "Unsupported alter configs op type "
+                                + pbAlterConfigsRequestInfo.getOpType());
         }
     }
 

@@ -17,13 +17,34 @@
 
 package org.apache.fluss.client.utils;
 
+import org.apache.fluss.metadata.AlterTableConfigsOpType;
 import org.apache.fluss.metadata.FlussTableChange;
+import org.apache.fluss.rpc.messages.PbAlterConfigsRequestInfo;
 import org.apache.fluss.rpc.messages.PbFlussTableChange;
 import org.apache.fluss.rpc.messages.PbResetOption;
 import org.apache.fluss.rpc.messages.PbSetOption;
 
 /** Convert {@link FlussTableChange} to proto. */
 public class FlussTableChangeProtoConverter {
+
+    public static PbAlterConfigsRequestInfo toPbAlterConfigsRequestInfo(
+            FlussTableChange tableChange) {
+        PbAlterConfigsRequestInfo info = new PbAlterConfigsRequestInfo();
+        if (tableChange instanceof FlussTableChange.SetOption) {
+            FlussTableChange.SetOption setOption = (FlussTableChange.SetOption) tableChange;
+            info.setConfigKey(setOption.getKey());
+            info.setConfigValue(setOption.getValue());
+            info.setOpType(AlterTableConfigsOpType.SET.toInt());
+        } else if (tableChange instanceof FlussTableChange.ResetOption) {
+            FlussTableChange.ResetOption resetOption = (FlussTableChange.ResetOption) tableChange;
+            info.setConfigKey(resetOption.getKey());
+            info.setOpType(AlterTableConfigsOpType.DELETE.toInt());
+        } else {
+            throw new IllegalArgumentException(
+                    "Unsupported table change: " + tableChange.getClass());
+        }
+        return info;
+    }
 
     public static PbFlussTableChange toProto(FlussTableChange tableChange) {
         PbFlussTableChange proto = new PbFlussTableChange();

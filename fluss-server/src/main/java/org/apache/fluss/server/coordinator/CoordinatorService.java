@@ -44,8 +44,8 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.messages.AdjustIsrRequest;
 import org.apache.fluss.rpc.messages.AdjustIsrResponse;
-import org.apache.fluss.rpc.messages.AlterTableRequest;
-import org.apache.fluss.rpc.messages.AlterTableResponse;
+import org.apache.fluss.rpc.messages.AlterTableConfigsRequest;
+import org.apache.fluss.rpc.messages.AlterTablePropertiesResponse;
 import org.apache.fluss.rpc.messages.CommitKvSnapshotRequest;
 import org.apache.fluss.rpc.messages.CommitKvSnapshotResponse;
 import org.apache.fluss.rpc.messages.CommitLakeTableSnapshotRequest;
@@ -74,7 +74,7 @@ import org.apache.fluss.rpc.messages.LakeTieringHeartbeatRequest;
 import org.apache.fluss.rpc.messages.LakeTieringHeartbeatResponse;
 import org.apache.fluss.rpc.messages.MetadataRequest;
 import org.apache.fluss.rpc.messages.MetadataResponse;
-import org.apache.fluss.rpc.messages.PbFlussTableChange;
+import org.apache.fluss.rpc.messages.PbAlterConfigsRequestInfo;
 import org.apache.fluss.rpc.messages.PbHeartbeatReqForTable;
 import org.apache.fluss.rpc.messages.PbHeartbeatRespForTable;
 import org.apache.fluss.rpc.netty.server.Session;
@@ -302,28 +302,29 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
     }
 
     @Override
-    public CompletableFuture<AlterTableResponse> alterTable(AlterTableRequest request) {
+    public CompletableFuture<AlterTablePropertiesResponse> alterTable(
+            AlterTableConfigsRequest request) {
         TablePath tablePath = toTablePath(request.getTablePath());
         tablePath.validate();
         if (authorizer != null) {
             authorizer.authorize(currentSession(), OperationType.ALTER, Resource.table(tablePath));
         }
 
-        AlterTableResponse alterTableResponse = new AlterTableResponse();
+        AlterTablePropertiesResponse alterTableResponse = new AlterTablePropertiesResponse();
 
         handleFlussTableChanges(
-                tablePath, request.getTableChangesList(), request.isIgnoreIfNotExists());
+                tablePath, request.getConfigChangesList(), request.isIgnoreIfNotExists());
 
         return CompletableFuture.completedFuture(alterTableResponse);
     }
 
     private void handleFlussTableChanges(
             TablePath tablePath,
-            List<PbFlussTableChange> pbFlussTableChanges,
+            List<PbAlterConfigsRequestInfo> configsRequestInfos,
             boolean ignoreIfNotExists) {
 
         List<FlussTableChange> tableChanges =
-                pbFlussTableChanges.stream()
+                configsRequestInfos.stream()
                         .filter(Objects::nonNull)
                         .map(ServerRpcMessageUtils::toFlussTableChange)
                         .collect(Collectors.toList());

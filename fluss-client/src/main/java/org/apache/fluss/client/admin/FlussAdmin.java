@@ -43,7 +43,7 @@ import org.apache.fluss.rpc.RpcClient;
 import org.apache.fluss.rpc.gateway.AdminGateway;
 import org.apache.fluss.rpc.gateway.AdminReadOnlyGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
-import org.apache.fluss.rpc.messages.AlterTableRequest;
+import org.apache.fluss.rpc.messages.AlterTableConfigsRequest;
 import org.apache.fluss.rpc.messages.CreateAclsRequest;
 import org.apache.fluss.rpc.messages.CreateDatabaseRequest;
 import org.apache.fluss.rpc.messages.CreateTableRequest;
@@ -65,7 +65,7 @@ import org.apache.fluss.rpc.messages.ListOffsetsRequest;
 import org.apache.fluss.rpc.messages.ListPartitionInfosRequest;
 import org.apache.fluss.rpc.messages.ListTablesRequest;
 import org.apache.fluss.rpc.messages.ListTablesResponse;
-import org.apache.fluss.rpc.messages.PbFlussTableChange;
+import org.apache.fluss.rpc.messages.PbAlterConfigsRequestInfo;
 import org.apache.fluss.rpc.messages.PbListOffsetsRespForBucket;
 import org.apache.fluss.rpc.messages.PbPartitionSpec;
 import org.apache.fluss.rpc.messages.PbTablePath;
@@ -244,14 +244,14 @@ public class FlussAdmin implements Admin {
     public CompletableFuture<Void> alterTable(
             TablePath tablePath, List<FlussTableChange> tableChanges, boolean ignoreIfNotExists) {
         tablePath.validate();
-        AlterTableRequest request = new AlterTableRequest();
+        AlterTableConfigsRequest request = new AlterTableConfigsRequest();
 
-        List<PbFlussTableChange> pbFlussTableChanges =
+        List<PbAlterConfigsRequestInfo> pbFlussTableChanges =
                 tableChanges.stream()
-                        .map(FlussTableChangeProtoConverter::toProto)
+                        .map(FlussTableChangeProtoConverter::toPbAlterConfigsRequestInfo)
                         .collect(Collectors.toList());
 
-        request.addAllTableChanges(pbFlussTableChanges)
+        request.addAllConfigChanges(pbFlussTableChanges)
                 .setIgnoreIfNotExists(ignoreIfNotExists)
                 .setTablePath()
                 .setDatabaseName(tablePath.getDatabaseName())
