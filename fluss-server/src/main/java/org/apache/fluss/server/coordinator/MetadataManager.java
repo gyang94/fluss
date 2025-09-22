@@ -34,9 +34,9 @@ import org.apache.fluss.exception.TooManyBucketsException;
 import org.apache.fluss.exception.TooManyPartitionsException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
-import org.apache.fluss.metadata.FlussTableChange;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.SchemaInfo;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePartition;
@@ -308,8 +308,8 @@ public class MetadataManager {
 
     public void alterTableProperties(
             TablePath tablePath,
-            List<FlussTableChange.SetOption> setOptions,
-            List<FlussTableChange.ResetOption> resetOptions,
+            List<TableChange.SetOption> setOptions,
+            List<TableChange.ResetOption> resetOptions,
             boolean ignoreIfNotExists) {
 
         if (!databaseExists(tablePath.getDatabaseName())) {
@@ -347,8 +347,8 @@ public class MetadataManager {
 
     private TableRegistration getUpdatedTableRegistration(
             TablePath tablePath,
-            List<FlussTableChange.SetOption> setOptions,
-            List<FlussTableChange.ResetOption> resetOptions) {
+            List<TableChange.SetOption> setOptions,
+            List<TableChange.ResetOption> resetOptions) {
 
         TableRegistration existTableReg = getTableRegistration(tablePath);
 
@@ -357,7 +357,7 @@ public class MetadataManager {
 
         boolean propertiesChanged = false;
         boolean customPropertiesChanged = false;
-        for (FlussTableChange.SetOption setOption : setOptions) {
+        for (TableChange.SetOption setOption : setOptions) {
             String key = setOption.getKey();
             if (ALTERABLE_TABLE_CONFIG.contains(key)) {
                 // only alterable configs can be updated, other properties keep unchanged.
@@ -377,7 +377,7 @@ public class MetadataManager {
             }
         }
 
-        for (FlussTableChange.ResetOption resetOption : resetOptions) {
+        for (TableChange.ResetOption resetOption : resetOptions) {
             String key = resetOption.getKey();
             if (ALTERABLE_TABLE_CONFIG.contains(key)) {
                 // only alterable configs can be updated, other properties keep unchanged.

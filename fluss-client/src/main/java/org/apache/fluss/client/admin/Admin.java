@@ -43,12 +43,12 @@ import org.apache.fluss.exception.TooManyBucketsException;
 import org.apache.fluss.exception.TooManyPartitionsException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
-import org.apache.fluss.metadata.FlussTableChange;
 import org.apache.fluss.metadata.PartitionInfo;
 import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
@@ -253,7 +253,7 @@ public interface Admin extends AutoCloseable {
      *     TableNotExistException.
      */
     CompletableFuture<Void> alterTable(
-            TablePath tablePath, List<FlussTableChange> tableChanges, boolean ignoreIfNotExists);
+            TablePath tablePath, List<TableChange> tableChanges, boolean ignoreIfNotExists);
 
     /**
      * List all partitions in the given table in fluss cluster asynchronously.

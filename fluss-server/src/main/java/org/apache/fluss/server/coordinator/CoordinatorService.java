@@ -32,11 +32,11 @@ import org.apache.fluss.fs.FileSystem;
 import org.apache.fluss.lake.lakestorage.LakeCatalog;
 import org.apache.fluss.metadata.DataLakeFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
-import org.apache.fluss.metadata.FlussTableChange;
 import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePartition;
@@ -323,20 +323,20 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
             List<PbAlterConfigsRequestInfo> configsRequestInfos,
             boolean ignoreIfNotExists) {
 
-        List<FlussTableChange> tableChanges =
+        List<TableChange> tableChanges =
                 configsRequestInfos.stream()
                         .filter(Objects::nonNull)
                         .map(ServerRpcMessageUtils::toFlussTableChange)
                         .collect(Collectors.toList());
 
-        List<FlussTableChange.SetOption> setOptions = new ArrayList<>();
-        List<FlussTableChange.ResetOption> resetOptions = new ArrayList<>();
+        List<TableChange.SetOption> setOptions = new ArrayList<>();
+        List<TableChange.ResetOption> resetOptions = new ArrayList<>();
 
-        for (FlussTableChange tableChange : tableChanges) {
-            if (tableChange instanceof FlussTableChange.SetOption) {
-                setOptions.add((FlussTableChange.SetOption) tableChange);
-            } else if (tableChange instanceof FlussTableChange.ResetOption) {
-                resetOptions.add((FlussTableChange.ResetOption) tableChange);
+        for (TableChange tableChange : tableChanges) {
+            if (tableChange instanceof TableChange.SetOption) {
+                setOptions.add((TableChange.SetOption) tableChange);
+            } else if (tableChange instanceof TableChange.ResetOption) {
+                resetOptions.add((TableChange.ResetOption) tableChange);
             }
             // add more FlussTableChange type
         }

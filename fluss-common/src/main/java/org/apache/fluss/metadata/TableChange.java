@@ -19,8 +19,8 @@ package org.apache.fluss.metadata;
 
 import java.util.Objects;
 
-/** {@link FlussTableChange} represents the modification of the Fluss Table. */
-public interface FlussTableChange {
+/** {@link TableChange} represents the modification of the Fluss Table. */
+public interface TableChange {
 
     static SetOption set(String key, String value) {
         return new SetOption(key, value);
@@ -39,7 +39,7 @@ public interface FlussTableChange {
      *    ALTER TABLE &lt;table_name&gt; SET '&lt;key&gt;' = '&lt;value&gt;';
      * </pre>
      */
-    class SetOption implements FlussTableChange {
+    class SetOption implements TableChange {
 
         private final String key;
         private final String value;
@@ -91,7 +91,7 @@ public interface FlussTableChange {
      *    ALTER TABLE &lt;table_name&gt; RESET '&lt;key&gt;'
      * </pre>
      */
-    class ResetOption implements FlussTableChange {
+    class ResetOption implements TableChange {
 
         private final String key;
 

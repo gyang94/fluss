@@ -28,13 +28,13 @@ import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.exception.LeaderNotAvailableException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
-import org.apache.fluss.metadata.FlussTableChange;
 import org.apache.fluss.metadata.PartitionInfo;
 import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
@@ -242,7 +242,7 @@ public class FlussAdmin implements Admin {
 
     @Override
     public CompletableFuture<Void> alterTable(
-            TablePath tablePath, List<FlussTableChange> tableChanges, boolean ignoreIfNotExists) {
+            TablePath tablePath, List<TableChange> tableChanges, boolean ignoreIfNotExists) {
         tablePath.validate();
         AlterTableConfigsRequest request = new AlterTableConfigsRequest();
 

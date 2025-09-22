@@ -48,7 +48,6 @@ import org.apache.fluss.fs.FsPathAndFileName;
 import org.apache.fluss.metadata.DataLakeFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
-import org.apache.fluss.metadata.FlussTableChange;
 import org.apache.fluss.metadata.KvFormat;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.PartitionInfo;
@@ -56,6 +55,7 @@ import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
@@ -229,8 +229,8 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .customProperties(updateCustomProperties)
                         .build();
 
-        List<FlussTableChange> tableChanges = new ArrayList<>();
-        FlussTableChange tableChange = FlussTableChange.set("client.connect-timeout", "240s");
+        List<TableChange> tableChanges = new ArrayList<>();
+        TableChange tableChange = TableChange.set("client.connect-timeout", "240s");
         tableChanges.add(tableChange);
         // alter table
         admin.alterTable(tablePath, tableChanges, false).get();

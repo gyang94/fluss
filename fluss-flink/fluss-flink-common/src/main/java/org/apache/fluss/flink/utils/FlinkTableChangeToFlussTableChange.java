@@ -17,19 +17,22 @@
 
 package org.apache.fluss.flink.utils;
 
-import org.apache.fluss.metadata.FlussTableChange;
+import org.apache.fluss.metadata.TableChange;
 
-import org.apache.flink.table.catalog.TableChange;
-
-/** convert Flink's TableChange class to {@link FlussTableChange}. */
+/** convert Flink's TableChange class to {@link TableChange}. */
 public class FlinkTableChangeToFlussTableChange {
 
-    public static FlussTableChange toFlussTableChange(TableChange tableChange) {
-        FlussTableChange flussTableChange = null;
-        if (tableChange instanceof TableChange.SetOption) {
-            flussTableChange = convertSetOption((TableChange.SetOption) tableChange);
-        } else if (tableChange instanceof TableChange.ResetOption) {
-            flussTableChange = convertResetOption((TableChange.ResetOption) tableChange);
+    public static TableChange toFlussTableChange(
+            org.apache.flink.table.catalog.TableChange tableChange) {
+        TableChange flussTableChange = null;
+        if (tableChange instanceof org.apache.flink.table.catalog.TableChange.SetOption) {
+            flussTableChange =
+                    convertSetOption(
+                            (org.apache.flink.table.catalog.TableChange.SetOption) tableChange);
+        } else if (tableChange instanceof org.apache.flink.table.catalog.TableChange.ResetOption) {
+            flussTableChange =
+                    convertResetOption(
+                            (org.apache.flink.table.catalog.TableChange.ResetOption) tableChange);
         } else {
             throw new UnsupportedOperationException(
                     String.format("Unsupported flink table change: %s.", tableChange));
@@ -37,13 +40,13 @@ public class FlinkTableChangeToFlussTableChange {
         return flussTableChange;
     }
 
-    private static FlussTableChange.SetOption convertSetOption(
-            TableChange.SetOption flinkSetOption) {
-        return FlussTableChange.set(flinkSetOption.getKey(), flinkSetOption.getValue());
+    private static TableChange.SetOption convertSetOption(
+            org.apache.flink.table.catalog.TableChange.SetOption flinkSetOption) {
+        return TableChange.set(flinkSetOption.getKey(), flinkSetOption.getValue());
     }
 
-    private static FlussTableChange.ResetOption convertResetOption(
-            TableChange.ResetOption flinkResetOption) {
-        return FlussTableChange.reset(flinkResetOption.getKey());
+    private static TableChange.ResetOption convertResetOption(
+            org.apache.flink.table.catalog.TableChange.ResetOption flinkResetOption) {
+        return TableChange.reset(flinkResetOption.getKey());
     }
 }
