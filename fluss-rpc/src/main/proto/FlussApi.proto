@@ -121,7 +121,7 @@ message PbAlterConfigsRequestInfo {
   required int32 op_type = 3; // SET=0, DELETE=1, APPEND=2, SUBTRACT=3
 }
 
-message AlterTablePropertiesResponse {
+message AlterTableConfigsResponse {
 }
 
 

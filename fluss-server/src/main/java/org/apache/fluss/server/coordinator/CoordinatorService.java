@@ -45,7 +45,7 @@ import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.messages.AdjustIsrRequest;
 import org.apache.fluss.rpc.messages.AdjustIsrResponse;
 import org.apache.fluss.rpc.messages.AlterTableConfigsRequest;
-import org.apache.fluss.rpc.messages.AlterTablePropertiesResponse;
+import org.apache.fluss.rpc.messages.AlterTableConfigsResponse;
 import org.apache.fluss.rpc.messages.CommitKvSnapshotRequest;
 import org.apache.fluss.rpc.messages.CommitKvSnapshotResponse;
 import org.apache.fluss.rpc.messages.CommitLakeTableSnapshotRequest;
@@ -302,7 +302,7 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
     }
 
     @Override
-    public CompletableFuture<AlterTablePropertiesResponse> alterTable(
+    public CompletableFuture<AlterTableConfigsResponse> alterTableConfigs(
             AlterTableConfigsRequest request) {
         TablePath tablePath = toTablePath(request.getTablePath());
         tablePath.validate();
@@ -310,7 +310,7 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
             authorizer.authorize(currentSession(), OperationType.ALTER, Resource.table(tablePath));
         }
 
-        AlterTablePropertiesResponse alterTableResponse = new AlterTablePropertiesResponse();
+        AlterTableConfigsResponse alterTableResponse = new AlterTableConfigsResponse();
 
         handleFlussTableChanges(
                 tablePath, request.getConfigChangesList(), request.isIgnoreIfNotExists());
