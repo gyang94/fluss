@@ -64,8 +64,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 
-import static org.apache.fluss.config.FlussConfigUtils.ALTERABLE_CLIENT_OPTIONS;
 import static org.apache.fluss.config.FlussConfigUtils.ALTERABLE_TABLE_CONFIG;
+import static org.apache.fluss.config.FlussConfigUtils.TABLE_OPTIONS;
 import static org.apache.fluss.server.utils.TableDescriptorValidation.validateAlterTableProperties;
 import static org.apache.fluss.server.utils.TableDescriptorValidation.validateTableDescriptor;
 
@@ -367,15 +367,20 @@ public class MetadataManager {
         boolean customPropertiesChanged = false;
         for (TableChange.SetOption setOption : setOptions) {
             String key = setOption.getKey();
-            if (ALTERABLE_TABLE_CONFIG.contains(key)) {
-                // only alterable configs can be updated, other properties keep unchanged.
-                String curValue = newProperties.get(key);
-                String updatedValue = setOption.getValue();
-                if (!updatedValue.equals(curValue)) {
-                    propertiesChanged = true;
-                    newProperties.put(key, updatedValue);
+            if (TABLE_OPTIONS.containsKey(key)) {
+                if (ALTERABLE_TABLE_CONFIG.contains(key)) {
+                    // only alterable configs can be updated, other properties keep unchanged.
+                    String curValue = newProperties.get(key);
+                    String updatedValue = setOption.getValue();
+                    if (!updatedValue.equals(curValue)) {
+                        propertiesChanged = true;
+                        newProperties.put(key, updatedValue);
+                    }
+                } else {
+                    LOG.warn("The table option {} is not allowed to change, ignore it", key);
                 }
-            } else if (ALTERABLE_CLIENT_OPTIONS.contains(key)) {
+            } else {
+                // all remaining options are stored in customized properties
                 String curValue = newProperties.get(key);
                 String updatedValue = setOption.getValue();
                 if (!updatedValue.equals(curValue)) {
@@ -387,13 +392,15 @@ public class MetadataManager {
 
         for (TableChange.ResetOption resetOption : resetOptions) {
             String key = resetOption.getKey();
-            if (ALTERABLE_TABLE_CONFIG.contains(key)) {
-                // only alterable configs can be updated, other properties keep unchanged.
-                if (newProperties.containsKey(key)) {
-                    propertiesChanged = true;
-                    newProperties.remove(key);
+            if (TABLE_OPTIONS.containsKey(key)) {
+                if (ALTERABLE_TABLE_CONFIG.contains(key)) {
+                    // only alterable configs can be updated, other properties keep unchanged.
+                    if (newProperties.containsKey(key)) {
+                        propertiesChanged = true;
+                        newProperties.remove(key);
+                    }
                 }
-            } else if (ALTERABLE_CLIENT_OPTIONS.contains(key)) {
+            } else {
                 if (newCustomProperties.containsKey(key)) {
                     customPropertiesChanged = true;
                     newCustomProperties.remove(key);
