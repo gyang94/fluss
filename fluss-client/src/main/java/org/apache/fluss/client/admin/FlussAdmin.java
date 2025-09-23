@@ -256,7 +256,7 @@ public class FlussAdmin implements Admin {
                 .setTablePath()
                 .setDatabaseName(tablePath.getDatabaseName())
                 .setTableName(tablePath.getTableName());
-        return gateway.alterTable(request).thenApply(r -> null);
+        return gateway.alterTableConfigs(request).thenApply(r -> null);
     }
 
     @Override

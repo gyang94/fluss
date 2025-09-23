@@ -346,7 +346,6 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
             metadataManager.alterTableProperties(
                     tablePath, setOptions, resetOptions, ignoreIfNotExists);
         }
-        return;
     }
 
     private TableDescriptor applySystemDefaults(TableDescriptor tableDescriptor) {

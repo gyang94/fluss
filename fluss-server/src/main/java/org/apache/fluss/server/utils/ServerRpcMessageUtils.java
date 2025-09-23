@@ -23,6 +23,7 @@ import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.fs.token.ObtainedSecurityToken;
+import org.apache.fluss.metadata.AlterTableConfigsOpType;
 import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
@@ -242,13 +243,17 @@ public class ServerRpcMessageUtils {
 
     public static TableChange toFlussTableChange(
             PbAlterConfigsRequestInfo pbAlterConfigsRequestInfo) {
-        switch (pbAlterConfigsRequestInfo.getOpType()) {
-            case 1: // SET_OPTION
+        AlterTableConfigsOpType opType =
+                AlterTableConfigsOpType.fromInt(pbAlterConfigsRequestInfo.getOpType());
+        switch (opType) {
+            case SET: // SET_OPTION
                 return TableChange.set(
                         pbAlterConfigsRequestInfo.getConfigKey(),
                         pbAlterConfigsRequestInfo.getConfigValue());
-            case 2: // RESET_OPTION
+            case DELETE: // RESET_OPTION
                 return TableChange.reset(pbAlterConfigsRequestInfo.getConfigKey());
+            case APPEND:
+            case SUBTRACT:
             default:
                 throw new IllegalArgumentException(
                         "Unsupported alter configs op type "

@@ -294,7 +294,7 @@ class TableManagerITCase {
         List<String> resetProperties = new ArrayList<>();
 
         adminGateway
-                .alterTable(
+                .alterTableConfigs(
                         newAlterTableConfigsRequest(
                                 tablePath,
                                 alterTableProperties(setProperties, resetProperties),

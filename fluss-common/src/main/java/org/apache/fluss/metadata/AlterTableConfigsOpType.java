@@ -19,10 +19,10 @@ package org.apache.fluss.metadata;
 
 /** The operation type of altering table configurations. */
 public enum AlterTableConfigsOpType {
-    SET(1),
-    DELETE(2),
-    APPEND(3),
-    SUBTRACT(4);
+    SET(0),
+    DELETE(1),
+    APPEND(2),
+    SUBTRACT(3);
 
     public final int value;
 
