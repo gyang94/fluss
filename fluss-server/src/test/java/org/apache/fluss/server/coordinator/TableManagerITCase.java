@@ -767,14 +767,14 @@ class TableManagerITCase {
             PbAlterConfigsRequestInfo info = new PbAlterConfigsRequestInfo();
             info.setConfigKey(entry.getKey());
             info.setConfigValue(entry.getValue());
-            info.setOpType(AlterTableConfigsOpType.SET.toInt());
+            info.setOpType(AlterTableConfigsOpType.SET.value());
             res.add(info);
         }
 
         for (String resetProperty : resetProperties) {
             PbAlterConfigsRequestInfo info = new PbAlterConfigsRequestInfo();
             info.setConfigKey(resetProperty);
-            info.setOpType(AlterTableConfigsOpType.DELETE.toInt());
+            info.setOpType(AlterTableConfigsOpType.DELETE.value());
             res.add(info);
         }
 

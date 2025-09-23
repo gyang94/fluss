@@ -21,6 +21,7 @@ import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.cluster.TabletServerInfo;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.InvalidAlterTableException;
 import org.apache.fluss.exception.InvalidCoordinatorException;
 import org.apache.fluss.exception.InvalidDatabaseException;
 import org.apache.fluss.exception.InvalidTableException;
@@ -337,8 +338,10 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                 setOptions.add((TableChange.SetOption) tableChange);
             } else if (tableChange instanceof TableChange.ResetOption) {
                 resetOptions.add((TableChange.ResetOption) tableChange);
+            } else {
+                throw new InvalidAlterTableException(
+                        "Unsupported alter table change: " + tableChange);
             }
-            // add more FlussTableChange type
         }
 
         if (!setOptions.isEmpty() || !resetOptions.isEmpty()) {

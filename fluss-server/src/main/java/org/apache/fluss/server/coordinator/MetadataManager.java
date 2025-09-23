@@ -345,7 +345,15 @@ public class MetadataManager {
         }
     }
 
-    private TableRegistration getUpdatedTableRegistration(
+    /**
+     * Get a new TableRegistration with updated properties.
+     *
+     * @param tablePath the table path.
+     * @param setOptions the options to set.
+     * @param resetOptions the options to reset.
+     * @return the updated TableRegistration, or null if no properties updated.
+     */
+    private @Nullable TableRegistration getUpdatedTableRegistration(
             TablePath tablePath,
             List<TableChange.SetOption> setOptions,
             List<TableChange.ResetOption> resetOptions) {

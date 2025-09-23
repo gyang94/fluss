@@ -30,11 +30,11 @@ public class FlussTableChangeProtoConverter {
             TableChange.SetOption setOption = (TableChange.SetOption) tableChange;
             info.setConfigKey(setOption.getKey());
             info.setConfigValue(setOption.getValue());
-            info.setOpType(AlterTableConfigsOpType.SET.toInt());
+            info.setOpType(AlterTableConfigsOpType.SET.value());
         } else if (tableChange instanceof TableChange.ResetOption) {
             TableChange.ResetOption resetOption = (TableChange.ResetOption) tableChange;
             info.setConfigKey(resetOption.getKey());
-            info.setOpType(AlterTableConfigsOpType.DELETE.toInt());
+            info.setOpType(AlterTableConfigsOpType.DELETE.value());
         } else {
             throw new IllegalArgumentException(
                     "Unsupported table change: " + tableChange.getClass());

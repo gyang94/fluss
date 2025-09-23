@@ -237,13 +237,13 @@ public interface Admin extends AutoCloseable {
     CompletableFuture<List<String>> listTables(String databaseName);
 
     /**
-     * Alter a table.
+     * Alter a table with the given {@code tableChanges}.
      *
      * <p>The following exceptions can be anticipated when calling {@code get()} on returned future.
      *
      * <ul>
      *   <li>{@link DatabaseNotExistException} when the database does not exist.
-     *   <li>{@link TableNotExistException} when the table does not exist, if ignoreIfNotExists is
+     *   <li>{@link TableNotExistException} when the table does not exist, and ignoreIfNotExists is
      *       false.
      * </ul>
      *

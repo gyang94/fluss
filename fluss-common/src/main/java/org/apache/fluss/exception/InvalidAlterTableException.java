@@ -15,38 +15,17 @@
  * limitations under the License.
  */
 
-package org.apache.fluss.metadata;
+package org.apache.fluss.exception;
 
-/** The operation type of altering table configurations. */
-public enum AlterTableConfigsOpType {
-    SET(0),
-    DELETE(1),
-    APPEND(2),
-    SUBTRACT(3);
+/** Exception for invalid alter table. */
+public class InvalidAlterTableException extends ApiException {
+    private static final long serialVersionUID = 1L;
 
-    public final int value;
-
-    AlterTableConfigsOpType(int value) {
-        this.value = value;
+    public InvalidAlterTableException(String message) {
+        this(message, null);
     }
 
-    public static AlterTableConfigsOpType fromInt(int opType) {
-        switch (opType) {
-            case 0:
-                return SET;
-            case 1:
-                return DELETE;
-            case 2:
-                return APPEND;
-            case 3:
-                return SUBTRACT;
-            default:
-                throw new IllegalArgumentException(
-                        "Unsupported AlterTableConfigsOpType: " + opType);
-        }
-    }
-
-    public int value() {
-        return this.value;
+    public InvalidAlterTableException(String message, Throwable cause) {
+        super(message, cause);
     }
 }
