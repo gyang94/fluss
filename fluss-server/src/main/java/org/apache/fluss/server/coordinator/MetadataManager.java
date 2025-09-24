@@ -36,7 +36,6 @@ import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.SchemaInfo;
-import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePartition;
@@ -58,14 +57,13 @@ import javax.annotation.Nullable;
 
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
 
-import static org.apache.fluss.config.FlussConfigUtils.ALTERABLE_TABLE_CONFIG;
-import static org.apache.fluss.config.FlussConfigUtils.TABLE_OPTIONS;
 import static org.apache.fluss.server.utils.TableDescriptorValidation.validateAlterTableProperties;
 import static org.apache.fluss.server.utils.TableDescriptorValidation.validateTableDescriptor;
 
@@ -308,10 +306,8 @@ public class MetadataManager {
 
     public void alterTableProperties(
             TablePath tablePath,
-            List<TableChange.SetOption> setOptions,
-            List<TableChange.ResetOption> resetOptions,
+            TablePropertyChanges tablePropertyChanges,
             boolean ignoreIfNotExists) {
-
         if (!databaseExists(tablePath.getDatabaseName())) {
             throw new DatabaseNotExistException(
                     "Database " + tablePath.getDatabaseName() + " does not exist.");
@@ -326,11 +322,11 @@ public class MetadataManager {
 
         try {
             TableRegistration updatedTableRegistration =
-                    getUpdatedTableRegistration(tablePath, setOptions, resetOptions);
+                    getUpdatedTableRegistration(tablePath, tablePropertyChanges);
             if (updatedTableRegistration != null) {
                 zookeeperClient.updateTable(tablePath, updatedTableRegistration);
             } else {
-                LOG.info(
+                LOG.debug(
                         "No properties changed when alter table {}, skip update table.", tablePath);
             }
         } catch (Exception e) {
@@ -349,69 +345,35 @@ public class MetadataManager {
      * Get a new TableRegistration with updated properties.
      *
      * @param tablePath the table path.
-     * @param setOptions the options to set.
-     * @param resetOptions the options to reset.
+     * @param tablePropertyChanges the changes for the table properties
      * @return the updated TableRegistration, or null if no properties updated.
      */
     private @Nullable TableRegistration getUpdatedTableRegistration(
-            TablePath tablePath,
-            List<TableChange.SetOption> setOptions,
-            List<TableChange.ResetOption> resetOptions) {
-
+            TablePath tablePath, TablePropertyChanges tablePropertyChanges) {
         TableRegistration existTableReg = getTableRegistration(tablePath);
 
         Map<String, String> newProperties = new HashMap<>(existTableReg.properties);
         Map<String, String> newCustomProperties = new HashMap<>(existTableReg.customProperties);
 
-        boolean propertiesChanged = false;
-        boolean customPropertiesChanged = false;
-        for (TableChange.SetOption setOption : setOptions) {
-            String key = setOption.getKey();
-            if (TABLE_OPTIONS.containsKey(key)) {
-                if (ALTERABLE_TABLE_CONFIG.contains(key)) {
-                    // only alterable configs can be updated, other properties keep unchanged.
-                    String curValue = newProperties.get(key);
-                    String updatedValue = setOption.getValue();
-                    if (!updatedValue.equals(curValue)) {
-                        propertiesChanged = true;
-                        newProperties.put(key, updatedValue);
-                    }
-                } else {
-                    LOG.warn("The table option {} is not allowed to change, ignore it", key);
-                }
-            } else {
-                // all remaining options are stored in customized properties
-                String curValue = newProperties.get(key);
-                String updatedValue = setOption.getValue();
-                if (!updatedValue.equals(curValue)) {
-                    customPropertiesChanged = true;
-                    newCustomProperties.put(key, updatedValue);
-                }
-            }
+        // set properties
+        newProperties.putAll(tablePropertyChanges.tablePropertiesToSet);
+        newCustomProperties.putAll(tablePropertyChanges.customPropertiesToSet);
+
+        // reset properties
+        for (String key : tablePropertyChanges.tablePropertiesToReset) {
+            newProperties.remove(key);
         }
 
-        for (TableChange.ResetOption resetOption : resetOptions) {
-            String key = resetOption.getKey();
-            if (TABLE_OPTIONS.containsKey(key)) {
-                if (ALTERABLE_TABLE_CONFIG.contains(key)) {
-                    // only alterable configs can be updated, other properties keep unchanged.
-                    if (newProperties.containsKey(key)) {
-                        propertiesChanged = true;
-                        newProperties.remove(key);
-                    }
-                }
-            } else {
-                if (newCustomProperties.containsKey(key)) {
-                    customPropertiesChanged = true;
-                    newCustomProperties.remove(key);
-                }
-            }
+        for (String key : tablePropertyChanges.customPropertiesToReset) {
+            newCustomProperties.remove(key);
         }
 
-        if (!propertiesChanged && !customPropertiesChanged) {
-            // if no properties updated, return null to represent no new TableRegistration
+        // no properties change happen
+        if (newProperties.equals(existTableReg.properties)
+                && newCustomProperties.equals(existTableReg.customProperties)) {
             return null;
         }
+
         validateAlterTableProperties(newProperties);
         return existTableReg.newProperties(newProperties, newCustomProperties);
     }
@@ -663,6 +625,64 @@ public class MetadataManager {
             runnable.run();
         } catch (Exception e) {
             throw new FlussRuntimeException(errorMsg, e);
+        }
+    }
+
+    /** To describe the changes of the properties of a table. */
+    public static class TablePropertyChanges {
+
+        private final Map<String, String> tablePropertiesToSet;
+        private final Set<String> tablePropertiesToReset;
+
+        private final Map<String, String> customPropertiesToSet;
+        private final Set<String> customPropertiesToReset;
+
+        private TablePropertyChanges(
+                Map<String, String> tablePropertiesToSet,
+                Set<String> tablePropertiesToReset,
+                Map<String, String> customPropertiesToSet,
+                Set<String> customPropertiesToReset) {
+            this.tablePropertiesToSet = tablePropertiesToSet;
+            this.tablePropertiesToReset = tablePropertiesToReset;
+            this.customPropertiesToSet = customPropertiesToSet;
+            this.customPropertiesToReset = customPropertiesToReset;
+        }
+
+        public static Builder builder() {
+            return new Builder();
+        }
+
+        /** The builder for {@link TablePropertyChanges}. */
+        public static class Builder {
+            private final Map<String, String> tablePropertiesToSet = new HashMap<>();
+            private final Set<String> tablePropertiesToReset = new HashSet<>();
+
+            private final Map<String, String> customPropertiesToSet = new HashMap<>();
+            private final Set<String> customPropertiesToReset = new HashSet<>();
+
+            public void setTableProperty(String key, String value) {
+                tablePropertiesToSet.put(key, value);
+            }
+
+            public void resetTableProperty(String key) {
+                tablePropertiesToReset.add(key);
+            }
+
+            public void setCustomProperty(String key, String value) {
+                customPropertiesToSet.put(key, value);
+            }
+
+            public void resetCustomProperty(String key) {
+                customPropertiesToReset.add(key);
+            }
+
+            public TablePropertyChanges build() {
+                return new TablePropertyChanges(
+                        tablePropertiesToSet,
+                        tablePropertiesToReset,
+                        customPropertiesToSet,
+                        customPropertiesToReset);
+            }
         }
     }
 }

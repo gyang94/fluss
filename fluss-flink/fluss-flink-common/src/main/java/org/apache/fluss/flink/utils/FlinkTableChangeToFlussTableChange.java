@@ -24,7 +24,7 @@ public class FlinkTableChangeToFlussTableChange {
 
     public static TableChange toFlussTableChange(
             org.apache.flink.table.catalog.TableChange tableChange) {
-        TableChange flussTableChange = null;
+        TableChange flussTableChange;
         if (tableChange instanceof org.apache.flink.table.catalog.TableChange.SetOption) {
             flussTableChange =
                     convertSetOption(

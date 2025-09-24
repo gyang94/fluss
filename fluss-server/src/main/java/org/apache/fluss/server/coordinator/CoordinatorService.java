@@ -126,6 +126,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static org.apache.fluss.config.FlussConfigUtils.TABLE_OPTIONS;
 import static org.apache.fluss.rpc.util.CommonRpcMessageUtils.toAclBindingFilters;
 import static org.apache.fluss.rpc.util.CommonRpcMessageUtils.toAclBindings;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.fromTablePath;
@@ -323,6 +324,9 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
             TablePath tablePath,
             List<PbAlterConfigsRequestInfo> configsRequestInfos,
             boolean ignoreIfNotExists) {
+        if (configsRequestInfos.isEmpty()) {
+            return;
+        }
 
         List<TableChange> tableChanges =
                 configsRequestInfos.stream()
@@ -330,25 +334,40 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                         .map(ServerRpcMessageUtils::toFlussTableChange)
                         .collect(Collectors.toList());
 
-        List<TableChange.SetOption> setOptions = new ArrayList<>();
-        List<TableChange.ResetOption> resetOptions = new ArrayList<>();
+        MetadataManager.TablePropertyChanges.Builder propertyChangesBuilder =
+                MetadataManager.TablePropertyChanges.builder();
 
         for (TableChange tableChange : tableChanges) {
             if (tableChange instanceof TableChange.SetOption) {
-                setOptions.add((TableChange.SetOption) tableChange);
+                TableChange.SetOption setOption = (TableChange.SetOption) tableChange;
+                String optionKey = setOption.getKey();
+                if (TABLE_OPTIONS.containsKey(optionKey)) {
+                    // currently, we don't support alter any table options understand by Fluss
+                    throw new InvalidAlterTableException(
+                            "The option '" + optionKey + "' is not supported to alter set.");
+                } else {
+                    // otherwise, it's considered as custom property
+                    propertyChangesBuilder.setCustomProperty(optionKey, setOption.getValue());
+                }
             } else if (tableChange instanceof TableChange.ResetOption) {
-                resetOptions.add((TableChange.ResetOption) tableChange);
+                TableChange.ResetOption resetOption = (TableChange.ResetOption) tableChange;
+                String optionKey = resetOption.getKey();
+                if (TABLE_OPTIONS.containsKey(optionKey)) {
+                    // currently, we don't support alter any table options understand by Fluss
+                    throw new InvalidAlterTableException(
+                            "The option " + optionKey + " is not supported to alter reset.");
+                } else {
+                    // otherwise, it's considered as custom property
+                    propertyChangesBuilder.resetCustomProperty(optionKey);
+                }
             } else {
                 throw new InvalidAlterTableException(
                         "Unsupported alter table change: " + tableChange);
             }
         }
 
-        if (!setOptions.isEmpty() || !resetOptions.isEmpty()) {
-            // handle properties
-            metadataManager.alterTableProperties(
-                    tablePath, setOptions, resetOptions, ignoreIfNotExists);
-        }
+        metadataManager.alterTableProperties(
+                tablePath, propertyChangesBuilder.build(), ignoreIfNotExists);
     }
 
     private TableDescriptor applySystemDefaults(TableDescriptor tableDescriptor) {

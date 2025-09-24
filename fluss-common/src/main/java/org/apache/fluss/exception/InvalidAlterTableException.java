@@ -17,7 +17,7 @@
 
 package org.apache.fluss.exception;
 
-/** Exception for invalid alter table. */
+/** Exception for invalid alter table operation. */
 public class InvalidAlterTableException extends ApiException {
     private static final long serialVersionUID = 1L;
 

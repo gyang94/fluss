@@ -69,7 +69,7 @@ public interface AdminGateway extends AdminReadOnlyGateway {
     /**
      * Alter a table.
      *
-     * @param request the request to alter a table.
+     * @param request the request to alter the configs of a table.
      */
     @RPC(api = ApiKeys.ALTER_TABLE_CONFIGS)
     CompletableFuture<AlterTableConfigsResponse> alterTableConfigs(

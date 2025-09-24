@@ -244,7 +244,7 @@ public class ServerRpcMessageUtils {
     public static TableChange toFlussTableChange(
             PbAlterConfigsRequestInfo pbAlterConfigsRequestInfo) {
         AlterTableConfigsOpType opType =
-                AlterTableConfigsOpType.fromInt(pbAlterConfigsRequestInfo.getOpType());
+                AlterTableConfigsOpType.from(pbAlterConfigsRequestInfo.getOpType());
         switch (opType) {
             case SET: // SET_OPTION
                 return TableChange.set(

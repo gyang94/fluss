@@ -425,7 +425,7 @@ public class FlinkCatalog extends AbstractCatalog {
                 throw new InvalidTableException(t.getMessage());
             } else {
                 throw new CatalogException(
-                        String.format("Failed to create table %s in %s", objectPath, getName()), t);
+                        String.format("Failed to alter table %s in %s", objectPath, getName()), t);
             }
         }
     }
@@ -433,7 +433,10 @@ public class FlinkCatalog extends AbstractCatalog {
     @Override
     public void alterTable(
             ObjectPath objectPath, CatalogBaseTable newTable, boolean ignoreIfNotExist)
-            throws TableNotExistException, CatalogException {}
+            throws TableNotExistException, CatalogException {
+        throw new UnsupportedOperationException(
+                "alterTable(objectPath, newTable, ignoreIfNotExist) method is not supported, please upgrade your Flink to 1.18+. ");
+    }
 
     @SuppressWarnings("checkstyle:WhitespaceAround")
     @Override

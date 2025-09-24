@@ -30,7 +30,7 @@ public enum AlterTableConfigsOpType {
         this.value = value;
     }
 
-    public static AlterTableConfigsOpType fromInt(int opType) {
+    public static AlterTableConfigsOpType from(int opType) {
         switch (opType) {
             case 0:
                 return SET;

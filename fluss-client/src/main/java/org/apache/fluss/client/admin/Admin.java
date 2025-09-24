@@ -26,6 +26,7 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.exception.DatabaseAlreadyExistException;
 import org.apache.fluss.exception.DatabaseNotEmptyException;
 import org.apache.fluss.exception.DatabaseNotExistException;
+import org.apache.fluss.exception.InvalidAlterTableException;
 import org.apache.fluss.exception.InvalidDatabaseException;
 import org.apache.fluss.exception.InvalidPartitionException;
 import org.apache.fluss.exception.InvalidReplicationFactorException;
@@ -245,6 +246,8 @@ public interface Admin extends AutoCloseable {
      *   <li>{@link DatabaseNotExistException} when the database does not exist.
      *   <li>{@link TableNotExistException} when the table does not exist, and ignoreIfNotExists is
      *       false.
+     *   <li>{@link InvalidAlterTableException} if the alter operation is invalid, such as alter set
+     *       a table option which is not supported to modify currently.
      * </ul>
      *
      * @param tablePath The table path of the table.
