@@ -36,12 +36,13 @@ public class FlussConfigUtils {
     public static final String CLIENT_PREFIX = "client.";
     public static final String CLIENT_SECURITY_PREFIX = "client.security.";
 
-    public static final List<String> ALTERABLE_TABLE_CONFIG;
+    public static final List<String> ALTERABLE_TABLE_OPTIONS;
 
     static {
         TABLE_OPTIONS = extractConfigOptions("table.");
         CLIENT_OPTIONS = extractConfigOptions("client.");
-        ALTERABLE_TABLE_CONFIG = Collections.emptyList();
+        ALTERABLE_TABLE_OPTIONS =
+                Collections.singletonList(ConfigOptions.TABLE_DATALAKE_ENABLED.key());
     }
 
     public static boolean isTableStorageConfig(String key) {

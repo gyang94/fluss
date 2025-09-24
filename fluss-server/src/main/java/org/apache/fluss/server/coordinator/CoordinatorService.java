@@ -103,7 +103,6 @@ import org.apache.fluss.utils.IOUtils;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import javax.annotation.Nullable;
-
 import java.io.UncheckedIOException;
 import java.util.HashMap;
 import java.util.List;
@@ -297,10 +296,38 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
             authorizer.authorize(currentSession(), OperationType.ALTER, Resource.table(tablePath));
         }
 
+        TableInfo existTableInfo = metadataManager.getTable(tablePath);
+        TableDescriptor existTableDescriptor = existTableInfo.toTableDescriptor();
+
         metadataManager.alterTableProperties(
                 tablePath,
                 toTablePropertyChanges(request.getConfigChangesList()),
                 request.isIgnoreIfNotExists());
+
+        TableInfo alteredTableInfo = metadataManager.getTable(tablePath);
+        TableDescriptor alteredTableDescriptor = alteredTableInfo.toTableDescriptor();
+        // enable lake table
+        if (!isDataLakeEnabled(existTableDescriptor) && isDataLakeEnabled(alteredTableDescriptor)) {
+            // TODO: should tolerate if the lake exist but matches our schema. This ensures
+            // eventually
+            //  consistent by idempotently creating the table multiple times. See #846
+            // before create table in fluss, we may create in lake
+            try {
+                checkNotNull(lakeCatalog).createTable(tablePath, alteredTableDescriptor);
+            } catch (TableAlreadyExistException e) {
+                throw new LakeTableAlreadyExistException(
+                        String.format(
+                                "The table %s already exists in %s catalog, please "
+                                        + "first drop the table in %s catalog or use a new table name.",
+                                tablePath, dataLakeFormat, dataLakeFormat));
+            }
+            // if the table is lake table, we need to add it to lake table tiering manager
+            lakeTableTieringManager.addNewLakeTable(alteredTableInfo);
+        } else if (isDataLakeEnabled(existTableDescriptor)
+                && !isDataLakeEnabled((alteredTableDescriptor))) {
+            // remove tiering
+            lakeTableTieringManager.removeLakeTable(alteredTableInfo.getTableId());
+        }
 
         return CompletableFuture.completedFuture(new AlterTablePropertiesResponse());
     }
