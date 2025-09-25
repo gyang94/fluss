@@ -50,6 +50,7 @@ import org.apache.fluss.server.zk.data.TableRegistration;
 import org.apache.fluss.shaded.zookeeper3.org.apache.zookeeper.KeeperException;
 import org.apache.fluss.utils.function.RunnableWithException;
 import org.apache.fluss.utils.function.ThrowingRunnable;
+import org.apache.fluss.utils.types.Tuple2;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -309,22 +310,11 @@ public class MetadataManager {
             TablePropertyChanges tablePropertyChanges,
             boolean ignoreIfNotExists) {
         try {
-            // it throws TableNotExistException if the table or database not exists
             TableRegistration tableReg = getTableRegistration(tablePath);
-            SchemaInfo schemaInfo = getLatestSchema(tablePath);
-            // we can't use MetadataManager#getTable here, because it will add the default
-            // lake options to the table properties, which may cause the validation failure
-            TableInfo tableInfo = tableReg.toTableInfo(tablePath, schemaInfo);
-
-            // validate the changes
-            validateAlterTableProperties(
-                    tableInfo,
-                    tablePropertyChanges.tableKeysToChange(),
-                    tablePropertyChanges.customKeysToChange());
-
-            TableDescriptor tableDescriptor = tableInfo.toTableDescriptor();
-            TableDescriptor newDescriptor =
-                    getUpdatedTableDescriptor(tableDescriptor, tablePropertyChanges);
+            Tuple2<TableDescriptor, TableDescriptor> tuple =
+                    validateAndGetUpdatedTableDescriptor(tablePath, tablePropertyChanges);
+            TableDescriptor tableDescriptor = tuple.f0;
+            TableDescriptor newDescriptor = tuple.f1;
 
             if (newDescriptor != null) {
                 // reuse the same validate logic with the createTable() method
@@ -348,6 +338,35 @@ public class MetadataManager {
                 throw (RuntimeException) e;
             } else {
                 throw new FlussRuntimeException("Failed to alter table: " + tablePath, e);
+            }
+        }
+    }
+
+    public Tuple2<TableDescriptor, TableDescriptor> validateAndGetUpdatedTableDescriptor(
+            TablePath tablePath, TablePropertyChanges tablePropertyChanges) {
+        try {
+            // it throws TableNotExistException if the table or database not exists
+            TableRegistration tableReg = getTableRegistration(tablePath);
+            SchemaInfo schemaInfo = getLatestSchema(tablePath);
+            // we can't use MetadataManager#getTable here, because it will add the default
+            // lake options to the table properties, which may cause the validation failure
+            TableInfo tableInfo = tableReg.toTableInfo(tablePath, schemaInfo);
+
+            // validate the changes
+            validateAlterTableProperties(
+                    tableInfo,
+                    tablePropertyChanges.tableKeysToChange(),
+                    tablePropertyChanges.customKeysToChange());
+
+            TableDescriptor tableDescriptor = tableInfo.toTableDescriptor();
+            TableDescriptor newDescriptor =
+                    getUpdatedTableDescriptor(tableDescriptor, tablePropertyChanges);
+            return Tuple2.of(tableDescriptor, newDescriptor);
+        } catch (Exception e) {
+            if (e instanceof TableNotExistException) {
+                throw (TableNotExistException) e;
+            } else {
+                throw (RuntimeException) e;
             }
         }
     }
