@@ -171,24 +171,12 @@ class PaimonTieringITCase extends FlinkPaimonTieringTestBase {
                         0);
             }
 
-            String raw =
-                    "{\"partition_id\":%s,\"bucket_id\":0,\"partition_name\":\"date=%s\",\"log_offset\":3}";
-            List<Long> partitionIds = new ArrayList<>(partitionNameByIds.keySet());
-            Collections.sort(partitionIds);
-            List<String> partitionOffsetStrs = new ArrayList<>();
-
-            for (Long partitionId : partitionIds) {
-                String partitionName = partitionNameByIds.get(partitionId);
-                String partitionOffsetStr = String.format(raw, partitionId, partitionName);
-                partitionOffsetStrs.add(partitionOffsetStr);
-            }
-
-            String res = "[" + String.join(",", partitionOffsetStrs) + "]";
-
             properties =
                     new HashMap<String, String>() {
                         {
-                            put(FLUSS_LAKE_SNAP_BUCKET_OFFSET_PROPERTY, res);
+                            put(
+                                    FLUSS_LAKE_SNAP_BUCKET_OFFSET_PROPERTY,
+                                    getPartitionOffsetStr(partitionNameByIds));
                         }
                     };
             checkSnapshotPropertyInPaimon(partitionedTablePath, properties);
@@ -202,7 +190,6 @@ class PaimonTieringITCase extends FlinkPaimonTieringTestBase {
         TablePath t1 = TablePath.of(DEFAULT_DB, "pkTableAlter");
         Map<String, String> tableProperties = new HashMap<>();
         tableProperties.put(ConfigOptions.TABLE_DATALAKE_ENABLED.key(), "false");
-        tableProperties.put(ConfigOptions.TABLE_DATALAKE_FRESHNESS.key(), "500 ms");
 
         long t1Id = createPkTable(t1, 1, tableProperties, Collections.emptyMap());
 
@@ -317,16 +304,29 @@ class PaimonTieringITCase extends FlinkPaimonTieringTestBase {
                         {
                             put(
                                     FLUSS_LAKE_SNAP_BUCKET_OFFSET_PROPERTY,
-                                    "["
-                                            + "{\"partition_id\":0,\"bucket_id\":0,\"partition_name\":\"date=2025\",\"log_offset\":3},"
-                                            + "{\"partition_id\":1,\"bucket_id\":0,\"partition_name\":\"date=2026\",\"log_offset\":3}"
-                                            + "]");
+                                    getPartitionOffsetStr(partitionNameByIds));
                         }
                     };
             checkSnapshotPropertyInPaimon(partitionedTablePath, properties);
         } finally {
             jobClient.cancel().get();
         }
+    }
+
+    private String getPartitionOffsetStr(Map<Long, String> partitionNameByIds) {
+        String raw =
+                "{\"partition_id\":%s,\"bucket_id\":0,\"partition_name\":\"date=%s\",\"log_offset\":3}";
+        List<Long> partitionIds = new ArrayList<>(partitionNameByIds.keySet());
+        Collections.sort(partitionIds);
+        List<String> partitionOffsetStrs = new ArrayList<>();
+
+        for (Long partitionId : partitionIds) {
+            String partitionName = partitionNameByIds.get(partitionId);
+            String partitionOffsetStr = String.format(raw, partitionId, partitionName);
+            partitionOffsetStrs.add(partitionOffsetStr);
+        }
+
+        return "[" + String.join(",", partitionOffsetStrs) + "]";
     }
 
     @Test

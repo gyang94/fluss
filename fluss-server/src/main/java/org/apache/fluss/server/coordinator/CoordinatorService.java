@@ -21,14 +21,12 @@ import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.cluster.TabletServerInfo;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.exception.InvalidCoordinatorException;
 import org.apache.fluss.exception.InvalidDatabaseException;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.exception.LakeTableAlreadyExistException;
 import org.apache.fluss.exception.SecurityDisabledException;
 import org.apache.fluss.exception.TableAlreadyExistException;
-import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.exception.TableNotPartitionedException;
 import org.apache.fluss.fs.FileSystem;
 import org.apache.fluss.lake.lakestorage.LakeCatalog;
@@ -37,7 +35,6 @@ import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.TableDescriptor;
-import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.messages.AdjustIsrRequest;
@@ -105,7 +102,6 @@ import org.apache.fluss.server.zk.data.TableAssignment;
 import org.apache.fluss.server.zk.data.TableRegistration;
 import org.apache.fluss.utils.IOUtils;
 import org.apache.fluss.utils.concurrent.FutureUtils;
-import org.apache.fluss.utils.types.Tuple2;
 
 import javax.annotation.Nullable;
 
@@ -305,87 +301,15 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
         TablePropertyChanges tablePropertyChanges =
                 toTablePropertyChanges(request.getConfigChangesList());
 
-        try {
-            Tuple2<TableDescriptor, TableDescriptor> tuple =
-                    metadataManager.validateAndGetUpdatedTableDescriptor(
-                            tablePath, tablePropertyChanges);
-            TableDescriptor tableDescriptor = tuple.f0;
-            TableDescriptor newDescriptor = tuple.f1;
+        metadataManager.alterTableProperties(
+                tablePath,
+                tablePropertyChanges,
+                request.isIgnoreIfNotExists(),
+                lakeCatalog,
+                dataLakeFormat,
+                lakeTableTieringManager);
 
-            if (newDescriptor != null) {
-                preAlterTableProperties(tablePath, tableDescriptor, newDescriptor);
-                metadataManager.alterTableProperties(
-                        tablePath, tablePropertyChanges, request.isIgnoreIfNotExists());
-                postAlterTableProperties(tablePath, tableDescriptor);
-            }
-        } catch (Exception e) {
-            if (e instanceof TableNotExistException) {
-                if (!request.isIgnoreIfNotExists()) {
-                    throw (TableNotExistException) e;
-                }
-            } else if (e instanceof RuntimeException) {
-                throw (RuntimeException) e;
-            } else {
-                throw new FlussRuntimeException("Failed to alter table: " + tablePath, e);
-            }
-        }
         return CompletableFuture.completedFuture(new AlterTablePropertiesResponse());
-    }
-
-    private void preAlterTableProperties(
-            TablePath tablePath,
-            TableDescriptor existingTableDescriptor,
-            TableDescriptor updatedDescriptor) {
-
-        mayEnableDataLake(tablePath, existingTableDescriptor, updatedDescriptor);
-        // more pre-alter actions can be added here
-    }
-
-    private void postAlterTableProperties(TablePath tablePath, TableDescriptor tableDescriptor) {
-        mayAddRemoveTiering(tablePath, tableDescriptor);
-        // more post-alter actions can be added here
-    }
-
-    private void mayEnableDataLake(
-            TablePath tablePath, TableDescriptor tableDescriptor, TableDescriptor newDescriptor) {
-        boolean toEnableDataLake =
-                !isDataLakeEnabled(tableDescriptor) && isDataLakeEnabled(newDescriptor);
-        boolean toDisableDataLake =
-                isDataLakeEnabled(tableDescriptor) && !isDataLakeEnabled(newDescriptor);
-
-        // enable lake table
-        if (toEnableDataLake) {
-            // TODO: should tolerate if the lake exist but matches our schema. This ensures
-            // eventually
-            //  consistent by idempotently creating the table multiple times. See #846
-            // before create table in fluss, we may create in lake
-            try {
-                checkNotNull(lakeCatalog).createTable(tablePath, newDescriptor);
-            } catch (TableAlreadyExistException e) {
-                throw new LakeTableAlreadyExistException(
-                        String.format(
-                                "The table %s already exists in %s catalog, please "
-                                        + "first drop the table in %s catalog or use a new table name.",
-                                tablePath, dataLakeFormat, dataLakeFormat));
-            }
-        }
-    }
-
-    private void mayAddRemoveTiering(TablePath tablePath, TableDescriptor tableDescriptor) {
-        TableInfo alteredTableInfo = metadataManager.getTable(tablePath);
-        TableDescriptor alteredDescriptor = alteredTableInfo.toTableDescriptor();
-
-        boolean toEnableDataLake =
-                !isDataLakeEnabled(tableDescriptor) && isDataLakeEnabled(alteredDescriptor);
-        boolean toDisableDataLake =
-                isDataLakeEnabled(tableDescriptor) && !isDataLakeEnabled(alteredDescriptor);
-
-        if (toEnableDataLake) {
-            // if the table is lake table, we need to add it to lake table tiering manager
-            lakeTableTieringManager.addNewLakeTable(alteredTableInfo);
-        } else if (toDisableDataLake) {
-            lakeTableTieringManager.removeLakeTable(alteredTableInfo.getTableId());
-        }
     }
 
     private TableDescriptor applySystemDefaults(TableDescriptor tableDescriptor) {
