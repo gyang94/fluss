@@ -141,7 +141,7 @@ public class RpcMessageTestUtils {
         return createTableRequest;
     }
 
-    public static AlterTableRequest newAlterTablePropertiesRequest(
+    public static AlterTableRequest newAlterTableRequest(
             TablePath tablePath, List<PbAlterConfig> alterConfigs, boolean ignoreIfExists) {
         AlterTableRequest request = new AlterTableRequest();
         request.addAllConfigChanges(alterConfigs)
