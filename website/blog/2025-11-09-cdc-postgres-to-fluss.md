@@ -18,92 +18,91 @@ Ready to see it in action? The diagram below shows our target setup. Let's dive 
 
 ## Prerequisite
 
-### Postgres
+### Postgres and Fluss
 
-You need a running PostgreSQL server with `logical` replication enabled. You can install it via Docker, Homebrew, or by downloading it directly from [postgresql.org](http://postgresql.org/). We will use Homebrew for this demonstration:
-
-```bash
-# Install postgresql
-brew install postgresql
-
-# Start postgres server
-brew services start postgresql
-```
-
-To verify the server is running, use the following command and check that its status is `started`.
-
-```bash
-❯ brew services list
-                        
-Name          Status  User File
-postgresql@14 started yang ~/Library/LaunchAgents/homebrew.mxcl.postgresql@14.plist
-```
-
-Next, we need to create a user with a password and grant the necessary privileges for CDC.
+We can use the following `docker-compose.yaml` to quickly start a Postgres server and Fluss server.
 
 ```sql
-❯ psql
-
-# Execute in PostgresSQL
-CREATE USER postgres WITH SUPERUSER PASSWORD 'postgres';
-ALTER USER postgres WITH SUPERUSER CREATEDB CREATEROLE REPLICATION LOGIN;
+services:
+    #begin Fluss cluster
+    coordinator-server:
+      image: fluss/fluss:0.7.0
+      command: coordinatorServer
+      depends_on:
+        - zookeeper
+      environment:
+        - |
+          FLUSS_PROPERTIES=
+          zookeeper.address: zookeeper:2181
+          bind.listeners: INTERNAL://coordinator-server:0, CLIENT://coordinator-server:9123
+          advertised.listeners: CLIENT://localhost:9123
+          internal.listener.name: INTERNAL
+          remote.data.dir: /tmp/fluss/remote-data
+          # security properties
+          security.protocol.map: CLIENT:PLAINTEXT, INTERNAL:PLAINTEXT
+          super.users: User:admin
+      ports:
+        - "9123:9123"
+    tablet-server:
+      image: fluss/fluss:0.7.0
+      command: tabletServer
+      depends_on:
+        - coordinator-server
+      environment:
+        - |
+          FLUSS_PROPERTIES=
+          zookeeper.address: zookeeper:2181
+          bind.listeners: INTERNAL://tablet-server:0, CLIENT://tablet-server:9123
+          advertised.listeners: CLIENT://localhost:9124
+          internal.listener.name: INTERNAL
+          tablet-server.id: 0
+          kv.snapshot.interval: 0s
+          data.dir: /tmp/fluss/data
+          remote.data.dir: /tmp/fluss/remote-data
+          # security properties
+          security.protocol.map: CLIENT:PLAINTEXT, INTERNAL:PLAINTEXT
+          super.users: User:admin
+      ports:
+        - "9124:9123"
+    zookeeper:
+      restart: always
+      image: zookeeper:3.9.2
+    #end
+    # postgres
+    postgres:
+      image: postgres:14.5
+      container_name: my_postgres
+      environment:
+        POSTGRES_USER: postgres
+        POSTGRES_PASSWORD: postgres
+        POSTGRES_DB: postgres
+      ports:
+        - "5432:5432"
+      volumes:
+        - postgres_data:/var/lib/postgresql/data
+      command:
+        - "postgres"
+        - "-c"
+        - "wal_level=logical"
+        - "-c"
+        - "max_replication_slots=5"
+        - "-c"
+        - "max_wal_senders=5"
+        - "-c"
+        - "hot_standby=on"
+    # end
+volumes:
+  postgres_data:
 ```
 
-CDC requires the WAL level to be set to `logical` or higher. Update the configuration and restart the server for the changes to take effect.
+Run
 
 ```sql
-# Execute in PostgresSQL
-ALTER SYSTEM SET wal_level = logical;
-ALTER SYSTEM SET max_wal_senders = 10;
-ALTER SYSTEM SET max_replication_slots = 10;
-
-# Execute in Command line
-❯ brew services restart postgresql
-
-# After restart, run the following command to verify the change in PostgresSQL.
-SELECT name, setting FROM pg_settings WHERE name IN ('wal_level', 'max_wal_senders', 'max_replication_slots');
-
-         name          | setting
------------------------+---------
- max_replication_slots | 10
- max_wal_senders       | 10
- wal_level             | logical
-(3 rows)
+docker-compose up -d
 ```
 
-### Fluss
+to start Postgres and Fluss containers.
 
-You need a running Fluss 0.7 cluster locally. Follow these steps to set it up:
-
-**Step 1: Download Fluss 0.7**
-
-Download and extract the Fluss 0.7 binary release from the [official site](https://alibaba.github.io/fluss-docs/downloads/).
-
-```bash
-tar -xzf fluss-0.7.0-bin.tar.gz
-cd fluss-0.7.0
-```
-
-**Step 2: Start Fluss Cluster**
-
-Start a local Fluss cluster in standalone mode:
-
-```bash
-# Start Fluss cluster
-${FLUSS_HOME}/bin/local-cluster.sh start
-```
-
-**Step 3: Verify Cluster Status**
-
-Check that the cluster is running:
-
-```bash
-# Check processes
-jps | grep -E "CoordinatorServer|TabletServer"
-
-26004 CoordinatorServer
-26171 TabletServer
-```
 
 ### Flink
 
@@ -169,7 +168,16 @@ Excellent! All components are now set up. Let's build our pipelines.
 
 ### Postgres
 
-Create a table named `orders` in PostgreSQL. We will capture data changes from this table.
+First, enter the my_postgres container and login.
+
+```sql
+docker exec -it my_postgres /bin/bash
+
+# in postgres container 
+psql -U postgres
+```
+
+Then create a table named `orders` in PostgreSQL. We will capture data changes from this table.
 
 ```java
 CREATE TABLE orders (
@@ -351,6 +359,29 @@ Flink SQL> select * from public.orders;
 | +I |        1004 |                    Sarah Davis | 2024-01-18 |       450.00 |
 | +I |        1005 |                   David Wilson | 2024-01-19 |       199.99 |
 | -D |        1004 |                    Sarah Davis | 2024-01-18 |       450.00 |
+```
+
+Nice! How about updating? Let’s try.
+
+```sql
+UPDATE orders SET customer_name = 'Alice Scott' where order_id = '1005';
+```
+
+We can see the `-U/+U` records appended to the Fluss table.
+
+```sql
+Flink SQL> select * from public.orders;
++----+-------------+--------------------------------+------------+--------------+
+| op |    order_id |                  customer_name | order_date | total_amount |
++----+-------------+--------------------------------+------------+--------------+
+| +I |        1001 |                     John Smith | 2024-01-15 |       299.99 |
+| +I |        1002 |                   Emma Johnson | 2024-01-16 |       150.50 |
+| +I |        1003 |                  Michael Brown | 2024-01-17 |        89.99 |
+| +I |        1004 |                    Sarah Davis | 2024-01-18 |       450.00 |
+| +I |        1005 |                   David Wilson | 2024-01-19 |       199.99 |
+| -D |        1004 |                    Sarah Davis | 2024-01-18 |       450.00 |
+| -U |        1005 |                   David Wilson | 2024-01-19 |       199.99 |
+| +U |        1005 |                    Alice Scott | 2024-01-19 |       199.99 |
 ```
 
 And there you have it! We've successfully seen our pipeline in action, capturing inserts, updates, and deletes in real-time and reflecting them precisely within Fluss.
