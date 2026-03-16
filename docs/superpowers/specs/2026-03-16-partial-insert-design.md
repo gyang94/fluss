@@ -58,18 +58,25 @@ Currently, Fluss's `AppendWriter` requires all columns to be sent, forcing clien
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              Client Side                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  Table.getAppendWriter(targetColumns)                                       │
+│  Table.newAppend()                                                          │
+│         │                                                                    │
+│         ▼                                                                    │
+│  Append.partialInsert(targetColumns)                                        │
+│         │    - validation at this point                                     │
+│         │    - returns new Append instance                                  │
+│         ▼                                                                    │
+│  Append.createWriter()                                                      │
 │         │                                                                    │
 │         ▼                                                                    │
 │  AppendWriterImpl.append(row)                                               │
 │         │    - row has targetColumns.length fields                          │
-│         │    - validation at writer creation                                 │
 │         ▼                                                                    │
 │  WriteRecord.forXxxAppend(row, targetColumns)                               │
 │         │                                                                    │
 │         ▼                                                                    │
 │  LogWriteBatch.build()                                                      │
 │         │    - Encode row with projected schema                             │
+│         │    - Use LOG_MAGIC_VALUE_V1                                       │
 │         │    - Set PARTIAL_COLUMNS_FLAG in batch header                     │
 │         │    - Store target columns array in header                         │
 │         ▼                                                                    │
@@ -162,31 +169,152 @@ Target columns are stored as indices but resolved via the write-time schema:
 
 This ensures correctness when columns are added or reordered in future schema versions.
 
+### 3.4 Schema Evolution Edge Cases
+
+**Column Dropped:**
+
+If a column in `targetColumns` was dropped in the current schema:
+```java
+// Write-time schema: (id INT, name STRING, age INT)
+// targetColumns = [0, 2] → ["id", "age"]
+
+// Current schema: (id INT, name STRING)  // age dropped
+// Resolution: "age" not found → skip, only return "id"
+```
+The reader logs a warning and skips the dropped column. The `PartialRow` returns null for the dropped column position.
+
+**Column Renamed:**
+
+If a column was renamed, the reader attempts name-based resolution:
+```java
+// Write-time schema: (id INT, name STRING)
+// targetColumns = [1] → ["name"]
+
+// Current schema: (id INT, full_name STRING)  // name → full_name
+// Resolution: "name" not found in current schema
+//             Return null for this column (data cannot be mapped)
+```
+If a column name from the write-time schema is not found in the current schema, the column data cannot be mapped and returns null. This is safer than position-based fallback which could produce incorrect results if a different column was added at the same position.
+
+**Column Added:**
+
+New columns added after write time:
+```java
+// Write-time schema: (id INT, name STRING)
+// targetColumns = [0, 1]
+
+// Current schema: (id INT, name STRING, email STRING)
+// Resolution: indices 0, 1 map correctly
+//             email (new column) → null in PartialRow
+```
+This is the common case and works correctly.
+
 ## 4. API Design
 
-### 4.1 Table Interface
+### 4.1 Append Interface
+
+Following the existing `Upsert.partialUpdate()` pattern, add `partialInsert()` to the `Append` interface:
+
+```java
+public interface Append {
+    // Existing methods
+    AppendWriter createWriter();
+    <T> TypedAppendWriter<T> createTypedWriter(Class<T> pojoClass);
+
+    // NEW: Apply partial insert columns
+    /**
+     * Apply partial insert columns and returns a new Append instance.
+     *
+     * <p>For append operations, only the specified columns will be written.
+     * Non-target columns will be treated as null when reading.
+     *
+     * <p>Note: If the table has bucket keys, the specified columns must contain
+     * all bucket key columns. All non-target columns must be nullable.
+     *
+     * @param targetColumns the column indexes to partial insert; must not be null or empty
+     * @return a new Append instance with partial insert configured
+     */
+    Append partialInsert(int[] targetColumns);
+
+    /**
+     * @see #partialInsert(int[]) for more details.
+     * @param targetColumnNames the column names to partial insert
+     */
+    Append partialInsert(String... targetColumnNames);
+}
+```
+
+### 4.2 Table Interface
+
+Unchanged - use `newAppend()` to get an `Append` builder:
 
 ```java
 public interface Table {
     // Existing
-    AppendWriter getAppendWriter();
-
-    // NEW: Create a partial insert writer
-    /**
-     * Creates an AppendWriter that writes only the specified columns.
-     *
-     * <p>Non-target columns will be treated as null when reading.
-     *
-     * @param targetColumns the indices of columns to write; must be valid indices
-     * @return an AppendWriter for partial inserts
-     * @throws IllegalArgumentException if targetColumns contains invalid indices,
-     *         duplicates, misses bucket keys, or non-target columns are NOT NULL
-     */
-    AppendWriter getAppendWriter(int[] targetColumns);
+    Append newAppend();
+    // ... other methods
 }
 ```
 
-### 4.2 AppendWriter Interface
+### 4.3 Usage Example
+
+```java
+Table table = connection.getTable(TablePath.of("db", "users"));
+
+// Full row insert (existing)
+AppendWriter fullWriter = table.newAppend().createWriter();
+fullWriter.append(GenericRow.of(1, "Alice", 30, "alice@example.com"));
+
+// Partial insert - only id and name columns (by index)
+AppendWriter partialWriter = table.newAppend()
+    .partialInsert(new int[]{0, 1})
+    .createWriter();
+partialWriter.append(GenericRow.of(2, "Bob"));
+// age and email will be null when reading
+
+// Partial insert - by column name
+AppendWriter partialWriter2 = table.newAppend()
+    .partialInsert("id", "name")
+    .createWriter();
+partialWriter2.append(GenericRow.of(3, "Charlie"));
+```
+
+### 4.4 Validation Rules
+
+At writer creation time:
+
+1. **Non-empty**: targetColumns must not be null or empty
+2. **Valid indices**: All target columns must be valid schema indices
+3. **No duplicates**: Each column index can appear only once
+4. **Bucket keys required**: If table has bucket keys, they must be in target columns
+5. **Nullable non-targets**: All non-target columns must be nullable
+
+```java
+// Error examples:
+
+// Empty array
+table.newAppend().partialInsert(new int[]{});
+// → IllegalArgumentException: targetColumns must not be empty
+
+// Invalid index
+table.newAppend().partialInsert(new int[]{0, 99});
+// → IllegalArgumentException: Invalid column index: 99
+
+// Duplicate
+table.newAppend().partialInsert(new int[]{0, 1, 0});
+// → IllegalArgumentException: Duplicate column index: 0
+
+// Missing bucket key (if 'user_id' is bucket key)
+table.newAppend().partialInsert(new int[]{1, 2});
+// → IllegalArgumentException: Target columns must include bucket key column 'user_id'
+
+// Non-nullable column excluded
+// Schema: (id INT NOT NULL, name STRING, age INT NOT NULL)
+table.newAppend().partialInsert(new int[]{0, 1});
+// → IllegalArgumentException: Non-target column 'age' is NOT NULL, but partial insert requires nullable
+```
+
+### 4.5 AppendWriter Interface
 
 Unchanged - uses same `append(InternalRow)` method:
 
@@ -196,52 +324,20 @@ public interface AppendWriter extends TableWriter {
 }
 ```
 
-For partial writers, `record.getFieldCount()` must equal `targetColumns.length`.
-
-### 4.3 Usage Example
+For partial writers, `record.getFieldCount()` must equal `targetColumns.length`. This validation happens at `append()` call time:
 
 ```java
-Table table = connection.getTable(TablePath.of("db", "users"));
-
-// Full row insert (existing)
-AppendWriter fullWriter = table.getAppendWriter();
-fullWriter.append(GenericRow.of(1, "Alice", 30, "alice@example.com"));
-
-// Partial insert - only id and name columns
-AppendWriter partialWriter = table.getAppendWriter(new int[]{0, 1});
-partialWriter.append(GenericRow.of(2, "Bob"));
-// age and email will be null when reading
-```
-
-### 4.4 Validation Rules
-
-At writer creation time:
-
-1. **Valid indices**: All target columns must be valid schema indices
-2. **No duplicates**: Each column index can appear only once
-3. **Bucket keys required**: If table has bucket keys, they must be in target columns
-4. **Nullable non-targets**: All non-target columns must be nullable
-
-```java
-// Error examples:
-
-// Invalid index
-table.getAppendWriter(new int[]{0, 99});
-// → IllegalArgumentException: Invalid column index: 99
-
-// Duplicate
-table.getAppendWriter(new int[]{0, 1, 0});
-// → IllegalArgumentException: Duplicate column index: 0
-
-// Missing bucket key (if 'user_id' is bucket key)
-table.getAppendWriter(new int[]{1, 2});
-// → IllegalArgumentException: Target columns must include bucket key column 'user_id'
-
-// Non-nullable column excluded
-// Schema: (id INT NOT NULL, name STRING, age INT NOT NULL)
-table.getAppendWriter(new int[]{0, 1});
-// → IllegalArgumentException: Non-target column 'age' is NOT NULL, but partial insert requires nullable
-```
+// In AppendWriterImpl.append()
+public CompletableFuture<AppendResult> append(InternalRow row) {
+    if (targetColumns != null) {
+        checkArgument(row.getFieldCount() == targetColumns.length,
+            "Row field count (%d) must match target columns count (%d)",
+            row.getFieldCount(), targetColumns.length);
+    } else {
+        checkFieldCount(row);  // Existing full row check
+    }
+    // ...
+}
 
 ## 5. Record Format
 
@@ -251,12 +347,12 @@ Add attribute flag and target columns to batch header:
 
 ```java
 public class LogRecordBatchFormat {
-    // Existing attributes
-    public static final int COMPRESSION_MASK = 0x03;
-    public static final int DELETE_RECORD_FLAG = 0x04;
+    // Existing attributes (in attributes byte)
+    // Bit 0: APPEND_ONLY_FLAG_MASK = 0x01
+    // Bits 1-2: COMPRESSION_MASK (unused for log records)
 
-    // NEW: Indicates partial columns present
-    public static final int PARTIAL_COLUMNS_FLAG = 0x08;
+    // NEW: Bit 3 indicates partial columns present
+    public static final byte PARTIAL_COLUMNS_FLAG = 0x08;
 }
 ```
 
@@ -338,12 +434,13 @@ class PartialRow implements InternalRow {
 
 | File | Change |
 |------|--------|
-| `Table.java` | Add `getAppendWriter(int[] targetColumns)` |
+| `Append.java` | Add `partialInsert(int[])` and `partialInsert(String...)` methods |
+| `TableAppend.java` | Implement `partialInsert()` methods, store targetColumns |
 | `AppendWriterImpl.java` | Accept targetColumns, validate, encode projected rows |
 | `WriteRecord.java` | Add targetColumns to append factory methods |
 | `AbstractRowLogWriteBatch.java` | Remove assertion, handle partial rows |
 | `ArrowLogWriteBatch.java` | Remove assertion, handle partial rows |
-| `MemoryLogRecordsBuilder.java` | Support PARTIAL_COLUMNS_FLAG and header extension |
+| `MemoryLogRecordsBuilder.java` | Support V1 magic, PARTIAL_COLUMNS_FLAG and header extension |
 
 ### 6.2 Server-Side Files
 
@@ -353,8 +450,9 @@ class PartialRow implements InternalRow {
 
 | File | Change |
 |------|--------|
-| `LogRecordBatchFormat.java` | Add PARTIAL_COLUMNS_FLAG constant |
-| `DefaultLogRecordBatch.java` | Parse target columns, create PartialRow wrapper |
+| `LogRecordBatchFormat.java` | Add `LOG_MAGIC_VALUE_V1` constant, PARTIAL_COLUMNS_FLAG |
+| `DefaultLogRecordBatch.java` | Support V1 magic, parse target columns, create PartialRow wrapper |
+| `PartialRow.java` | New class in `fluss-common/src/main/java/org/apache/fluss/row/` |
 
 ## 7. Backward Compatibility
 
@@ -364,16 +462,44 @@ No protocol changes required. `ProduceLogRequest` remains unchanged.
 
 ### 7.2 Storage Compatibility
 
+**New Magic Value Required:**
+
+To prevent old readers from silently misinterpreting partial data, partial insert batches will use `LOG_MAGIC_VALUE_V1`:
+
+```java
+// In LogRecordBatchFormat
+public static final byte LOG_MAGIC_VALUE_V0 = 0;
+public static final byte LOG_MAGIC_VALUE_V1 = 1;  // Used for LeaderEpoch support
+```
+
+**Note:** `LOG_MAGIC_VALUE_V1` was already introduced for LeaderEpoch support. `PARTIAL_COLUMNS_FLAG` is an additional attribute that works with V1 batches. Both features require V1, and old V0-only readers will fail on any V1 batch (not just partial inserts) with "unsupported magic version" error.
+
+The current `CURRENT_LOG_MAGIC_VALUE` is still `LOG_MAGIC_VALUE_V0` for backward compatibility. V1 batches are only used for:
+- Batches with LeaderEpoch (existing feature)
+- Partial insert batches (this feature)
+
+**Compatibility Matrix:**
+
 | Reader | Data | Behavior |
 |--------|------|----------|
-| Old | New (partial) | Old reader ignores PARTIAL_COLUMNS_FLAG, may misinterpret row data |
-| New | Old (full) | New reader checks flag, not set → normal full row |
+| Old (V0 only) | New (V1 partial) | **Error**: "unsupported magic version" - fails fast, no silent corruption |
+| New (V0 + V1) | Old (V0 full) | Works - V0 batch has no PARTIAL_COLUMNS_FLAG, normal full row |
+| New (V0 + V1) | New (V1 partial) | Works - parses partial columns, creates PartialRow wrapper |
 
-**Note:** Old readers may produce incorrect results when reading partial data. This is acceptable as partial insert is a new feature - users should upgrade readers when using partial insert.
+**Migration Path:**
+
+1. **Phase 1**: New clients write V0 batches by default, V1 batches only for partial inserts
+2. **Phase 2**: After all readers are upgraded, can optionally switch default to V1
+3. **Rollback**: If needed, disable partial insert feature; new readers still read both V0 and V1
+
+This approach ensures:
+- Old readers fail explicitly rather than silently corrupting data
+- Rolling upgrades work correctly (upgrade readers first, then enable partial insert)
+- No data corruption risk during migration
 
 ### 7.3 Client API Compatibility
 
-Existing `getAppendWriter()` method unchanged. New overload is additive.
+Existing `newAppend().createWriter()` pattern unchanged. New `partialInsert()` method is additive on `Append` interface.
 
 ## 8. Testing
 
@@ -434,8 +560,22 @@ Existing `getAppendWriter()` method unchanged. New overload is additive.
 
 | Question | Resolution |
 |----------|------------|
-| Per-call vs per-writer target columns | Per-writer (decided) |
+| Per-call vs per-writer target columns | Per-writer via `Append.partialInsert()` (decided) |
 | Non-target column read behavior | Return null (decided) |
 | Validation requirements | Non-targets nullable + bucket keys required (decided) |
 | Wire format | Embedded in batch header, no protocol change (decided) |
 | Schema evolution | Indices + schema ID resolution (decided) |
+| Backward compatibility | Use LOG_MAGIC_VALUE_V1 for partial batches (decided) |
+| API pattern | Follow `Upsert.partialUpdate()` builder pattern (decided) |
+| Empty target columns validation | Throw IllegalArgumentException (decided) |
+
+## 11. Appendix: Arrow Format Handling
+
+For Arrow format, partial inserts work naturally:
+
+1. Arrow schema in the batch is the projected schema (only target columns)
+2. Column indices in `targetColumns` array refer to the original table schema
+3. During read, the Arrow batch is read with projected schema
+4. `PartialRow` wrapper maps projected positions to full schema positions
+
+No special handling needed beyond what's described for other formats.
