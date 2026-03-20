@@ -22,6 +22,8 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.RowType;
 
+import javax.annotation.Nullable;
+
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -32,12 +34,24 @@ class TypedAppendWriterImpl<T> implements TypedAppendWriter<T> {
 
     private final AppendWriter delegate;
     private final RowType tableSchema;
-    private final PojoToRowConverter<T> pojoToRowConverter;
+    @Nullable private final RowType targetProjection;
+    private final PojoToRowConverter<T> fullRowConverter;
+    @Nullable private final PojoToRowConverter<T> targetRowConverter;
 
-    TypedAppendWriterImpl(AppendWriter delegate, Class<T> pojoClass, TableInfo tableInfo) {
+    TypedAppendWriterImpl(
+            AppendWriter delegate,
+            Class<T> pojoClass,
+            TableInfo tableInfo,
+            @Nullable int[] targetColumns) {
         this.delegate = delegate;
         this.tableSchema = tableInfo.getRowType();
-        this.pojoToRowConverter = PojoToRowConverter.of(pojoClass, tableSchema, tableSchema);
+        this.targetProjection =
+                targetColumns == null ? null : this.tableSchema.project(targetColumns);
+        this.fullRowConverter = PojoToRowConverter.of(pojoClass, tableSchema, tableSchema);
+        this.targetRowConverter =
+                targetProjection == null
+                        ? null
+                        : PojoToRowConverter.of(pojoClass, tableSchema, targetProjection);
     }
 
     @Override
@@ -50,7 +64,10 @@ class TypedAppendWriterImpl<T> implements TypedAppendWriter<T> {
         if (record instanceof InternalRow) {
             return delegate.append((InternalRow) record);
         }
-        InternalRow row = pojoToRowConverter.toRow(record);
+        InternalRow row =
+                targetProjection == null || targetRowConverter == null
+                        ? fullRowConverter.toRow(record)
+                        : targetRowConverter.toRow(record);
         return delegate.append(row);
     }
 }

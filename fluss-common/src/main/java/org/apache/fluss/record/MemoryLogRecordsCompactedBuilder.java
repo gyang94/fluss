@@ -22,9 +22,12 @@ import org.apache.fluss.memory.AbstractPagedOutputView;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.row.compacted.CompactedRow;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
 
 import static org.apache.fluss.record.LogRecordBatch.CURRENT_LOG_MAGIC_VALUE;
+import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 
 /**
  * Default builder for {@link MemoryLogRecords} of log records in {@link LogFormat#COMPACTED}
@@ -38,8 +41,16 @@ public class MemoryLogRecordsCompactedBuilder extends MemoryLogRecordsRowBuilder
             int writeLimit,
             byte magic,
             AbstractPagedOutputView pagedOutputView,
-            boolean appendOnly) {
-        super(baseLogOffset, schemaId, writeLimit, magic, pagedOutputView, appendOnly);
+            boolean appendOnly,
+            @Nullable int[] targetColumns) {
+        super(
+                baseLogOffset,
+                schemaId,
+                writeLimit,
+                magic,
+                pagedOutputView,
+                appendOnly,
+                targetColumns);
     }
 
     public static MemoryLogRecordsCompactedBuilder builder(
@@ -50,7 +61,26 @@ public class MemoryLogRecordsCompactedBuilder extends MemoryLogRecordsRowBuilder
                 writeLimit,
                 CURRENT_LOG_MAGIC_VALUE,
                 outputView,
-                appendOnly);
+                appendOnly,
+                null);
+    }
+
+    /** Builder with target columns for partial insert. Uses V1 magic for partial batches. */
+    public static MemoryLogRecordsCompactedBuilder builder(
+            int schemaId,
+            int writeLimit,
+            AbstractPagedOutputView outputView,
+            boolean appendOnly,
+            @Nullable int[] targetColumns) {
+        byte magic = targetColumns != null ? LOG_MAGIC_VALUE_V1 : CURRENT_LOG_MAGIC_VALUE;
+        return new MemoryLogRecordsCompactedBuilder(
+                BUILDER_DEFAULT_OFFSET,
+                schemaId,
+                writeLimit,
+                magic,
+                outputView,
+                appendOnly,
+                targetColumns);
     }
 
     @VisibleForTesting
@@ -62,7 +92,7 @@ public class MemoryLogRecordsCompactedBuilder extends MemoryLogRecordsRowBuilder
             AbstractPagedOutputView outputView)
             throws IOException {
         return new MemoryLogRecordsCompactedBuilder(
-                baseLogOffset, schemaId, writeLimit, magic, outputView, false);
+                baseLogOffset, schemaId, writeLimit, magic, outputView, false, null);
     }
 
     @Override

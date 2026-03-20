@@ -24,6 +24,8 @@ import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.record.bytesview.MultiBytesView;
 import org.apache.fluss.utils.crc.Crc32C;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
 
 import static org.apache.fluss.record.LogRecordBatchFormat.BASE_OFFSET_LENGTH;
@@ -32,9 +34,11 @@ import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 import static org.apache.fluss.record.LogRecordBatchFormat.NO_BATCH_SEQUENCE;
 import static org.apache.fluss.record.LogRecordBatchFormat.NO_LEADER_EPOCH;
 import static org.apache.fluss.record.LogRecordBatchFormat.NO_WRITER_ID;
+import static org.apache.fluss.record.LogRecordBatchFormat.PARTIAL_COLUMNS_FLAG;
 import static org.apache.fluss.record.LogRecordBatchFormat.crcOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.lastOffsetDeltaOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSize;
+import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSizeWithPartialColumns;
 import static org.apache.fluss.record.LogRecordBatchFormat.schemaIdOffset;
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 
@@ -50,6 +54,7 @@ public abstract class MemoryLogRecordsRowBuilder<T> implements AutoCloseable {
     protected final AbstractPagedOutputView pagedOutputView;
     protected final MemorySegment firstSegment;
     protected final boolean appendOnly;
+    protected final @Nullable int[] targetColumns;
 
     private BytesView builtBuffer = null;
     private long writerId;
@@ -66,7 +71,19 @@ public abstract class MemoryLogRecordsRowBuilder<T> implements AutoCloseable {
             byte magic,
             AbstractPagedOutputView pagedOutputView,
             boolean appendOnly) {
+        this(baseLogOffset, schemaId, writeLimit, magic, pagedOutputView, appendOnly, null);
+    }
+
+    protected MemoryLogRecordsRowBuilder(
+            long baseLogOffset,
+            int schemaId,
+            int writeLimit,
+            byte magic,
+            AbstractPagedOutputView pagedOutputView,
+            boolean appendOnly,
+            @Nullable int[] targetColumns) {
         this.appendOnly = appendOnly;
+        this.targetColumns = targetColumns;
         checkArgument(
                 schemaId <= Short.MAX_VALUE,
                 "schemaId shouldn't be greater than the max value of short: " + Short.MAX_VALUE);
@@ -82,7 +99,10 @@ public abstract class MemoryLogRecordsRowBuilder<T> implements AutoCloseable {
         this.isClosed = false;
 
         // Skip header initially; will be written in build()
-        int headerSize = recordBatchHeaderSize(magic);
+        int headerSize =
+                targetColumns == null
+                        ? recordBatchHeaderSize(magic)
+                        : recordBatchHeaderSizeWithPartialColumns(magic, targetColumns.length);
         this.pagedOutputView.setPosition(headerSize);
         this.sizeInBytes = headerSize;
     }
@@ -204,9 +224,16 @@ public abstract class MemoryLogRecordsRowBuilder<T> implements AutoCloseable {
         outputView.writeUnsignedInt(0);
 
         outputView.writeShort((short) schemaId);
-        // write attributes (currently only appendOnly flag)
-        outputView.writeBoolean(appendOnly);
-        // skip write attribute byte for now.
+        // write attributes byte with flags
+        byte attributes = 0;
+        if (appendOnly) {
+            attributes |= 0x01;
+        }
+        if (targetColumns != null) {
+            attributes |= PARTIAL_COLUMNS_FLAG;
+        }
+        outputView.writeByte(attributes);
+        // position to lastOffsetDelta
         outputView.setPosition(lastOffsetDeltaOffset(magic));
         if (currentRecordNumber > 0) {
             outputView.writeInt(currentRecordNumber - 1);
@@ -218,6 +245,15 @@ public abstract class MemoryLogRecordsRowBuilder<T> implements AutoCloseable {
         outputView.writeLong(writerId);
         outputView.writeInt(batchSequence);
         outputView.writeInt(currentRecordNumber);
+
+        // Write partial columns metadata if present
+        if (targetColumns != null) {
+            outputView.setPosition(recordBatchHeaderSize(magic));
+            outputView.writeShort((short) targetColumns.length);
+            for (int col : targetColumns) {
+                outputView.writeShort((short) col);
+            }
+        }
 
         // Update crc.
         long crc = Crc32C.compute(pagedOutputView.getWrittenSegments(), schemaIdOffset(magic));

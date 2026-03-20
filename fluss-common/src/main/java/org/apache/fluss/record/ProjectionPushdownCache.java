@@ -30,7 +30,8 @@ import java.util.Objects;
 
 /**
  * A cache for projection pushdown information. The cache key is composed of table id, schema id,
- * and selected column ids. The cache is designed to be shared across different tables and schemas.
+ * the stored partial-batch shape, the resolved latest-schema column ids, and the latest projected
+ * output signature. The cache is designed to be shared across different tables and schemas.
  */
 @ThreadSafe
 public class ProjectionPushdownCache {
@@ -50,26 +51,59 @@ public class ProjectionPushdownCache {
 
     @Nullable
     public ProjectionInfo getProjectionInfo(
-            long tableId, short schemaId, int[] selectedFieldPositions) {
-        ProjectionKey key = new ProjectionKey(tableId, schemaId, selectedFieldPositions);
+            long tableId,
+            short schemaId,
+            @Nullable int[] storedTargetColumns,
+            int[] requestedColumnIds,
+            String requestedOutputSignature) {
+        ProjectionKey key =
+                new ProjectionKey(
+                        tableId,
+                        schemaId,
+                        storedTargetColumns,
+                        requestedColumnIds,
+                        requestedOutputSignature);
         return projectionCache.getIfPresent(key);
     }
 
     public void setProjectionInfo(
-            long tableId, short schemaId, int[] selectedColumnIds, ProjectionInfo projectionInfo) {
-        ProjectionKey key = new ProjectionKey(tableId, schemaId, selectedColumnIds);
+            long tableId,
+            short schemaId,
+            @Nullable int[] storedTargetColumns,
+            int[] requestedColumnIds,
+            String requestedOutputSignature,
+            ProjectionInfo projectionInfo) {
+        ProjectionKey key =
+                new ProjectionKey(
+                        tableId,
+                        schemaId,
+                        storedTargetColumns,
+                        requestedColumnIds,
+                        requestedOutputSignature);
         projectionCache.put(key, projectionInfo);
     }
 
     static final class ProjectionKey {
         private final long tableId;
         private final short schemaId;
-        private final int[] selectedColumnIds;
+        @Nullable private final int[] storedTargetColumns;
+        private final int[] requestedColumnIds;
+        private final String requestedOutputSignature;
 
-        ProjectionKey(long tableId, short schemaId, int[] selectedColumnIds) {
+        ProjectionKey(
+                long tableId,
+                short schemaId,
+                @Nullable int[] storedTargetColumns,
+                int[] requestedColumnIds,
+                String requestedOutputSignature) {
             this.tableId = tableId;
             this.schemaId = schemaId;
-            this.selectedColumnIds = selectedColumnIds;
+            this.storedTargetColumns =
+                    storedTargetColumns == null
+                            ? null
+                            : Arrays.copyOf(storedTargetColumns, storedTargetColumns.length);
+            this.requestedColumnIds = Arrays.copyOf(requestedColumnIds, requestedColumnIds.length);
+            this.requestedOutputSignature = requestedOutputSignature;
         }
 
         @Override
@@ -80,12 +114,19 @@ public class ProjectionPushdownCache {
             ProjectionKey that = (ProjectionKey) o;
             return tableId == that.tableId
                     && schemaId == that.schemaId
-                    && Arrays.equals(selectedColumnIds, that.selectedColumnIds);
+                    && Arrays.equals(storedTargetColumns, that.storedTargetColumns)
+                    && Arrays.equals(requestedColumnIds, that.requestedColumnIds)
+                    && requestedOutputSignature.equals(that.requestedOutputSignature);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(tableId, schemaId, Arrays.hashCode(selectedColumnIds));
+            return Objects.hash(
+                    tableId,
+                    schemaId,
+                    Arrays.hashCode(storedTargetColumns),
+                    Arrays.hashCode(requestedColumnIds),
+                    requestedOutputSignature);
         }
     }
 }

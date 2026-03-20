@@ -25,6 +25,7 @@ import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.row.compacted.CompactedRow;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -45,13 +46,19 @@ public final class CompactedLogWriteBatch extends AbstractRowLogWriteBatch<Compa
             int schemaId,
             int writeLimit,
             AbstractPagedOutputView outputView,
-            long createdMs) {
+            long createdMs,
+            @Nullable int[] targetColumns) {
         super(
                 bucketId,
                 physicalTablePath,
                 createdMs,
                 outputView,
-                MemoryLogRecordsCompactedBuilder.builder(schemaId, writeLimit, outputView, true),
+                targetColumns != null
+                        ? MemoryLogRecordsCompactedBuilder.builder(
+                                schemaId, writeLimit, outputView, true, targetColumns)
+                        : MemoryLogRecordsCompactedBuilder.builder(
+                                schemaId, writeLimit, outputView, true),
+                targetColumns,
                 "Failed to build compacted log record batch.");
     }
 

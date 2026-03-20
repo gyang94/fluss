@@ -32,6 +32,16 @@ public class LogRecordBatchFormat {
     public static final int NO_BATCH_SEQUENCE = -1;
 
     /**
+     * Bit 3 of the attributes byte indicates that partial columns metadata is present in the batch
+     * header. When set, the batch header contains a target columns array after the standard header
+     * fields. This is used by the partial insert feature for log tables.
+     */
+    public static final byte PARTIAL_COLUMNS_FLAG = 0x08;
+
+    private static final int TARGET_COLUMNS_COUNT_LENGTH = 2;
+    private static final int TARGET_COLUMN_INDEX_LENGTH = 2;
+
+    /**
      * Used to indicate an unknown leaderEpoch, which will be the case when the record set is first
      * created by the writer or the magic lower than V1.
      */
@@ -288,5 +298,18 @@ public class LogRecordBatchFormat {
             default:
                 throw new IllegalArgumentException("Unsupported magic value " + magic);
         }
+    }
+
+    /**
+     * Returns the total batch header size including optional partial columns metadata.
+     *
+     * @param magic the magic version
+     * @param numTargetColumns the number of target columns stored in the partial batch metadata
+     * @return the header size in bytes
+     */
+    public static int recordBatchHeaderSizeWithPartialColumns(byte magic, int numTargetColumns) {
+        return recordBatchHeaderSize(magic)
+                + TARGET_COLUMNS_COUNT_LENGTH
+                + numTargetColumns * TARGET_COLUMN_INDEX_LENGTH;
     }
 }

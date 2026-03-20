@@ -19,9 +19,16 @@ package org.apache.fluss.record;
 
 import org.apache.fluss.exception.InvalidColumnProjectionException;
 import org.apache.fluss.exception.SchemaNotExistException;
+import org.apache.fluss.memory.ManagedPagedOutputView;
+import org.apache.fluss.memory.TestingMemorySegmentPool;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.row.InternalRow;
+import org.apache.fluss.row.arrow.ArrowWriter;
+import org.apache.fluss.row.arrow.ArrowWriterPool;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.RootAllocator;
+import org.apache.fluss.testutils.DataTestUtils;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.CloseableIterator;
 
@@ -46,8 +53,13 @@ import static org.apache.fluss.compression.ArrowCompressionInfo.DEFAULT_COMPRESS
 import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V0;
 import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 import static org.apache.fluss.record.LogRecordBatchFormat.MAGIC_OFFSET;
+import static org.apache.fluss.record.LogRecordBatchFormat.NO_LEADER_EPOCH;
+import static org.apache.fluss.record.LogRecordBatchFormat.PARTIAL_COLUMNS_FLAG;
 import static org.apache.fluss.record.LogRecordBatchFormat.V0_RECORD_BATCH_HEADER_SIZE;
 import static org.apache.fluss.record.LogRecordBatchFormat.V1_RECORD_BATCH_HEADER_SIZE;
+import static org.apache.fluss.record.LogRecordBatchFormat.attributeOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.leaderEpochOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSize;
 import static org.apache.fluss.record.LogRecordReadContext.createArrowReadContext;
 import static org.apache.fluss.record.TestData.DEFAULT_SCHEMA_ID;
 import static org.apache.fluss.testutils.DataTestUtils.createRecordsWithoutBaseLogOffset;
@@ -90,7 +102,12 @@ class FileLogProjectionTest {
                 recordsOfData2RowType.sizeInBytes());
         assertThat(cache.projectionCache.size()).isEqualTo(1);
         FileLogProjection.ProjectionInfo info1 =
-                cache.getProjectionInfo(1L, schemaId, new int[] {0, 2});
+                cache.getProjectionInfo(
+                        1L,
+                        schemaId,
+                        null,
+                        new int[] {0, 2},
+                        projectionSignature(TestData.DATA2_SCHEMA.getRowType(), new int[] {0, 2}));
         assertThat(info1).isNotNull();
         assertThat(info1.nodesProjection.stream().toArray()).isEqualTo(new int[] {0, 2});
         // a int: [0,1] ; b string: [2,3,4] ; c string: [5,6,7]
@@ -105,11 +122,125 @@ class FileLogProjectionTest {
                 recordsOfData2RowType.sizeInBytes());
         assertThat(cache.projectionCache.size()).isEqualTo(2);
         FileLogProjection.ProjectionInfo info2 =
-                cache.getProjectionInfo(2L, schemaId, new int[] {1});
+                cache.getProjectionInfo(
+                        2L,
+                        schemaId,
+                        null,
+                        new int[] {1},
+                        projectionSignature(TestData.DATA2_SCHEMA.getRowType(), new int[] {1}));
         assertThat(info2).isNotNull();
         assertThat(info2.nodesProjection.stream().toArray()).isEqualTo(new int[] {1});
         // a int: [0,1] ; b string: [2,3,4] ; c string: [5,6,7]
         assertThat(info2.buffersProjection.stream().toArray()).isEqualTo(new int[] {2, 3, 4});
+    }
+
+    @Test
+    void testProjectPartialBatchWithMissingSelectedField() throws Exception {
+        short schemaId = 2;
+        try (FileLogRecords fileLogRecords =
+                createPartialArrowFileLogRecords(
+                        schemaId, TestData.DATA2_ROW_TYPE, new int[] {0, 2}, TestData.DATA2)) {
+            List<Object[]> results =
+                    doProjection(
+                            10L,
+                            schemaId,
+                            new FileLogProjection(new ProjectionPushdownCache()),
+                            fileLogRecords,
+                            new int[] {0, 1},
+                            Integer.MAX_VALUE);
+            List<Object[]> expected = new ArrayList<>();
+            for (Object[] row : TestData.DATA2) {
+                expected.add(new Object[] {row[0], null});
+            }
+            assertEquals(results, expected);
+        }
+    }
+
+    @Test
+    void testProjectPartialBatchWithUnorderedStoredTargetColumns() throws Exception {
+        short schemaId = 2;
+        try (FileLogRecords fileLogRecords =
+                createPartialArrowFileLogRecords(
+                        schemaId, TestData.DATA2_ROW_TYPE, new int[] {2, 0}, TestData.DATA2)) {
+            List<Object[]> results =
+                    doProjection(
+                            11L,
+                            schemaId,
+                            new FileLogProjection(new ProjectionPushdownCache()),
+                            fileLogRecords,
+                            new int[] {0, 2},
+                            Integer.MAX_VALUE);
+            List<Object[]> expected = new ArrayList<>();
+            for (Object[] row : TestData.DATA2) {
+                expected.add(new Object[] {row[0], row[2]});
+            }
+            assertEquals(results, expected);
+        }
+    }
+
+    @Test
+    void testProjectPartialBatchWithNoStoredSelectedFields() throws Exception {
+        short schemaId = 2;
+        try (FileLogRecords fileLogRecords =
+                createPartialArrowFileLogRecords(
+                        schemaId, TestData.DATA2_ROW_TYPE, new int[] {0, 2}, TestData.DATA2)) {
+            List<Object[]> results =
+                    doProjection(
+                            12L,
+                            schemaId,
+                            new FileLogProjection(new ProjectionPushdownCache()),
+                            fileLogRecords,
+                            new int[] {1},
+                            Integer.MAX_VALUE);
+            List<Object[]> expected = new ArrayList<>();
+            for (int i = 0; i < TestData.DATA2.size(); i++) {
+                expected.add(new Object[] {null});
+            }
+            assertEquals(results, expected);
+        }
+    }
+
+    @Test
+    void testProjectPartialBatchCacheSeparationByTargetColumns() throws Exception {
+        short schemaId = 2;
+        ProjectionPushdownCache cache = new ProjectionPushdownCache();
+        FileLogProjection projection = new FileLogProjection(cache);
+
+        try (FileLogRecords left =
+                        createPartialArrowFileLogRecords(
+                                schemaId,
+                                TestData.DATA2_ROW_TYPE,
+                                new int[] {0, 1},
+                                TestData.DATA2);
+                FileLogRecords right =
+                        createPartialArrowFileLogRecords(
+                                schemaId,
+                                TestData.DATA2_ROW_TYPE,
+                                new int[] {0, 2},
+                                TestData.DATA2)) {
+            doProjection(1L, schemaId, projection, left, new int[] {0}, Integer.MAX_VALUE);
+            doProjection(1L, schemaId, projection, right, new int[] {0}, Integer.MAX_VALUE);
+        }
+
+        assertThat(cache.projectionCache.size()).isEqualTo(2);
+        assertThat(
+                        cache.getProjectionInfo(
+                                1L,
+                                schemaId,
+                                new int[] {0, 1},
+                                new int[] {0},
+                                projectionSignature(
+                                        TestData.DATA2_SCHEMA.getRowType(), new int[] {0})))
+                .isNotNull();
+        assertThat(
+                        cache.getProjectionInfo(
+                                1L,
+                                schemaId,
+                                new int[] {0, 2},
+                                new int[] {0},
+                                projectionSignature(
+                                        TestData.DATA2_SCHEMA.getRowType(), new int[] {0})))
+                .isNotNull();
     }
 
     @Test
@@ -162,13 +293,14 @@ class FileLogProjectionTest {
                         "The projection indexes should not contain duplicated fields, but is [0, 0, 0]");
     }
 
-    @Test
-    void testProjectionOldDataWithNewSchema() throws Exception {
+    @ParameterizedTest
+    @ValueSource(bytes = {LOG_MAGIC_VALUE_V0, LOG_MAGIC_VALUE_V1})
+    void testProjectionOldDataWithNewSchema(byte sourceMagic) throws Exception {
         // Currently, we only support add column at last.
         short schemaId = 1;
         try (FileLogRecords records =
                 createFileLogRecords(
-                        schemaId, LOG_MAGIC_VALUE_V1, TestData.DATA1_ROW_TYPE, TestData.DATA1)) {
+                        schemaId, sourceMagic, TestData.DATA1_ROW_TYPE, TestData.DATA1)) {
 
             ProjectionPushdownCache cache = new ProjectionPushdownCache();
             FileLogProjection projection = new FileLogProjection(cache);
@@ -191,19 +323,49 @@ class FileLogProjectionTest {
                             new Object[] {"h"},
                             new Object[] {"i"},
                             new Object[] {"j"});
+            MemoryLogRecords existingColumnOnlyRecords =
+                    projectToMemoryRecords(
+                            2L, 2, projection, records, new int[] {1}, records.sizeInBytes());
+            assertProjectedBatchShape(existingColumnOnlyRecords, sourceMagic, null);
 
-            assertThatThrownBy(
-                            () ->
-                                    doProjection(
-                                            1L,
-                                            2,
-                                            projection,
-                                            records,
-                                            new int[] {0, 2},
-                                            records.sizeInBytes()))
-                    .isInstanceOf(InvalidColumnProjectionException.class)
-                    .hasMessage(
-                            "Projected fields [0, 2] is out of bound for schema with 2 fields.");
+            List<Object[]> projectedOldAndNewColumn =
+                    doProjection(
+                            1L, 2, projection, records, new int[] {0, 2}, records.sizeInBytes());
+            List<Object[]> expectedOldAndNewColumn = new ArrayList<>();
+            for (Object[] row : TestData.DATA1) {
+                expectedOldAndNewColumn.add(new Object[] {row[0], null});
+            }
+            assertEquals(projectedOldAndNewColumn, expectedOldAndNewColumn);
+
+            List<Object[]> projectedOnlyNewColumn =
+                    doProjection(1L, 2, projection, records, new int[] {2}, records.sizeInBytes());
+            List<Object[]> expectedOnlyNewColumn = new ArrayList<>();
+            for (int i = 0; i < TestData.DATA1.size(); i++) {
+                expectedOnlyNewColumn.add(new Object[] {null});
+            }
+            assertEquals(projectedOnlyNewColumn, expectedOnlyNewColumn);
+
+            MemoryLogRecords partialOverlapRecords =
+                    projectToMemoryRecords(
+                            3L, 2, projection, records, new int[] {0, 2}, records.sizeInBytes());
+            assertProjectedBatchShape(
+                    partialOverlapRecords,
+                    sourceMagic == LOG_MAGIC_VALUE_V0 ? LOG_MAGIC_VALUE_V1 : sourceMagic,
+                    new int[] {0});
+            if (sourceMagic == LOG_MAGIC_VALUE_V0) {
+                assertProjectedLeaderEpoch(partialOverlapRecords, NO_LEADER_EPOCH);
+            }
+
+            MemoryLogRecords zeroOverlapRecords =
+                    projectToMemoryRecords(
+                            4L, 2, projection, records, new int[] {2}, records.sizeInBytes());
+            assertProjectedBatchShape(
+                    zeroOverlapRecords,
+                    sourceMagic == LOG_MAGIC_VALUE_V0 ? LOG_MAGIC_VALUE_V1 : sourceMagic,
+                    new int[0]);
+            if (sourceMagic == LOG_MAGIC_VALUE_V0) {
+                assertProjectedLeaderEpoch(zeroOverlapRecords, NO_LEADER_EPOCH);
+            }
         }
     }
 
@@ -453,6 +615,53 @@ class FileLogProjectionTest {
         return fileLogRecords;
     }
 
+    @SafeVarargs
+    private final FileLogRecords createPartialArrowFileLogRecords(
+            int schemaId, RowType fullRowType, int[] targetColumns, List<Object[]>... inputs)
+            throws Exception {
+        FileLogRecords fileLogRecords =
+                FileLogRecords.open(new File(tempDir, UUID.randomUUID() + ".log"));
+        long offsetBase = 0L;
+        RowType storedRowType = fullRowType.project(targetColumns);
+        for (List<Object[]> input : inputs) {
+            try (BufferAllocator allocator = new RootAllocator(Integer.MAX_VALUE);
+                    ArrowWriterPool writerPool = new ArrowWriterPool(allocator)) {
+                ArrowWriter writer =
+                        writerPool.getOrCreateWriter(
+                                1L,
+                                schemaId,
+                                Integer.MAX_VALUE,
+                                storedRowType,
+                                DEFAULT_COMPRESSION);
+                MemoryLogRecordsArrowBuilder builder =
+                        MemoryLogRecordsArrowBuilder.builder(
+                                schemaId,
+                                writer,
+                                new ManagedPagedOutputView(new TestingMemorySegmentPool(8 * 1024)),
+                                true,
+                                targetColumns);
+                for (Object[] row : input) {
+                    Object[] storedValues = new Object[targetColumns.length];
+                    for (int i = 0; i < targetColumns.length; i++) {
+                        storedValues[i] = row[targetColumns[i]];
+                    }
+                    builder.append(
+                            ChangeType.APPEND_ONLY, DataTestUtils.row(storedRowType, storedValues));
+                }
+                builder.close();
+                MemoryLogRecords records = MemoryLogRecords.pointToBytesView(builder.build());
+                DefaultLogRecordBatch batch =
+                        (DefaultLogRecordBatch) records.batches().iterator().next();
+                batch.setBaseLogOffset(offsetBase);
+                batch.setCommitTimestamp(System.currentTimeMillis());
+                fileLogRecords.append(records);
+                offsetBase += input.size();
+            }
+        }
+        fileLogRecords.flush();
+        return fileLogRecords;
+    }
+
     private List<Object[]> doProjection(
             FileLogProjection projection,
             FileLogRecords fileLogRecords,
@@ -516,6 +725,70 @@ class FileLogProjectionTest {
             }
         }
         return results;
+    }
+
+    private MemoryLogRecords projectToMemoryRecords(
+            long tableId,
+            int schemaId,
+            FileLogProjection projection,
+            FileLogRecords fileLogRecords,
+            int[] projectedFields,
+            int fetchMaxBytes)
+            throws Exception {
+        projection.setCurrentProjection(
+                tableId, testingSchemaGetter, DEFAULT_COMPRESSION, projectedFields);
+        BytesViewLogRecords projected =
+                projection.project(
+                        fileLogRecords.channel(), 0, fileLogRecords.sizeInBytes(), fetchMaxBytes);
+        assertThat(projected.sizeInBytes()).isLessThanOrEqualTo(fetchMaxBytes);
+        MemoryLogRecords projectedRecords =
+                MemoryLogRecords.pointToBytesView(projected.getBytesView());
+        for (LogRecordBatch batch : projectedRecords.batches()) {
+            ((DefaultLogRecordBatch) batch).ensureValid();
+        }
+        return projectedRecords;
+    }
+
+    private static void assertProjectedBatchShape(
+            MemoryLogRecords projectedRecords, byte expectedMagic, int[] expectedTargetColumns) {
+        ByteBuffer buffer =
+                projectedRecords
+                        .getMemorySegment()
+                        .wrap(projectedRecords.getPosition(), projectedRecords.sizeInBytes())
+                        .order(ByteOrder.LITTLE_ENDIAN);
+        byte magic = buffer.get(MAGIC_OFFSET);
+        assertThat(magic).isEqualTo(expectedMagic);
+        boolean partial = (buffer.get(attributeOffset(magic)) & PARTIAL_COLUMNS_FLAG) != 0;
+        if (expectedTargetColumns == null) {
+            assertThat(partial).isFalse();
+            return;
+        }
+        assertThat(partial).isTrue();
+        int targetColumnsOffset = recordBatchHeaderSize(magic);
+        assertThat(buffer.getShort(targetColumnsOffset) & 0xFFFF)
+                .isEqualTo(expectedTargetColumns.length);
+        for (int i = 0; i < expectedTargetColumns.length; i++) {
+            assertThat(
+                            buffer.getShort(targetColumnsOffset + Short.BYTES + i * Short.BYTES)
+                                    & 0xFFFF)
+                    .isEqualTo(expectedTargetColumns[i]);
+        }
+    }
+
+    private static void assertProjectedLeaderEpoch(
+            MemoryLogRecords projectedRecords, int expectedLeaderEpoch) {
+        ByteBuffer buffer =
+                projectedRecords
+                        .getMemorySegment()
+                        .wrap(projectedRecords.getPosition(), projectedRecords.sizeInBytes())
+                        .order(ByteOrder.LITTLE_ENDIAN);
+        byte magic = buffer.get(MAGIC_OFFSET);
+        assertThat(magic).isEqualTo(LOG_MAGIC_VALUE_V1);
+        assertThat(buffer.getInt(leaderEpochOffset(magic))).isEqualTo(expectedLeaderEpoch);
+    }
+
+    private static String projectionSignature(RowType rowType, int[] projectedFields) {
+        return rowType.project(projectedFields).asSerializableString();
     }
 
     private static void assertEquals(List<Object[]> actual, List<Object[]> expected) {

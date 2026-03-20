@@ -21,9 +21,12 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.memory.AbstractPagedOutputView;
 import org.apache.fluss.row.indexed.IndexedRow;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
 
 import static org.apache.fluss.record.LogRecordBatch.CURRENT_LOG_MAGIC_VALUE;
+import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 
 /**
  * Default builder for {@link MemoryLogRecords} of log records in {@link
@@ -37,8 +40,16 @@ public class MemoryLogRecordsIndexedBuilder extends MemoryLogRecordsRowBuilder<I
             int writeLimit,
             byte magic,
             AbstractPagedOutputView pagedOutputView,
-            boolean appendOnly) {
-        super(baseLogOffset, schemaId, writeLimit, magic, pagedOutputView, appendOnly);
+            boolean appendOnly,
+            @Nullable int[] targetColumns) {
+        super(
+                baseLogOffset,
+                schemaId,
+                writeLimit,
+                magic,
+                pagedOutputView,
+                appendOnly,
+                targetColumns);
     }
 
     public static MemoryLogRecordsIndexedBuilder builder(
@@ -49,7 +60,26 @@ public class MemoryLogRecordsIndexedBuilder extends MemoryLogRecordsRowBuilder<I
                 writeLimit,
                 CURRENT_LOG_MAGIC_VALUE,
                 outputView,
-                appendOnly);
+                appendOnly,
+                null);
+    }
+
+    /** Builder with target columns for partial insert. Uses V1 magic for partial batches. */
+    public static MemoryLogRecordsIndexedBuilder builder(
+            int schemaId,
+            int writeLimit,
+            AbstractPagedOutputView outputView,
+            boolean appendOnly,
+            @Nullable int[] targetColumns) {
+        byte magic = targetColumns != null ? LOG_MAGIC_VALUE_V1 : CURRENT_LOG_MAGIC_VALUE;
+        return new MemoryLogRecordsIndexedBuilder(
+                BUILDER_DEFAULT_OFFSET,
+                schemaId,
+                writeLimit,
+                magic,
+                outputView,
+                appendOnly,
+                targetColumns);
     }
 
     @VisibleForTesting
@@ -61,7 +91,7 @@ public class MemoryLogRecordsIndexedBuilder extends MemoryLogRecordsRowBuilder<I
             AbstractPagedOutputView outputView)
             throws IOException {
         return new MemoryLogRecordsIndexedBuilder(
-                baseLogOffset, schemaId, writeLimit, magic, outputView, false);
+                baseLogOffset, schemaId, writeLimit, magic, outputView, false, null);
     }
 
     @Override

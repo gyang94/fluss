@@ -235,7 +235,8 @@ public class MemoryLogRecordsArrowBuilderTest {
         }
         assertThat(builder.isFull()).isTrue();
 
-        String tableSchemaId = 1L + "-" + 1 + "-" + "NONE";
+        String tableSchemaId =
+                1L + "-" + 1 + "-" + DATA1_ROW_TYPE.asSerializableString() + "-" + "NONE";
         assertThat(provider.freeWriters().size()).isEqualTo(0);
         int sizeInBytesBeforeClose = builder.estimatedSizeInBytes();
         builder.close();

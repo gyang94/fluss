@@ -26,7 +26,10 @@ import org.apache.fluss.record.MemoryLogRecordsRowBuilder;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.row.InternalRow;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -42,6 +45,7 @@ abstract class AbstractRowLogWriteBatch<R> extends WriteBatch {
     private final AbstractPagedOutputView outputView;
     private final MemoryLogRecordsRowBuilder<R> recordsBuilder;
     private final String buildErrorMessage;
+    private final @Nullable int[] targetColumns;
 
     protected AbstractRowLogWriteBatch(
             int bucketId,
@@ -49,10 +53,12 @@ abstract class AbstractRowLogWriteBatch<R> extends WriteBatch {
             long createdMs,
             AbstractPagedOutputView outputView,
             MemoryLogRecordsRowBuilder<R> recordsBuilder,
+            @Nullable int[] targetColumns,
             String buildErrorMessage) {
         super(bucketId, physicalTablePath, createdMs);
         this.outputView = outputView;
         this.recordsBuilder = recordsBuilder;
+        this.targetColumns = targetColumns;
         this.buildErrorMessage = buildErrorMessage;
     }
 
@@ -62,9 +68,13 @@ abstract class AbstractRowLogWriteBatch<R> extends WriteBatch {
         InternalRow rowObj = writeRecord.getRow();
         checkNotNull(rowObj, "row must not be null for log record");
         checkArgument(writeRecord.getKey() == null, "key must be null for log record");
-        checkArgument(
-                writeRecord.getTargetColumns() == null,
-                "target columns must be null for log record");
+        if (!Arrays.equals(targetColumns, writeRecord.getTargetColumns())) {
+            throw new IllegalStateException(
+                    String.format(
+                            "target columns %s of the write record to append are not the same as the current target columns %s in the batch.",
+                            Arrays.toString(writeRecord.getTargetColumns()),
+                            Arrays.toString(targetColumns)));
+        }
 
         R row = requireAndCastRow(rowObj);
         if (!recordsBuilder.hasRoomFor(row) || isClosed()) {

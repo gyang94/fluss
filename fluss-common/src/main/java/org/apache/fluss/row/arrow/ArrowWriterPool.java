@@ -89,7 +89,14 @@ public class ArrowWriterPool implements ArrowWriterProvider {
             int bufferSizeInBytes,
             RowType schema,
             ArrowCompressionInfo compressionInfo) {
-        final String writerKey = tableId + "-" + schemaId + "-" + compressionInfo.toString();
+        final String writerKey =
+                tableId
+                        + "-"
+                        + schemaId
+                        + "-"
+                        + schema.asSerializableString()
+                        + "-"
+                        + compressionInfo.toString();
         return inLock(
                 lock,
                 () -> {

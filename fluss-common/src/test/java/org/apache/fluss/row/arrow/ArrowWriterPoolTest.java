@@ -50,6 +50,7 @@ public class ArrowWriterPoolTest {
     void testWriterMap() {
         ArrowWriterPool arrowWriterPool = new ArrowWriterPool(allocator);
         Map<String, Deque<ArrowWriter>> freeWritersMap = arrowWriterPool.freeWriters();
+        String fullSchemaKey = "1-1-ROW<`a` INT, `b` STRING>-ZSTD-3";
         ArrowWriter writer1 =
                 arrowWriterPool.getOrCreateWriter(1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION);
         assertThat(writer1.getWriteLimitInBytes()).isEqualTo((int) (1024 * BUFFER_USAGE_RATIO));
@@ -57,12 +58,12 @@ public class ArrowWriterPoolTest {
         long epoch = writer1.getEpoch();
         writer1.recycle(epoch);
         assertThat(freeWritersMap.size()).isEqualTo(1);
-        assertThat(freeWritersMap.get("1-1-ZSTD-3")).hasSize(1);
+        assertThat(freeWritersMap.get(fullSchemaKey)).hasSize(1);
         assertThat(writer1.getEpoch()).isEqualTo(epoch + 1);
         // recycle the same epoch again, doesn't add it to pool
         writer1.recycle(epoch);
         assertThat(freeWritersMap.size()).isEqualTo(1);
-        assertThat(freeWritersMap.get("1-1-ZSTD-3")).hasSize(1);
+        assertThat(freeWritersMap.get(fullSchemaKey)).hasSize(1);
 
         ArrowWriter writer2 =
                 arrowWriterPool.getOrCreateWriter(1L, 2, 10, DATA1_ROW_TYPE, DEFAULT_COMPRESSION);
@@ -70,8 +71,7 @@ public class ArrowWriterPoolTest {
         writer2.recycle(writer2.getEpoch());
         assertThat(freeWritersMap.size()).isEqualTo(2);
 
-        // test key1: "tableId_schemaId"
-        Deque<ArrowWriter> arrowWriters = freeWritersMap.get("1-1-ZSTD-3");
+        Deque<ArrowWriter> arrowWriters = freeWritersMap.get(fullSchemaKey);
         assertThat(arrowWriters.size()).isEqualTo(1);
         writer1 =
                 arrowWriterPool.getOrCreateWriter(1L, 1, 1000, DATA1_ROW_TYPE, DEFAULT_COMPRESSION);
@@ -83,5 +83,23 @@ public class ArrowWriterPoolTest {
         writer1.recycle(writer1.getEpoch());
         assertThat(arrowWriters.size()).isEqualTo(2);
         arrowWriterPool.close();
+    }
+
+    @Test
+    void testProjectedSchemasUseDifferentWriterKeys() {
+        ArrowWriterPool arrowWriterPool = new ArrowWriterPool(allocator);
+        ArrowWriter fullWriter =
+                arrowWriterPool.getOrCreateWriter(1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION);
+        ArrowWriter projectedWriter =
+                arrowWriterPool.getOrCreateWriter(
+                        1L, 1, 1024, DATA1_ROW_TYPE.project(new int[] {0}), DEFAULT_COMPRESSION);
+
+        fullWriter.recycle(fullWriter.getEpoch());
+        projectedWriter.recycle(projectedWriter.getEpoch());
+
+        assertThat(arrowWriterPool.freeWriters()).hasSize(2);
+        assertThat(arrowWriterPool.freeWriters().keySet())
+                .contains("1-1-ROW<`a` INT, `b` STRING>-ZSTD-3")
+                .contains("1-1-ROW<`a` INT>-ZSTD-3");
     }
 }

@@ -24,6 +24,7 @@ import org.apache.fluss.record.MemoryLogRecordsIndexedBuilder;
 import org.apache.fluss.row.indexed.IndexedRow;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -44,13 +45,19 @@ public final class IndexedLogWriteBatch extends AbstractRowLogWriteBatch<Indexed
             int schemaId,
             int writeLimit,
             AbstractPagedOutputView outputView,
-            long createdMs) {
+            long createdMs,
+            @Nullable int[] targetColumns) {
         super(
                 bucketId,
                 physicalTablePath,
                 createdMs,
                 outputView,
-                MemoryLogRecordsIndexedBuilder.builder(schemaId, writeLimit, outputView, true),
+                targetColumns != null
+                        ? MemoryLogRecordsIndexedBuilder.builder(
+                                schemaId, writeLimit, outputView, true, targetColumns)
+                        : MemoryLogRecordsIndexedBuilder.builder(
+                                schemaId, writeLimit, outputView, true),
+                targetColumns,
                 "Failed to build indexed log record batch.");
     }
 

@@ -29,9 +29,11 @@ import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.row.arrow.ArrowWriter;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -48,6 +50,7 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 public class ArrowLogWriteBatch extends WriteBatch {
     private final MemoryLogRecordsArrowBuilder recordsBuilder;
     private final AbstractPagedOutputView outputView;
+    private final @Nullable int[] targetColumns;
 
     public ArrowLogWriteBatch(
             int bucketId,
@@ -55,11 +58,17 @@ public class ArrowLogWriteBatch extends WriteBatch {
             int schemaId,
             ArrowWriter arrowWriter,
             AbstractPagedOutputView outputView,
-            long createdMs) {
+            long createdMs,
+            @Nullable int[] targetColumns) {
         super(bucketId, physicalTablePath, createdMs);
         this.outputView = outputView;
+        this.targetColumns = targetColumns;
         this.recordsBuilder =
-                MemoryLogRecordsArrowBuilder.builder(schemaId, arrowWriter, outputView, true);
+                targetColumns != null
+                        ? MemoryLogRecordsArrowBuilder.builder(
+                                schemaId, arrowWriter, outputView, true, targetColumns)
+                        : MemoryLogRecordsArrowBuilder.builder(
+                                schemaId, arrowWriter, outputView, true);
     }
 
     @Override
@@ -70,12 +79,16 @@ public class ArrowLogWriteBatch extends WriteBatch {
     @Override
     public boolean tryAppend(WriteRecord writeRecord, WriteCallback callback) throws Exception {
         InternalRow row = writeRecord.getRow();
-        checkArgument(
-                writeRecord.getTargetColumns() == null,
-                "target columns must be null for log record");
         checkArgument(writeRecord.getKey() == null, "key must be null for log record");
         checkNotNull(row != null, "row must not be null for log record");
         checkNotNull(callback, "write callback must be not null");
+        if (!Arrays.equals(targetColumns, writeRecord.getTargetColumns())) {
+            throw new IllegalStateException(
+                    String.format(
+                            "target columns %s of the write record to append are not the same as the current target columns %s in the batch.",
+                            Arrays.toString(writeRecord.getTargetColumns()),
+                            Arrays.toString(targetColumns)));
+        }
         if (recordsBuilder.isClosed() || recordsBuilder.isFull()) {
             return false;
         } else {

@@ -199,7 +199,7 @@ public class CompactedLogWriteBatchTest {
 
     private WriteRecord createWriteRecord() {
         return WriteRecord.forCompactedAppend(
-                DATA1_TABLE_INFO, DATA1_PHYSICAL_TABLE_PATH, row, null);
+                DATA1_TABLE_INFO, DATA1_PHYSICAL_TABLE_PATH, row, null, null);
     }
 
     private CompactedLogWriteBatch createLogWriteBatch(TableBucket tb, long baseLogOffset)
@@ -216,7 +216,8 @@ public class CompactedLogWriteBatchTest {
                 DATA1_TABLE_INFO.getSchemaId(),
                 writeLimit,
                 new PreAllocatedPagedOutputView(Collections.singletonList(memorySegment)),
-                System.currentTimeMillis());
+                System.currentTimeMillis(),
+                null);
     }
 
     private void assertDefaultLogRecordBatchEquals(LogRecordBatch recordBatch) {

@@ -172,17 +172,29 @@ public interface LogRecordBatch {
         LogFormat getLogFormat();
 
         /**
-         * Get the row type of the schema id. The returned row type is projected if the record batch
-         * is a projected {@link LogRecordBatch}.
+         * Gets the full write-time row type resolved from the batch {@code schemaId}.
          *
          * @param schemaId The schema id of the record batch.
-         * @return The (maybe projected) row type of the record batch.
+         * @return The full row type of the write schema.
          */
-        RowType getRowType(int schemaId);
+        RowType getFullRowType(int schemaId);
 
         /**
-         * Gets the Arrow {@link VectorSchemaRoot} for the given schema id. The returned schema root
-         * is projected if the record batch is a projected {@link LogRecordBatch}.
+         * Gets the stored payload row type of the record batch.
+         *
+         * <p>For partial batches, the stored payload row type is the write schema projected by
+         * {@code targetColumns}. For projected ARROW responses, the stored payload row type is the
+         * projected response schema even when {@code targetColumns} is {@code null}.
+         *
+         * @param schemaId The schema id of the record batch.
+         * @param targetColumns The partial target columns stored in the batch header, or {@code
+         *     null} if the batch stores a full row payload.
+         * @return The row type used to decode the serialized payload.
+         */
+        RowType getStoredRowType(int schemaId, @Nullable int[] targetColumns);
+
+        /**
+         * Gets the Arrow {@link VectorSchemaRoot} for the stored payload schema of the given batch.
          *
          * <p>The schema root is used to read the Arrow records in the batch, if this is a {@link
          * LogFormat#ARROW} record batch.
@@ -192,9 +204,11 @@ public interface LogRecordBatch {
          * use.
          *
          * @param schemaId The schema id of the record batch.
-         * @return The (maybe projected) schema root of the record batch.
+         * @param targetColumns The partial target columns stored in the batch header, or {@code
+         *     null} if the batch stores a full row payload.
+         * @return The schema root used to decode the stored payload.
          */
-        VectorSchemaRoot getVectorSchemaRoot(int schemaId);
+        VectorSchemaRoot getVectorSchemaRoot(int schemaId, @Nullable int[] targetColumns);
 
         /** Gets the buffer allocator. */
         BufferAllocator getBufferAllocator();

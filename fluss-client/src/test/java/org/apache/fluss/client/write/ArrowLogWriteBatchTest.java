@@ -68,8 +68,8 @@ public class ArrowLogWriteBatchTest {
 
     @AfterEach
     void teardown() {
-        allocator.close();
         writerProvider.close();
+        allocator.close();
     }
 
     @Test
@@ -136,7 +136,8 @@ public class ArrowLogWriteBatchTest {
                                 DATA1_ROW_TYPE,
                                 DEFAULT_COMPRESSION),
                         new PreAllocatedPagedOutputView(memorySegmentList),
-                        System.currentTimeMillis());
+                        System.currentTimeMillis(),
+                        null);
         assertThat(arrowLogWriteBatch.pooledMemorySegments()).isEqualTo(memorySegmentList);
 
         int count = 0;
@@ -210,7 +211,8 @@ public class ArrowLogWriteBatchTest {
                             DATA1_TABLE_INFO.getSchemaId(),
                             arrowWriter,
                             new PreAllocatedPagedOutputView(memorySegmentList),
-                            System.currentTimeMillis());
+                            System.currentTimeMillis(),
+                            null);
 
             int recordCount = 0;
             while (arrowLogWriteBatch.tryAppend(
@@ -283,7 +285,8 @@ public class ArrowLogWriteBatchTest {
 
         // verify arrow writer have recycled.
         assertThat(writerProvider.freeWriters()).hasSize(1);
-        assertThat(writerProvider.freeWriters().get("150001-1-ZSTD-3")).isNotNull();
+        assertThat(writerProvider.freeWriters().get("150001-1-ROW<`a` INT, `b` STRING>-ZSTD-3"))
+                .isNotNull();
 
         // verify record append future is completed with exception.
         for (CompletableFuture<Void> future : futures) {
@@ -294,8 +297,56 @@ public class ArrowLogWriteBatchTest {
         }
     }
 
+    @Test
+    void testRejectDifferentTargetColumnsInSameBatch() throws Exception {
+        int[] firstTargetColumns = new int[] {0};
+        ArrowLogWriteBatch batch =
+                new ArrowLogWriteBatch(
+                        0,
+                        DATA1_PHYSICAL_TABLE_PATH,
+                        DATA1_TABLE_INFO.getSchemaId(),
+                        writerProvider.getOrCreateWriter(
+                                DATA1_TABLE_ID,
+                                DATA1_TABLE_INFO.getSchemaId(),
+                                1024,
+                                DATA1_ROW_TYPE.project(firstTargetColumns),
+                                DEFAULT_COMPRESSION),
+                        new UnmanagedPagedOutputView(256),
+                        System.currentTimeMillis(),
+                        firstTargetColumns);
+
+        assertThat(
+                        batch.tryAppend(
+                                WriteRecord.forArrowAppend(
+                                        DATA1_TABLE_INFO,
+                                        DATA1_PHYSICAL_TABLE_PATH,
+                                        row(1),
+                                        null,
+                                        firstTargetColumns),
+                                newWriteCallback()))
+                .isTrue();
+
+        int[] secondTargetColumns = new int[] {1};
+        assertThatThrownBy(
+                        () ->
+                                batch.tryAppend(
+                                        WriteRecord.forArrowAppend(
+                                                DATA1_TABLE_INFO,
+                                                DATA1_PHYSICAL_TABLE_PATH,
+                                                row("a"),
+                                                null,
+                                                secondTargetColumns),
+                                        newWriteCallback()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("target columns [1]")
+                .hasMessageContaining("current target columns [0]");
+
+        batch.close();
+    }
+
     private WriteRecord createWriteRecord(GenericRow row) {
-        return WriteRecord.forArrowAppend(DATA1_TABLE_INFO, DATA1_PHYSICAL_TABLE_PATH, row, null);
+        return WriteRecord.forArrowAppend(
+                DATA1_TABLE_INFO, DATA1_PHYSICAL_TABLE_PATH, row, null, null);
     }
 
     private ArrowLogWriteBatch createArrowLogWriteBatch(TableBucket tb, int maxSizeInBytes) {
@@ -310,7 +361,8 @@ public class ArrowLogWriteBatchTest {
                         DATA1_ROW_TYPE,
                         DEFAULT_COMPRESSION),
                 new UnmanagedPagedOutputView(128),
-                System.currentTimeMillis());
+                System.currentTimeMillis(),
+                null);
     }
 
     private WriteCallback newWriteCallback() {

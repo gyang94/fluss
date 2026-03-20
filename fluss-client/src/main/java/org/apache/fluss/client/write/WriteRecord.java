@@ -33,7 +33,9 @@ import javax.annotation.Nullable;
 
 import static org.apache.fluss.record.DefaultKvRecordBatch.RECORD_BATCH_HEADER_SIZE;
 import static org.apache.fluss.record.LogRecordBatch.CURRENT_LOG_MAGIC_VALUE;
+import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSize;
+import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSizeWithPartialColumns;
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -139,10 +141,15 @@ public final class WriteRecord {
             TableInfo tableInfo,
             PhysicalTablePath tablePath,
             IndexedRow row,
-            @Nullable byte[] bucketKey) {
+            @Nullable byte[] bucketKey,
+            @Nullable int[] targetColumns) {
         checkNotNull(row);
-        int estimatedSizeInBytes =
-                IndexedLogRecord.sizeOf(row) + recordBatchHeaderSize(CURRENT_LOG_MAGIC_VALUE);
+        byte magic = targetColumns != null ? LOG_MAGIC_VALUE_V1 : CURRENT_LOG_MAGIC_VALUE;
+        int headerSize =
+                targetColumns != null
+                        ? recordBatchHeaderSizeWithPartialColumns(magic, targetColumns.length)
+                        : recordBatchHeaderSize(magic);
+        int estimatedSizeInBytes = IndexedLogRecord.sizeOf(row) + headerSize;
         return new WriteRecord(
                 tableInfo,
                 tablePath,
@@ -150,7 +157,7 @@ public final class WriteRecord {
                 bucketKey,
                 row,
                 WriteFormat.INDEXED_LOG,
-                null,
+                targetColumns,
                 estimatedSizeInBytes,
                 MergeMode.DEFAULT);
     }
@@ -160,7 +167,8 @@ public final class WriteRecord {
             TableInfo tableInfo,
             PhysicalTablePath tablePath,
             InternalRow row,
-            @Nullable byte[] bucketKey) {
+            @Nullable byte[] bucketKey,
+            @Nullable int[] targetColumns) {
         checkNotNull(row);
         // the write row maybe GenericRow, can't estimate the size.
         // it is not necessary to estimate size for Arrow format.
@@ -172,7 +180,7 @@ public final class WriteRecord {
                 bucketKey,
                 row,
                 WriteFormat.ARROW_LOG,
-                null,
+                targetColumns,
                 estimatedSizeInBytes,
                 MergeMode.DEFAULT);
     }
@@ -182,10 +190,15 @@ public final class WriteRecord {
             TableInfo tableInfo,
             PhysicalTablePath tablePath,
             CompactedRow row,
-            @Nullable byte[] bucketKey) {
+            @Nullable byte[] bucketKey,
+            @Nullable int[] targetColumns) {
         checkNotNull(row);
-        int estimatedSizeInBytes =
-                CompactedLogRecord.sizeOf(row) + recordBatchHeaderSize(CURRENT_LOG_MAGIC_VALUE);
+        byte magic = targetColumns != null ? LOG_MAGIC_VALUE_V1 : CURRENT_LOG_MAGIC_VALUE;
+        int headerSize =
+                targetColumns != null
+                        ? recordBatchHeaderSizeWithPartialColumns(magic, targetColumns.length)
+                        : recordBatchHeaderSize(magic);
+        int estimatedSizeInBytes = CompactedLogRecord.sizeOf(row) + headerSize;
         return new WriteRecord(
                 tableInfo,
                 tablePath,
@@ -193,7 +206,7 @@ public final class WriteRecord {
                 bucketKey,
                 row,
                 WriteFormat.COMPACTED_LOG,
-                null,
+                targetColumns,
                 estimatedSizeInBytes,
                 MergeMode.DEFAULT);
     }

@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.compression.ArrowCompressionInfo;
 import org.apache.fluss.exception.InvalidColumnProjectionException;
 import org.apache.fluss.metadata.SchemaGetter;
+import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.record.bytesview.MultiBytesView;
 import org.apache.fluss.shaded.arrow.com.google.flatbuffers.FlatBufferBuilder;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.flatbuf.Buffer;
@@ -39,6 +40,7 @@ import org.apache.fluss.shaded.arrow.org.apache.arrow.vector.types.pojo.Field;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.ArrowUtils;
+import org.apache.fluss.utils.crc.Crc32C;
 import org.apache.fluss.utils.types.Tuple2;
 
 import java.io.ByteArrayOutputStream;
@@ -51,24 +53,35 @@ import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.zip.Checksum;
 
 import static org.apache.fluss.record.DefaultLogRecordBatch.APPEND_ONLY_FLAG_MASK;
+import static org.apache.fluss.record.LogRecordBatchFormat.BASE_OFFSET_OFFSET;
+import static org.apache.fluss.record.LogRecordBatchFormat.COMMIT_TIMESTAMP_OFFSET;
 import static org.apache.fluss.record.LogRecordBatchFormat.LENGTH_OFFSET;
 import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V0;
 import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 import static org.apache.fluss.record.LogRecordBatchFormat.LOG_OVERHEAD;
 import static org.apache.fluss.record.LogRecordBatchFormat.MAGIC_OFFSET;
+import static org.apache.fluss.record.LogRecordBatchFormat.NO_LEADER_EPOCH;
+import static org.apache.fluss.record.LogRecordBatchFormat.PARTIAL_COLUMNS_FLAG;
 import static org.apache.fluss.record.LogRecordBatchFormat.V0_RECORD_BATCH_HEADER_SIZE;
 import static org.apache.fluss.record.LogRecordBatchFormat.V1_RECORD_BATCH_HEADER_SIZE;
-import static org.apache.fluss.record.LogRecordBatchFormat.arrowChangeTypeOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.attributeOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.batchSequenceOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.crcOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.lastOffsetDeltaOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.leaderEpochOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSize;
+import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSizeWithPartialColumns;
 import static org.apache.fluss.record.LogRecordBatchFormat.recordsCountOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.schemaIdOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.writeClientIdOffset;
 import static org.apache.fluss.utils.FileUtils.readFully;
 import static org.apache.fluss.utils.FileUtils.readFullyOrFail;
-import static org.apache.fluss.utils.Preconditions.checkState;
 
 /** Column projection util on Arrow format {@link FileLogRecords}. */
 public class FileLogProjection {
@@ -95,11 +108,15 @@ public class FileLogProjection {
     private final ByteBuffer logHeaderBuffer = ByteBuffer.allocate(V1_RECORD_BATCH_HEADER_SIZE);
 
     private final ByteBuffer arrowHeaderBuffer = ByteBuffer.allocate(ARROW_HEADER_SIZE);
+    private final ByteBuffer targetColumnsCountBuffer = ByteBuffer.allocate(2);
+    private final ByteBuffer checksumBuffer = ByteBuffer.allocate(8 * 1024);
     private ByteBuffer arrowMetadataBuffer;
     private SchemaGetter schemaGetter;
     private long tableId;
     private ArrowCompressionInfo compressionInfo;
-    private int[] selectedFieldPositions;
+    private int[] requestedColumnIds;
+    private RowType requestedOutputRowType;
+    private String requestedOutputSignature;
 
     public FileLogProjection(ProjectionPushdownCache projectionsCache) {
         this.projectionsCache = projectionsCache;
@@ -109,6 +126,7 @@ public class FileLogProjection {
         this.logHeaderBuffer.order(ByteOrder.LITTLE_ENDIAN);
         // arrow force use little endian to encode int32 values
         this.arrowHeaderBuffer.order(ByteOrder.LITTLE_ENDIAN);
+        this.targetColumnsCountBuffer.order(ByteOrder.LITTLE_ENDIAN);
     }
 
     public void setCurrentProjection(
@@ -116,10 +134,22 @@ public class FileLogProjection {
             SchemaGetter schemaGetter,
             ArrowCompressionInfo compressionInfo,
             int[] selectedFieldPositions) {
+        SchemaInfo latestSchemaInfo = schemaGetter.getLatestSchemaInfo();
+        org.apache.fluss.metadata.Schema latestSchema = latestSchemaInfo.getSchema();
+        RowType latestRowType = latestSchema.getRowType();
+        // Validate the incoming fetch projection in the latest logical schema first.
+        toBitSet(latestRowType.getFieldCount(), selectedFieldPositions);
+
         this.tableId = tableId;
         this.schemaGetter = schemaGetter;
         this.compressionInfo = compressionInfo;
-        this.selectedFieldPositions = selectedFieldPositions;
+        this.requestedColumnIds = new int[selectedFieldPositions.length];
+        for (int i = 0; i < selectedFieldPositions.length; i++) {
+            this.requestedColumnIds[i] =
+                    latestSchema.getColumns().get(selectedFieldPositions[i]).getColumnId();
+        }
+        this.requestedOutputRowType = latestRowType.project(selectedFieldPositions);
+        this.requestedOutputSignature = requestedOutputRowType.asSerializableString();
     }
 
     /**
@@ -134,8 +164,6 @@ public class FileLogProjection {
         MultiBytesView.Builder builder = MultiBytesView.builder();
         int position = start;
 
-        ProjectionInfo currentProjection = null;
-        short prevSchemaId = -1;
         // The condition is an optimization to avoid read log header when there is no enough bytes,
         // So we use V0 header size here for a conservative judgment. In the end, the condition
         // of (position >= end - recordBatchHeaderSize) will ensure the final correctness.
@@ -150,16 +178,24 @@ public class FileLogProjection {
             readLogHeaderFullyOrFail(channel, logHeaderBuffer, position);
 
             logHeaderBuffer.rewind();
-            byte magic = logHeaderBuffer.get(MAGIC_OFFSET);
-            int recordBatchHeaderSize = recordBatchHeaderSize(magic);
+            byte sourceMagic = logHeaderBuffer.get(MAGIC_OFFSET);
+            int standardHeaderSize = recordBatchHeaderSize(sourceMagic);
             int batchSizeInBytes = LOG_OVERHEAD + logHeaderBuffer.getInt(LENGTH_OFFSET);
-            short schemaId = logHeaderBuffer.getShort(schemaIdOffset(magic));
-
-            // reuse projection in the current log file
-            if (currentProjection == null || prevSchemaId != schemaId) {
-                prevSchemaId = schemaId;
-                currentProjection = getOrCreateProjectionInfo(schemaId);
-            }
+            short schemaId = logHeaderBuffer.getShort(schemaIdOffset(sourceMagic));
+            boolean isPartial =
+                    (logHeaderBuffer.get(attributeOffset(sourceMagic)) & PARTIAL_COLUMNS_FLAG) != 0;
+            int[] storedTargetColumns =
+                    isPartial
+                            ? readStoredTargetColumns(
+                                    channel, position + recordBatchHeaderSize(sourceMagic))
+                            : null;
+            int effectiveHeaderSize =
+                    storedTargetColumns == null
+                            ? standardHeaderSize
+                            : recordBatchHeaderSizeWithPartialColumns(
+                                    sourceMagic, storedTargetColumns.length);
+            ProjectionInfo currentProjection =
+                    getOrCreateProjectionInfo(schemaId, storedTargetColumns);
 
             if (position > end - batchSizeInBytes) {
                 // the remaining bytes in the file are not enough to read a full batch
@@ -170,23 +206,23 @@ public class FileLogProjection {
             // build cdc log batch when there
             // is no cdc log generated for this kv batch. See the comments about the field
             // 'lastOffsetDelta' in DefaultLogRecordBatch.
-            if (batchSizeInBytes == recordBatchHeaderSize) {
+            if (batchSizeInBytes == effectiveHeaderSize) {
                 builder.addBytes(channel, position, batchSizeInBytes);
                 position += batchSizeInBytes;
                 continue;
             }
 
             boolean isAppendOnly =
-                    (logHeaderBuffer.get(attributeOffset(magic)) & APPEND_ONLY_FLAG_MASK) > 0;
+                    (logHeaderBuffer.get(attributeOffset(sourceMagic)) & APPEND_ONLY_FLAG_MASK) > 0;
 
             final int changeTypeBytes;
             final long arrowHeaderOffset;
             if (isAppendOnly) {
                 changeTypeBytes = 0;
-                arrowHeaderOffset = position + recordBatchHeaderSize;
+                arrowHeaderOffset = position + effectiveHeaderSize;
             } else {
-                changeTypeBytes = logHeaderBuffer.getInt(recordsCountOffset(magic));
-                arrowHeaderOffset = position + recordBatchHeaderSize + changeTypeBytes;
+                changeTypeBytes = logHeaderBuffer.getInt(recordsCountOffset(sourceMagic));
+                arrowHeaderOffset = position + effectiveHeaderSize + changeTypeBytes;
             }
 
             // read arrow header
@@ -212,16 +248,13 @@ public class FileLogProjection {
                             currentProjection.buffersProjection,
                             currentProjection.bufferCount);
             long arrowBodyLength = projectedArrowBatch.bodyLength();
-
-            int newBatchSizeInBytes =
-                    recordBatchHeaderSize
-                            + changeTypeBytes
-                            + currentProjection.arrowMetadataLength
-                            + (int) arrowBodyLength; // safe to cast to int
-            if (newBatchSizeInBytes > maxBytes) {
-                // the remaining bytes in the file are not enough to read a full batch
-                return new BytesViewLogRecords(builder.build());
-            }
+            byte responseMagic =
+                    resolveResponseMagic(sourceMagic, currentProjection.responseTargetColumns);
+            int projectedHeaderSize =
+                    currentProjection.responseTargetColumns == null
+                            ? recordBatchHeaderSize(responseMagic)
+                            : recordBatchHeaderSizeWithPartialColumns(
+                                    responseMagic, currentProjection.responseTargetColumns.length);
 
             // 3. create new arrow batch metadata which already projected.
             byte[] headerMetadata =
@@ -229,25 +262,47 @@ public class FileLogProjection {
                             projectedArrowBatch,
                             arrowBodyLength,
                             currentProjection.bodyCompression);
-            checkState(
-                    headerMetadata.length == currentProjection.arrowMetadataLength,
-                    "Invalid metadata length");
+
+            int newBatchSizeInBytes =
+                    projectedHeaderSize
+                            + changeTypeBytes
+                            + headerMetadata.length
+                            + (int) arrowBodyLength; // safe to cast to int
+            if (newBatchSizeInBytes > maxBytes) {
+                // the remaining bytes in the file are not enough to read a full batch
+                return new BytesViewLogRecords(builder.build());
+            }
 
             // 4. update and copy log batch header
-            logHeaderBuffer.position(LENGTH_OFFSET);
-            logHeaderBuffer.putInt(newBatchSizeInBytes - LOG_OVERHEAD);
-            logHeaderBuffer.rewind();
-            // the logHeader can't be reused, as it will be sent to network
-            byte[] logHeader = new byte[recordBatchHeaderSize];
-            logHeaderBuffer.get(logHeader);
+            byte[] logHeader =
+                    buildProjectedLogHeader(
+                            sourceMagic,
+                            responseMagic,
+                            projectedHeaderSize,
+                            newBatchSizeInBytes,
+                            currentProjection.responseTargetColumns);
+            long changeTypeOffset = position + effectiveHeaderSize;
 
             // 5. build log records
+            long bufferOffset = arrowHeaderOffset + ARROW_HEADER_SIZE + arrowMetadataSize;
+            long crc =
+                    computeProjectedBatchCrc(
+                            logHeader,
+                            responseMagic,
+                            channel,
+                            changeTypeOffset,
+                            changeTypeBytes,
+                            headerMetadata,
+                            bufferOffset,
+                            projectedArrowBatch.buffers);
+            ByteBuffer.wrap(logHeader)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .putInt(crcOffset(responseMagic), (int) crc);
             builder.addBytes(logHeader);
             if (!isAppendOnly) {
-                builder.addBytes(channel, position + arrowChangeTypeOffset(magic), changeTypeBytes);
+                builder.addBytes(channel, changeTypeOffset, changeTypeBytes);
             }
             builder.addBytes(headerMetadata);
-            final long bufferOffset = arrowHeaderOffset + ARROW_HEADER_SIZE + arrowMetadataSize;
             projectedArrowBatch.buffers.forEach(
                     b ->
                             builder.addBytes(
@@ -258,6 +313,135 @@ public class FileLogProjection {
         }
 
         return new BytesViewLogRecords(builder.build());
+    }
+
+    private int[] readStoredTargetColumns(FileChannel channel, long position) throws IOException {
+        targetColumnsCountBuffer.clear();
+        readFullyOrFail(
+                channel, targetColumnsCountBuffer, position, "partial target columns count");
+        targetColumnsCountBuffer.flip();
+        int targetColumnCount = targetColumnsCountBuffer.getShort() & 0xFFFF;
+        if (targetColumnCount == 0) {
+            return new int[0];
+        }
+        ByteBuffer targetColumnsBuffer =
+                ByteBuffer.allocate(targetColumnCount * Short.BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        readFullyOrFail(
+                channel, targetColumnsBuffer, position + Short.BYTES, "partial target columns");
+        targetColumnsBuffer.flip();
+        int[] targetColumns = new int[targetColumnCount];
+        for (int i = 0; i < targetColumnCount; i++) {
+            targetColumns[i] = targetColumnsBuffer.getShort() & 0xFFFF;
+        }
+        return targetColumns;
+    }
+
+    private byte[] buildProjectedLogHeader(
+            byte sourceMagic,
+            byte responseMagic,
+            int projectedHeaderSize,
+            int newBatchSizeInBytes,
+            @javax.annotation.Nullable int[] responseTargetColumns) {
+        byte[] logHeader = new byte[projectedHeaderSize];
+        ByteBuffer headerBuffer = ByteBuffer.wrap(logHeader).order(ByteOrder.LITTLE_ENDIAN);
+        if (sourceMagic == responseMagic) {
+            int standardHeaderSize = recordBatchHeaderSize(sourceMagic);
+            logHeaderBuffer.rewind();
+            logHeaderBuffer.get(logHeader, 0, standardHeaderSize);
+        } else if (sourceMagic == LOG_MAGIC_VALUE_V0 && responseMagic == LOG_MAGIC_VALUE_V1) {
+            headerBuffer.putLong(BASE_OFFSET_OFFSET, logHeaderBuffer.getLong(BASE_OFFSET_OFFSET));
+            headerBuffer.putInt(LENGTH_OFFSET, newBatchSizeInBytes - LOG_OVERHEAD);
+            headerBuffer.put(MAGIC_OFFSET, responseMagic);
+            headerBuffer.putLong(
+                    COMMIT_TIMESTAMP_OFFSET, logHeaderBuffer.getLong(COMMIT_TIMESTAMP_OFFSET));
+            headerBuffer.putInt(leaderEpochOffset(responseMagic), NO_LEADER_EPOCH);
+            headerBuffer.putInt(crcOffset(responseMagic), 0);
+            headerBuffer.putShort(
+                    schemaIdOffset(responseMagic),
+                    logHeaderBuffer.getShort(schemaIdOffset(sourceMagic)));
+            headerBuffer.put(
+                    attributeOffset(responseMagic),
+                    logHeaderBuffer.get(attributeOffset(sourceMagic)));
+            headerBuffer.putInt(
+                    lastOffsetDeltaOffset(responseMagic),
+                    logHeaderBuffer.getInt(lastOffsetDeltaOffset(sourceMagic)));
+            headerBuffer.putLong(
+                    writeClientIdOffset(responseMagic),
+                    logHeaderBuffer.getLong(writeClientIdOffset(sourceMagic)));
+            headerBuffer.putInt(
+                    batchSequenceOffset(responseMagic),
+                    logHeaderBuffer.getInt(batchSequenceOffset(sourceMagic)));
+            headerBuffer.putInt(
+                    recordsCountOffset(responseMagic),
+                    logHeaderBuffer.getInt(recordsCountOffset(sourceMagic)));
+        } else {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "Unsupported projected header rewrite from magic v%s to v%s",
+                            sourceMagic, responseMagic));
+        }
+        headerBuffer.putInt(LENGTH_OFFSET, newBatchSizeInBytes - LOG_OVERHEAD);
+        headerBuffer.putInt(crcOffset(responseMagic), 0);
+        byte attributes = headerBuffer.get(attributeOffset(responseMagic));
+        attributes =
+                responseTargetColumns == null
+                        ? (byte) (attributes & ~PARTIAL_COLUMNS_FLAG)
+                        : (byte) (attributes | PARTIAL_COLUMNS_FLAG);
+        headerBuffer.put(attributeOffset(responseMagic), attributes);
+        if (responseTargetColumns != null) {
+            headerBuffer.position(recordBatchHeaderSize(responseMagic));
+            headerBuffer.putShort((short) responseTargetColumns.length);
+            for (int targetColumn : responseTargetColumns) {
+                headerBuffer.putShort((short) targetColumn);
+            }
+        }
+        return logHeader;
+    }
+
+    private static byte resolveResponseMagic(
+            byte sourceMagic, @javax.annotation.Nullable int[] responseTargetColumns) {
+        if (responseTargetColumns != null && sourceMagic == LOG_MAGIC_VALUE_V0) {
+            return LOG_MAGIC_VALUE_V1;
+        }
+        return sourceMagic;
+    }
+
+    private long computeProjectedBatchCrc(
+            byte[] logHeader,
+            byte magic,
+            FileChannel channel,
+            long changeTypeOffset,
+            int changeTypeBytes,
+            byte[] headerMetadata,
+            long bufferOffset,
+            List<ArrowBuffer> buffers)
+            throws IOException {
+        Checksum checksum = Crc32C.create();
+        checksum.update(logHeader, schemaIdOffset(magic), logHeader.length - schemaIdOffset(magic));
+        if (changeTypeBytes > 0) {
+            updateChecksumFromChannel(checksum, channel, changeTypeOffset, changeTypeBytes);
+        }
+        checksum.update(headerMetadata, 0, headerMetadata.length);
+        for (ArrowBuffer buffer : buffers) {
+            updateChecksumFromChannel(
+                    checksum, channel, bufferOffset + buffer.getOffset(), (int) buffer.getSize());
+        }
+        return checksum.getValue();
+    }
+
+    private void updateChecksumFromChannel(
+            Checksum checksum, FileChannel channel, long position, int size) throws IOException {
+        long remaining = size;
+        long currentPosition = position;
+        while (remaining > 0) {
+            checksumBuffer.clear();
+            checksumBuffer.limit((int) Math.min(checksumBuffer.capacity(), remaining));
+            readFullyOrFail(channel, checksumBuffer, currentPosition, "projected log batch bytes");
+            int bytesRead = checksumBuffer.position();
+            checksum.update(checksumBuffer.array(), 0, bytesRead);
+            currentPosition += bytesRead;
+            remaining -= bytesRead;
+        }
     }
 
     private ProjectedArrowBatch projectArrowBatch(
@@ -403,24 +587,85 @@ public class FileLogProjection {
         return logHeaderBuffer;
     }
 
-    private ProjectionInfo getOrCreateProjectionInfo(short schemaId) {
+    private ProjectionInfo getOrCreateProjectionInfo(
+            short schemaId, @javax.annotation.Nullable int[] storedTargetColumns) {
         ProjectionInfo cachedProjection =
-                projectionsCache.getProjectionInfo(tableId, schemaId, selectedFieldPositions);
+                projectionsCache.getProjectionInfo(
+                        tableId,
+                        schemaId,
+                        storedTargetColumns,
+                        requestedColumnIds,
+                        requestedOutputSignature);
         if (cachedProjection == null) {
-            cachedProjection = createProjectionInfo(schemaId, selectedFieldPositions);
+            cachedProjection =
+                    createProjectionInfo(
+                            schemaId,
+                            storedTargetColumns,
+                            requestedColumnIds,
+                            requestedOutputRowType);
             projectionsCache.setProjectionInfo(
-                    tableId, schemaId, selectedFieldPositions, cachedProjection);
+                    tableId,
+                    schemaId,
+                    storedTargetColumns,
+                    requestedColumnIds,
+                    requestedOutputSignature,
+                    cachedProjection);
         }
         return cachedProjection;
     }
 
-    private ProjectionInfo createProjectionInfo(short schemaId, int[] selectedFieldPositions) {
+    private ProjectionInfo createProjectionInfo(
+            short schemaId,
+            @javax.annotation.Nullable int[] storedTargetColumns,
+            int[] requestedColumnIds,
+            RowType requestedOutputRowType) {
         org.apache.fluss.metadata.Schema schema = schemaGetter.getSchema(schemaId);
-        RowType rowType = schema.getRowType();
+        RowType fullRowType = schema.getRowType();
+        RowType storedRowType =
+                storedTargetColumns == null
+                        ? fullRowType
+                        : fullRowType.project(storedTargetColumns);
+        int[] sourcePayloadColumns =
+                storedTargetColumns == null
+                        ? allFieldPositions(fullRowType.getFieldCount())
+                        : storedTargetColumns;
+
+        Set<Integer> requestedColumnIdSet = new HashSet<>();
+        for (int requestedColumnId : requestedColumnIds) {
+            requestedColumnIdSet.add(requestedColumnId);
+        }
+
+        List<Integer> payloadPositions = new ArrayList<>();
+        List<Integer> survivingTargetColumns = new ArrayList<>();
+        List<Integer> sourceColumnIds = schema.getColumnIds();
+        for (int payloadPosition = 0;
+                payloadPosition < sourcePayloadColumns.length;
+                payloadPosition++) {
+            int fullFieldPosition = sourcePayloadColumns[payloadPosition];
+            if (requestedColumnIdSet.contains(sourceColumnIds.get(fullFieldPosition))) {
+                payloadPositions.add(payloadPosition);
+                // Returned partial metadata must follow payload order, not full-schema order.
+                survivingTargetColumns.add(fullFieldPosition);
+            }
+        }
+
+        int[] storedSelectedFieldPositions =
+                payloadPositions.stream().mapToInt(Integer::intValue).toArray();
+        int[] survivingSourceColumns =
+                survivingTargetColumns.stream().mapToInt(Integer::intValue).toArray();
+        int[] responseTargetColumns =
+                storedTargetColumns != null
+                                || !matchesRequestedOutput(
+                                        schema,
+                                        survivingSourceColumns,
+                                        requestedColumnIds,
+                                        requestedOutputRowType)
+                        ? survivingSourceColumns
+                        : null;
 
         // initialize the projection util information
-        Schema arrowSchema = ArrowUtils.toArrowSchema(rowType);
-        BitSet selection = toBitSet(arrowSchema.getFields().size(), selectedFieldPositions);
+        Schema arrowSchema = ArrowUtils.toArrowSchema(storedRowType);
+        BitSet selection = toBitSet(arrowSchema.getFields().size(), storedSelectedFieldPositions);
         List<Tuple2<Field, Boolean>> flattenedFields = new ArrayList<>();
         flattenFields(arrowSchema.getFields(), selection, flattenedFields);
         int totalFieldNodes = flattenedFields.size();
@@ -443,19 +688,47 @@ public class FileLogProjection {
             bufferIndex += bufferLayoutCount[i];
         }
 
-        Schema projectedArrowSchema =
-                ArrowUtils.toArrowSchema(rowType.project(selectedFieldPositions));
         ArrowBodyCompression bodyCompression =
                 CompressionUtil.createBodyCompression(compressionInfo.createCompressionCodec());
-        int metadataLength =
-                ArrowUtils.estimateArrowMetadataLength(projectedArrowSchema, bodyCompression);
         return new ProjectionInfo(
                 nodesProjection,
                 buffersProjection,
                 bufferIndex,
-                metadataLength,
                 bodyCompression,
-                selectedFieldPositions);
+                responseTargetColumns);
+    }
+
+    private static int[] allFieldPositions(int fieldCount) {
+        int[] fieldPositions = new int[fieldCount];
+        for (int i = 0; i < fieldCount; i++) {
+            fieldPositions[i] = i;
+        }
+        return fieldPositions;
+    }
+
+    private static boolean matchesRequestedOutput(
+            org.apache.fluss.metadata.Schema sourceSchema,
+            int[] survivingSourceColumns,
+            int[] requestedColumnIds,
+            RowType requestedOutputRowType) {
+        if (survivingSourceColumns.length != requestedColumnIds.length) {
+            return false;
+        }
+        List<org.apache.fluss.metadata.Schema.Column> sourceColumns = sourceSchema.getColumns();
+        for (int i = 0; i < survivingSourceColumns.length; i++) {
+            org.apache.fluss.metadata.Schema.Column sourceColumn =
+                    sourceColumns.get(survivingSourceColumns[i]);
+            if (sourceColumn.getColumnId() != requestedColumnIds[i]) {
+                return false;
+            }
+            if (!sourceColumn
+                    .getDataType()
+                    .copy(true)
+                    .equals(requestedOutputRowType.getTypeAt(i).copy(true))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Projection pushdown information for a specific schema and selected fields. */
@@ -463,23 +736,23 @@ public class FileLogProjection {
         final BitSet nodesProjection;
         final BitSet buffersProjection;
         final int bufferCount;
-        final int arrowMetadataLength;
         final ArrowBodyCompression bodyCompression;
-        final int[] selectedFieldPositions;
+        @javax.annotation.Nullable final int[] responseTargetColumns;
 
         private ProjectionInfo(
                 BitSet nodesProjection,
                 BitSet buffersProjection,
                 int bufferCount,
-                int arrowMetadataLength,
                 ArrowBodyCompression bodyCompression,
-                int[] selectedFieldPositions) {
+                @javax.annotation.Nullable int[] responseTargetColumns) {
             this.nodesProjection = nodesProjection;
             this.buffersProjection = buffersProjection;
             this.bufferCount = bufferCount;
-            this.arrowMetadataLength = arrowMetadataLength;
             this.bodyCompression = bodyCompression;
-            this.selectedFieldPositions = selectedFieldPositions;
+            this.responseTargetColumns =
+                    responseTargetColumns == null
+                            ? null
+                            : Arrays.copyOf(responseTargetColumns, responseTargetColumns.length);
         }
     }
 

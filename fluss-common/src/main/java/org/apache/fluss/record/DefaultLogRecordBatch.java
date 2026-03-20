@@ -21,6 +21,8 @@ import org.apache.fluss.annotation.PublicEvolving;
 import org.apache.fluss.exception.CorruptMessageException;
 import org.apache.fluss.memory.MemorySegment;
 import org.apache.fluss.metadata.LogFormat;
+import org.apache.fluss.row.InternalRow;
+import org.apache.fluss.row.PartialRow;
 import org.apache.fluss.row.ProjectedRow;
 import org.apache.fluss.row.arrow.ArrowReader;
 import org.apache.fluss.row.columnar.ColumnarRow;
@@ -45,13 +47,14 @@ import static org.apache.fluss.record.LogRecordBatchFormat.LOG_MAGIC_VALUE_V1;
 import static org.apache.fluss.record.LogRecordBatchFormat.LOG_OVERHEAD;
 import static org.apache.fluss.record.LogRecordBatchFormat.MAGIC_OFFSET;
 import static org.apache.fluss.record.LogRecordBatchFormat.NO_LEADER_EPOCH;
-import static org.apache.fluss.record.LogRecordBatchFormat.arrowChangeTypeOffset;
+import static org.apache.fluss.record.LogRecordBatchFormat.PARTIAL_COLUMNS_FLAG;
 import static org.apache.fluss.record.LogRecordBatchFormat.attributeOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.batchSequenceOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.crcOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.lastOffsetDeltaOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.leaderEpochOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSize;
+import static org.apache.fluss.record.LogRecordBatchFormat.recordBatchHeaderSizeWithPartialColumns;
 import static org.apache.fluss.record.LogRecordBatchFormat.recordsCountOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.schemaIdOffset;
 import static org.apache.fluss.record.LogRecordBatchFormat.writeClientIdOffset;
@@ -81,11 +84,14 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
     private MemorySegment segment;
     private int position;
     private byte magic;
+    // Cached partial columns metadata parsed from batch header (null if not a partial batch)
+    private int[] partialTargetColumns;
 
     public void pointTo(MemorySegment segment, int position) {
         this.segment = segment;
         this.position = position;
         this.magic = segment.get(position + MAGIC_OFFSET);
+        this.partialTargetColumns = null;
     }
 
     public void setBaseLogOffset(long baseLogOffset) {
@@ -172,6 +178,42 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
         return segment.get(attributeOffset(magic) + position);
     }
 
+    private boolean hasPartialColumns() {
+        return (attributes() & PARTIAL_COLUMNS_FLAG) != 0;
+    }
+
+    /**
+     * Parses and caches the target columns array from the batch header. Must be called after
+     * pointTo() and only when hasPartialColumns() returns true.
+     */
+    private int[] readTargetColumns() {
+        if (partialTargetColumns != null) {
+            return partialTargetColumns;
+        }
+        int offset = position + recordBatchHeaderSize(magic);
+        int count = segment.getShort(offset) & 0xFFFF;
+        offset += 2;
+        int[] columns = new int[count];
+        for (int i = 0; i < count; i++) {
+            columns[i] = segment.getShort(offset) & 0xFFFF;
+            offset += 2;
+        }
+        this.partialTargetColumns = columns;
+        return columns;
+    }
+
+    /**
+     * Returns the offset where records data starts, accounting for optional partial columns
+     * metadata.
+     */
+    private int recordsStartOffset() {
+        if (hasPartialColumns()) {
+            int[] targetCols = readTargetColumns();
+            return recordBatchHeaderSizeWithPartialColumns(magic, targetCols.length);
+        }
+        return recordBatchHeaderSize(magic);
+    }
+
     @Override
     public long nextLogOffset() {
         return lastLogOffset() + 1;
@@ -220,21 +262,43 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
         int schemaId = schemaId();
         long timestamp = commitTimestamp();
         LogFormat logFormat = context.getLogFormat();
-        RowType rowType = context.getRowType(schemaId);
+        int[] targetColumns = hasPartialColumns() ? readTargetColumns() : null;
+        RowType fullWriteRowType = context.getFullRowType(schemaId);
+        RowType storedRowType = context.getStoredRowType(schemaId, targetColumns);
+        ProjectedRow outputProjection = context.getOutputProjectedRow(schemaId);
+        boolean applyOutputProjectionWithoutPartial =
+                targetColumns == null
+                        && outputProjection != null
+                        && storedRowType.equals(fullWriteRowType);
+        int fullSchemaFieldCount = fullWriteRowType.getFieldCount();
 
         switch (logFormat) {
             case ARROW:
                 return columnRecordIterator(
-                        rowType,
-                        context.getOutputProjectedRow(schemaId),
-                        context.getVectorSchemaRoot(schemaId),
+                        storedRowType,
+                        outputProjection,
+                        context.getVectorSchemaRoot(schemaId, targetColumns),
                         context.getBufferAllocator(),
-                        timestamp);
+                        timestamp,
+                        targetColumns,
+                        fullSchemaFieldCount,
+                        applyOutputProjectionWithoutPartial);
             case INDEXED:
                 return rowRecordIterator(
-                        rowType, context.getOutputProjectedRow(schemaId), timestamp);
+                        storedRowType,
+                        outputProjection,
+                        timestamp,
+                        targetColumns,
+                        fullSchemaFieldCount,
+                        applyOutputProjectionWithoutPartial);
             case COMPACTED:
-                return compactedRowRecordIterator(rowType, timestamp);
+                return compactedRowRecordIterator(
+                        storedRowType,
+                        outputProjection,
+                        timestamp,
+                        targetColumns,
+                        fullSchemaFieldCount,
+                        applyOutputProjectionWithoutPartial);
             default:
                 throw new IllegalArgumentException("Unsupported log format: " + logFormat);
         }
@@ -262,10 +326,15 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
     }
 
     private CloseableIterator<LogRecord> rowRecordIterator(
-            RowType rowType, @Nullable ProjectedRow outputProjection, long timestamp) {
+            RowType rowType,
+            @Nullable ProjectedRow outputProjection,
+            long timestamp,
+            @Nullable int[] targetColumns,
+            int fullSchemaFieldCount,
+            boolean applyOutputProjectionWithoutPartial) {
         DataType[] fieldTypes = rowType.getChildren().toArray(new DataType[0]);
         return new LogRecordIterator() {
-            int position = DefaultLogRecordBatch.this.position + recordBatchHeaderSize(magic);
+            int position = DefaultLogRecordBatch.this.position + recordsStartOffset();
             int rowId = 0;
 
             @Override
@@ -275,16 +344,21 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
                                 segment, position, baseOffset + rowId, timestamp, fieldTypes);
                 rowId++;
                 position += logRecord.getSizeInBytes();
-                if (outputProjection == null) {
+                InternalRow row =
+                        toOutputRow(
+                                logRecord.getRow(),
+                                targetColumns,
+                                fullSchemaFieldCount,
+                                outputProjection,
+                                applyOutputProjectionWithoutPartial);
+                if (row == logRecord.getRow()) {
                     return logRecord;
-                } else {
-                    // apply projection
-                    return new GenericRecord(
-                            logRecord.logOffset(),
-                            logRecord.timestamp(),
-                            logRecord.getChangeType(),
-                            outputProjection.replaceRow(logRecord.getRow()));
                 }
+                return new GenericRecord(
+                        logRecord.logOffset(),
+                        logRecord.timestamp(),
+                        logRecord.getChangeType(),
+                        row);
             }
 
             @Override
@@ -298,10 +372,15 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
     }
 
     private CloseableIterator<LogRecord> compactedRowRecordIterator(
-            RowType rowType, long timestamp) {
+            RowType rowType,
+            @Nullable ProjectedRow outputProjection,
+            long timestamp,
+            @Nullable int[] targetColumns,
+            int fullSchemaFieldCount,
+            boolean applyOutputProjectionWithoutPartial) {
         DataType[] fieldTypes = rowType.getChildren().toArray(new DataType[0]);
         return new LogRecordIterator() {
-            int position = DefaultLogRecordBatch.this.position + recordBatchHeaderSize(magic);
+            int position = DefaultLogRecordBatch.this.position + recordsStartOffset();
             int rowId = 0;
 
             @Override
@@ -311,7 +390,21 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
                                 segment, position, baseOffset + rowId, timestamp, fieldTypes);
                 rowId++;
                 position += logRecord.getSizeInBytes();
-                return logRecord;
+                InternalRow row =
+                        toOutputRow(
+                                logRecord.getRow(),
+                                targetColumns,
+                                fullSchemaFieldCount,
+                                outputProjection,
+                                applyOutputProjectionWithoutPartial);
+                if (row == logRecord.getRow()) {
+                    return logRecord;
+                }
+                return new GenericRecord(
+                        logRecord.logOffset(),
+                        logRecord.timestamp(),
+                        logRecord.getChangeType(),
+                        row);
             }
 
             @Override
@@ -329,18 +422,27 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
             @Nullable ProjectedRow outputProjection,
             VectorSchemaRoot root,
             BufferAllocator allocator,
-            long timestamp) {
+            long timestamp,
+            @Nullable int[] targetColumns,
+            int fullSchemaFieldCount,
+            boolean applyOutputProjectionWithoutPartial) {
         boolean isAppendOnly = (attributes() & APPEND_ONLY_FLAG_MASK) > 0;
         if (isAppendOnly) {
             // append only batch, no change type vector,
             // the start of the arrow data is the beginning of the batch records
-            int recordBatchHeaderSize = recordBatchHeaderSize(magic);
-            int arrowOffset = position + recordBatchHeaderSize;
-            int arrowLength = sizeInBytes() - recordBatchHeaderSize;
+            int recordsStart = recordsStartOffset();
+            int arrowOffset = position + recordsStart;
+            int arrowLength = sizeInBytes() - recordsStart;
             ArrowReader reader =
                     ArrowUtils.createArrowReader(
                             segment, arrowOffset, arrowLength, root, allocator, rowType);
-            return new ArrowLogRecordIterator(reader, timestamp, outputProjection) {
+            return new ArrowLogRecordIterator(
+                    reader,
+                    timestamp,
+                    outputProjection,
+                    targetColumns,
+                    fullSchemaFieldCount,
+                    applyOutputProjectionWithoutPartial) {
                 @Override
                 protected ChangeType getChangeType(int rowId) {
                     return ChangeType.APPEND_ONLY;
@@ -349,16 +451,21 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
         } else {
             // with change type, decode the change type vector first,
             // the arrow data starts after the change type vector
-            int changeTypeOffset = position + arrowChangeTypeOffset(magic);
+            int changeTypeOff = position + recordsStartOffset();
             ChangeTypeVector changeTypeVector =
-                    new ChangeTypeVector(segment, changeTypeOffset, getRecordCount());
-            int arrowOffset = changeTypeOffset + changeTypeVector.sizeInBytes();
-            int arrowLength =
-                    sizeInBytes() - arrowChangeTypeOffset(magic) - changeTypeVector.sizeInBytes();
+                    new ChangeTypeVector(segment, changeTypeOff, getRecordCount());
+            int arrowOffset = changeTypeOff + changeTypeVector.sizeInBytes();
+            int arrowLength = sizeInBytes() - recordsStartOffset() - changeTypeVector.sizeInBytes();
             ArrowReader reader =
                     ArrowUtils.createArrowReader(
                             segment, arrowOffset, arrowLength, root, allocator, rowType);
-            return new ArrowLogRecordIterator(reader, timestamp, outputProjection) {
+            return new ArrowLogRecordIterator(
+                    reader,
+                    timestamp,
+                    outputProjection,
+                    targetColumns,
+                    fullSchemaFieldCount,
+                    applyOutputProjectionWithoutPartial) {
                 @Override
                 protected ChangeType getChangeType(int rowId) {
                     return changeTypeVector.getChangeType(rowId);
@@ -373,12 +480,23 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
         private final long timestamp;
         private int rowId = 0;
         @Nullable private final ProjectedRow outputProjection;
+        @Nullable private final int[] targetColumns;
+        private final int fullSchemaFieldCount;
+        private final boolean applyOutputProjectionWithoutPartial;
 
         private ArrowLogRecordIterator(
-                ArrowReader reader, long timestamp, @Nullable ProjectedRow outputProjection) {
+                ArrowReader reader,
+                long timestamp,
+                @Nullable ProjectedRow outputProjection,
+                @Nullable int[] targetColumns,
+                int fullSchemaFieldCount,
+                boolean applyOutputProjectionWithoutPartial) {
             this.reader = reader;
             this.timestamp = timestamp;
             this.outputProjection = outputProjection;
+            this.targetColumns = targetColumns;
+            this.fullSchemaFieldCount = fullSchemaFieldCount;
+            this.applyOutputProjectionWithoutPartial = applyOutputProjectionWithoutPartial;
         }
 
         protected abstract ChangeType getChangeType(int rowId);
@@ -391,14 +509,15 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
         @Override
         protected LogRecord readNext(long baseOffset) {
             ColumnarRow originalRow = reader.read(rowId);
+            InternalRow row =
+                    toOutputRow(
+                            originalRow,
+                            targetColumns,
+                            fullSchemaFieldCount,
+                            outputProjection,
+                            applyOutputProjectionWithoutPartial);
             LogRecord record =
-                    new GenericRecord(
-                            baseOffset + rowId,
-                            timestamp,
-                            getChangeType(rowId),
-                            outputProjection == null
-                                    ? originalRow
-                                    : outputProjection.replaceRow(originalRow));
+                    new GenericRecord(baseOffset + rowId, timestamp, getChangeType(rowId), row);
             rowId++;
             return record;
         }
@@ -412,6 +531,26 @@ public class DefaultLogRecordBatch implements LogRecordBatch {
         public void close() {
             // reader has no resources to release
         }
+    }
+
+    private static InternalRow toOutputRow(
+            InternalRow row,
+            @Nullable int[] targetColumns,
+            int fullSchemaFieldCount,
+            @Nullable ProjectedRow outputProjection,
+            boolean applyOutputProjectionWithoutPartial) {
+        InternalRow outputRow = row;
+        if (targetColumns != null) {
+            outputRow = new PartialRow(outputRow, targetColumns, fullSchemaFieldCount);
+            if (outputProjection != null) {
+                outputRow = outputProjection.replaceRow(outputRow);
+            }
+            return outputRow;
+        }
+        if (applyOutputProjectionWithoutPartial) {
+            return outputProjection.replaceRow(outputRow);
+        }
+        return outputRow;
     }
 
     /** Default log record iterator. */

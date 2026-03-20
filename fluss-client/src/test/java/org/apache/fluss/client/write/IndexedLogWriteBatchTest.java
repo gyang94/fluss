@@ -201,8 +201,54 @@ public class IndexedLogWriteBatchTest {
         }
     }
 
+    @Test
+    void testRejectDifferentTargetColumnsInSameBatch() throws Exception {
+        int[] firstTargetColumns = new int[] {0};
+        IndexedRow firstRow =
+                indexedRow(DATA1_ROW_TYPE.project(firstTargetColumns), new Object[] {1});
+        IndexedLogWriteBatch logWriteBatch =
+                new IndexedLogWriteBatch(
+                        0,
+                        DATA1_PHYSICAL_TABLE_PATH,
+                        DATA1_TABLE_INFO.getSchemaId(),
+                        Integer.MAX_VALUE,
+                        new PreAllocatedPagedOutputView(
+                                Collections.singletonList(MemorySegment.allocateHeapMemory(1000))),
+                        System.currentTimeMillis(),
+                        firstTargetColumns);
+
+        assertThat(
+                        logWriteBatch.tryAppend(
+                                WriteRecord.forIndexedAppend(
+                                        DATA1_TABLE_INFO,
+                                        DATA1_PHYSICAL_TABLE_PATH,
+                                        firstRow,
+                                        null,
+                                        firstTargetColumns),
+                                newWriteCallback()))
+                .isTrue();
+
+        int[] secondTargetColumns = new int[] {1};
+        IndexedRow secondRow =
+                indexedRow(DATA1_ROW_TYPE.project(secondTargetColumns), new Object[] {"a"});
+        assertThatThrownBy(
+                        () ->
+                                logWriteBatch.tryAppend(
+                                        WriteRecord.forIndexedAppend(
+                                                DATA1_TABLE_INFO,
+                                                DATA1_PHYSICAL_TABLE_PATH,
+                                                secondRow,
+                                                null,
+                                                secondTargetColumns),
+                                        newWriteCallback()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("target columns [1]")
+                .hasMessageContaining("current target columns [0]");
+    }
+
     private WriteRecord createWriteRecord() {
-        return WriteRecord.forIndexedAppend(DATA1_TABLE_INFO, DATA1_PHYSICAL_TABLE_PATH, row, null);
+        return WriteRecord.forIndexedAppend(
+                DATA1_TABLE_INFO, DATA1_PHYSICAL_TABLE_PATH, row, null, null);
     }
 
     private IndexedLogWriteBatch createLogWriteBatch(TableBucket tb, long baseLogOffset)
@@ -219,7 +265,8 @@ public class IndexedLogWriteBatchTest {
                 DATA1_TABLE_INFO.getSchemaId(),
                 writeLimit,
                 new PreAllocatedPagedOutputView(Collections.singletonList(memorySegment)),
-                System.currentTimeMillis());
+                System.currentTimeMillis(),
+                null);
     }
 
     private void assertDefaultLogRecordBatchEquals(

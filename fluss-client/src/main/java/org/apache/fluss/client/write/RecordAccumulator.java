@@ -36,6 +36,7 @@ import org.apache.fluss.row.arrow.ArrowWriter;
 import org.apache.fluss.row.arrow.ArrowWriterPool;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.RootAllocator;
+import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.CopyOnWriteMap;
 import org.apache.fluss.utils.MathUtils;
 import org.apache.fluss.utils.clock.Clock;
@@ -621,12 +622,13 @@ public final class RecordAccumulator {
                         clock.milliseconds());
 
             case ARROW_LOG:
+                RowType arrowRowType = projectRowType(tableInfo, writeRecord.getTargetColumns());
                 ArrowWriter arrowWriter =
                         arrowWriterPool.getOrCreateWriter(
                                 tableInfo.getTableId(),
                                 schemaId,
                                 outputView.getPreAllocatedSize(),
-                                tableInfo.getRowType(),
+                                arrowRowType,
                                 tableInfo.getTableConfig().getArrowCompressionInfo());
                 return new ArrowLogWriteBatch(
                         bucketId,
@@ -634,7 +636,8 @@ public final class RecordAccumulator {
                         tableInfo.getSchemaId(),
                         arrowWriter,
                         outputView,
-                        clock.milliseconds());
+                        clock.milliseconds(),
+                        writeRecord.getTargetColumns());
 
             case COMPACTED_LOG:
                 return new CompactedLogWriteBatch(
@@ -643,7 +646,8 @@ public final class RecordAccumulator {
                         schemaId,
                         outputView.getPreAllocatedSize(),
                         outputView,
-                        clock.milliseconds());
+                        clock.milliseconds(),
+                        writeRecord.getTargetColumns());
 
             case INDEXED_LOG:
                 return new IndexedLogWriteBatch(
@@ -652,11 +656,17 @@ public final class RecordAccumulator {
                         tableInfo.getSchemaId(),
                         outputView.getPreAllocatedSize(),
                         outputView,
-                        clock.milliseconds());
+                        clock.milliseconds(),
+                        writeRecord.getTargetColumns());
 
             default:
                 throw new UnsupportedOperationException("Unsupported write format: " + writeFormat);
         }
+    }
+
+    private static RowType projectRowType(TableInfo tableInfo, @Nullable int[] targetColumns) {
+        RowType rowType = tableInfo.getRowType();
+        return targetColumns == null ? rowType : rowType.project(targetColumns);
     }
 
     private RecordAppendResult tryAppend(
