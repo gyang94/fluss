@@ -1,0 +1,83 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+meta:
+  name: perf-kv-upsert
+  description: "KV table upsert + point get – RocksDB write/compaction stress"
+  tags: [kv, upsert, lookup, rocksdb, perf]
+
+table:
+  name: kv_upsert
+  columns:
+    - name: user_id
+      type: BIGINT
+    - name: name
+      type: STRING
+    - name: balance
+      type: DOUBLE
+    - name: updated_at
+      type: BIGINT
+  primary-key: [user_id]
+  buckets: 12
+
+data:
+  seed: 42
+  generators:
+    user_id:
+      type: sequential
+      start: 0
+      end: 5000000
+    name:
+      type: random-string
+      length: 32
+    balance:
+      type: random-double
+      min: 0.0
+      max: 100000.0
+    updated_at:
+      type: timestamp-now
+
+workload:
+  # Phase 1: bulk upsert – fill 5M keys, overwrite to trigger compaction (scaled down for local testing)
+  - phase: write
+    warmup: "5000"
+    records: 1000000
+    threads: 4
+  # Phase 2: sustained upsert
+  - phase: write
+    duration: 1m
+    threads: 4
+  # Phase 3: pure point get under compaction pressure
+  - phase: lookup
+    warmup: "100"
+    duration: 1m
+    threads: 4
+    key-range: [0, 5000000]
+  # Phase 4: concurrent upsert + get
+  - phase: mixed
+    duration: 1m
+    threads: 4
+    mix:
+      write: 50
+      lookup: 50
+
+report:
+  formats: [json, csv, html]
+
+thresholds:
+  write-tps:
+    min: 50000
+  p99-ms:
+    max: 5000

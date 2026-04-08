@@ -1,0 +1,87 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+meta:
+  name: table-ops
+  description: "Create multiple tables, alter one schema, validate list results, and drop them."
+  tags: [admin, ddl, schema]
+
+cluster:
+  bootstrap-servers: "localhost:9123"
+
+table:
+  name-prefix: e2e_table_ops
+  database: e2e
+  columns:
+    - name: id
+      type: INT
+    - name: name
+      type: STRING
+    - name: value
+      type: BIGINT
+    - name: ts
+      type: "TIMESTAMP(3)"
+  primary-key: [id]
+  buckets: 4
+
+params:
+  tables: 5
+
+steps:
+  - action: create-tables
+    id: batch_create
+    args:
+      count: "${params.tables}"
+  - action: list-tables
+    id: listed
+  - action: get-table
+    id: before_alter
+    args:
+      table: "${created_tables[0]}"
+  - action: alter-table
+    id: after_alter
+    args:
+      table: "${created_tables[0]}"
+      column-name: extra_note
+      column-type: STRING
+  - action: validate
+    id: pre_drop_validate
+    checks:
+      - name: created_tables_listed
+        assert: "${batch_create.tables_created} == ${params.tables}"
+      - name: alter_increments_schema_id
+        assert: "${after_alter.schema_id} > ${before_alter.schema_id}"
+  - action: drop-tables
+    id: batch_drop
+  - action: list-tables
+    id: remaining
+  - action: validate
+    checks:
+      - name: tables_dropped
+        assert: "${batch_drop.tables_dropped} == ${params.tables}"
+
+verify:
+  - type: data
+    assert:
+      - "${batch_create.tables_created} == ${params.tables}"
+      - "${after_alter.schema_id} > ${before_alter.schema_id}"
+      - "${batch_drop.tables_dropped} == ${params.tables}"
+
+teardown:
+  - action: drop-tables
+    on-error: ignore

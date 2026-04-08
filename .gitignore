@@ -28,6 +28,8 @@ dependency-reduced-pom.xml
 ### Mac OS ###
 .DS_Store
 
+docs/
+
 # website & docs
 website/node_modules
 website/build

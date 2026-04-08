@@ -1,0 +1,176 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+services:
+  zookeeper:
+    image: zookeeper:3.9.2
+    restart: unless-stopped
+    ports:
+      - "2181:2181"
+
+  coordinator-server:
+    image: ${FLUSS_IMAGE:-fluss-local:latest}
+    build:
+      context: ${FLUSS_SOURCE_ROOT}
+      dockerfile: ${FLUSS_E2E_CLI_ROOT}/docker/fluss-runtime.Dockerfile
+    command: coordinatorServer
+    depends_on:
+      - zookeeper
+    ports:
+      - "9123:9123"
+      - "9249:9249"
+    volumes:
+      - ${FLUSS_E2E_BUILD_TARGET}/lib:/opt/fluss/lib:ro
+      - shared-tmpfs:/tmp/fluss
+    environment:
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper:2181
+        bind.listeners: INTERNAL://coordinator-server:0, CLIENT://coordinator-server:9123
+        advertised.listeners: CLIENT://localhost:9123
+        internal.listener.name: INTERNAL
+        remote.data.dir: /tmp/fluss/remote-data
+        metrics.reporters: prometheus
+        metrics.reporter.prometheus.port: 9249
+
+  tablet-server-0:
+    image: ${FLUSS_IMAGE:-fluss-local:latest}
+    build:
+      context: ${FLUSS_SOURCE_ROOT}
+      dockerfile: ${FLUSS_E2E_CLI_ROOT}/docker/fluss-runtime.Dockerfile
+    command: tabletServer
+    depends_on:
+      - coordinator-server
+    ports:
+      - "9124:9123"
+      - "9250:9249"
+    volumes:
+      - ${FLUSS_E2E_BUILD_TARGET}/lib:/opt/fluss/lib:ro
+      - shared-tmpfs:/tmp/fluss
+    environment:
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper:2181
+        bind.listeners: INTERNAL://tablet-server-0:0, CLIENT://tablet-server-0:9123
+        advertised.listeners: CLIENT://localhost:9124
+        internal.listener.name: INTERNAL
+        tablet-server.id: 0
+        kv.snapshot.interval: 0s
+        data.dir: /tmp/fluss/data/tablet-server-0
+        remote.data.dir: /tmp/fluss/remote-data
+        metrics.reporters: prometheus
+        metrics.reporter.prometheus.port: 9249
+
+  tablet-server-1:
+    image: ${FLUSS_IMAGE:-fluss-local:latest}
+    build:
+      context: ${FLUSS_SOURCE_ROOT}
+      dockerfile: ${FLUSS_E2E_CLI_ROOT}/docker/fluss-runtime.Dockerfile
+    command: tabletServer
+    depends_on:
+      - coordinator-server
+    ports:
+      - "9125:9123"
+      - "9251:9249"
+    volumes:
+      - ${FLUSS_E2E_BUILD_TARGET}/lib:/opt/fluss/lib:ro
+      - shared-tmpfs:/tmp/fluss
+    environment:
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper:2181
+        bind.listeners: INTERNAL://tablet-server-1:0, CLIENT://tablet-server-1:9123
+        advertised.listeners: CLIENT://localhost:9125
+        internal.listener.name: INTERNAL
+        tablet-server.id: 1
+        kv.snapshot.interval: 0s
+        data.dir: /tmp/fluss/data/tablet-server-1
+        remote.data.dir: /tmp/fluss/remote-data
+        metrics.reporters: prometheus
+        metrics.reporter.prometheus.port: 9249
+
+  tablet-server-2:
+    image: ${FLUSS_IMAGE:-fluss-local:latest}
+    build:
+      context: ${FLUSS_SOURCE_ROOT}
+      dockerfile: ${FLUSS_E2E_CLI_ROOT}/docker/fluss-runtime.Dockerfile
+    command: tabletServer
+    depends_on:
+      - coordinator-server
+    ports:
+      - "9126:9123"
+      - "9252:9249"
+    volumes:
+      - ${FLUSS_E2E_BUILD_TARGET}/lib:/opt/fluss/lib:ro
+      - shared-tmpfs:/tmp/fluss
+    environment:
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper:2181
+        bind.listeners: INTERNAL://tablet-server-2:0, CLIENT://tablet-server-2:9123
+        advertised.listeners: CLIENT://localhost:9126
+        internal.listener.name: INTERNAL
+        tablet-server.id: 2
+        kv.snapshot.interval: 0s
+        data.dir: /tmp/fluss/data/tablet-server-2
+        remote.data.dir: /tmp/fluss/remote-data
+        metrics.reporters: prometheus
+        metrics.reporter.prometheus.port: 9249
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    depends_on:
+      - coordinator-server
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus-perf.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    depends_on:
+      - prometheus
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+
+  perf-client:
+    image: ${PERF_CLIENT_IMAGE:-fluss-perf-client:latest}
+    profiles:
+      - perf-client
+    depends_on:
+      - coordinator-server
+      - tablet-server-0
+      - tablet-server-1
+      - tablet-server-2
+    environment:
+      BOOTSTRAP_SERVERS: coordinator-server:9123
+      SCENARIO_FILE: /perf/scenario.yaml
+    volumes:
+      - ${PERF_SCENARIO_FILE:-./scenario.yaml}:/perf/scenario.yaml:ro
+      - ${PERF_OUTPUT_DIR:-./perf-output}:/perf/output
+
+volumes:
+  shared-tmpfs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=4g
