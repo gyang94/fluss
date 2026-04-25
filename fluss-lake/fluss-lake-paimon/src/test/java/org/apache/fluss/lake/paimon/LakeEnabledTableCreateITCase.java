@@ -698,8 +698,9 @@ class LakeEnabledTableCreateITCase {
                     .cause()
                     .isInstanceOf(InvalidTableException.class)
                     .hasMessageContaining(
-                            systemColumn
-                                    + " cannot be used as column names, because they are reserved system columns in Fluss.");
+                            "Column "
+                                    + systemColumn
+                                    + " conflicts with a system column name of paimon table, please rename the column.");
         }
     }
 
