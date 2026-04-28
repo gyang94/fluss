@@ -47,9 +47,13 @@ public final class SystemTableConstants {
     /** Name of the tablet servers system view. */
     public static final String TABLET_SERVERS_VIEW = "tablet_servers";
 
+    /** Name of the table buckets system view. */
+    public static final String TABLE_BUCKETS_VIEW = "table_buckets";
+
     /** All known system view names. */
     private static final Set<String> SYSTEM_VIEW_NAMES =
-            Collections.unmodifiableSet(new HashSet<>(Arrays.asList(TABLET_SERVERS_VIEW)));
+            Collections.unmodifiableSet(
+                    new HashSet<>(Arrays.asList(TABLET_SERVERS_VIEW, TABLE_BUCKETS_VIEW)));
 
     // ---- table_kind values used in GetTableInfoResponse ----
 

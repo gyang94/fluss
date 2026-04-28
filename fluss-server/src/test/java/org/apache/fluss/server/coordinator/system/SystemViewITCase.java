@@ -142,6 +142,28 @@ class SystemViewITCase {
     }
 
     @Test
+    void testListTablesIncludesTableBucketsView() throws Exception {
+        List<String> tables =
+                gateway.listTables(newListTablesRequest(SystemTableConstants.SYSTEM_DATABASE))
+                        .get()
+                        .getTableNamesList();
+        assertThat(tables).contains(SystemTableConstants.TABLE_BUCKETS_VIEW);
+    }
+
+    @Test
+    void testGetTableInfoForTableBucketsView() throws Exception {
+        TablePath bucketsPath =
+                TablePath.of(
+                        SystemTableConstants.SYSTEM_DATABASE,
+                        SystemTableConstants.TABLE_BUCKETS_VIEW);
+        GetTableInfoResponse response =
+                gateway.getTableInfo(newGetTableInfoRequest(bucketsPath)).get();
+        assertThat(response.hasTableKind()).isTrue();
+        assertThat(response.getTableKind()).isEqualTo(SystemTableConstants.TABLE_KIND_SYSTEM_VIEW);
+        assertThat(response.getSchemaId()).isEqualTo(2);
+    }
+
+    @Test
     void testScanNonExistentViewReturnsError() throws Exception {
         ScanSystemViewRequest request = new ScanSystemViewRequest();
         request.setDatabaseName(SystemTableConstants.SYSTEM_DATABASE);

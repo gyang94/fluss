@@ -89,6 +89,7 @@ import org.apache.fluss.server.coordinator.CoordinatorService;
 import org.apache.fluss.server.coordinator.MetadataManager;
 import org.apache.fluss.server.coordinator.system.SystemTableResolver;
 import org.apache.fluss.server.coordinator.system.SystemViewDefinition;
+import org.apache.fluss.server.coordinator.system.TableBucketsViewProvider;
 import org.apache.fluss.server.coordinator.system.TabletServersViewProvider;
 import org.apache.fluss.server.kv.snapshot.CompletedSnapshot;
 import org.apache.fluss.server.metadata.MetadataProvider;
@@ -195,6 +196,7 @@ public abstract class RpcServiceBase extends RpcGatewayService implements AdminR
         // Register common system view providers for all server types.
         // it is registered as a full provider (definition + data serving).
         resolver.registerViewProvider(new TabletServersViewProvider(zkClient));
+        resolver.registerViewProvider(new TableBucketsViewProvider(zkClient));
         registerServerSpecificSystemViews(resolver);
         return resolver;
     }
