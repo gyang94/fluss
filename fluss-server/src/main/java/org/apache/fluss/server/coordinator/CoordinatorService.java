@@ -50,6 +50,7 @@ import org.apache.fluss.metadata.DeleteBehavior;
 import org.apache.fluss.metadata.MergeEngineType;
 import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
+import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -171,6 +172,7 @@ import org.apache.fluss.server.zk.data.TableRegistration;
 import org.apache.fluss.server.zk.data.lake.LakeTable;
 import org.apache.fluss.server.zk.data.lake.LakeTableHelper;
 import org.apache.fluss.server.zk.data.producer.ProducerOffsets;
+import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.IOUtils;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 import org.apache.fluss.utils.json.TableBucketOffsets;
@@ -226,6 +228,10 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
 
     private static final Logger LOG = LoggerFactory.getLogger(CoordinatorService.class);
 
+    static final String SYSTEM_DATABASE_NAME = "fluss_system";
+    static final String CONSUMER_OFFSETS_TABLE_NAME = "sys.consumer_offsets";
+
+    private final Configuration conf;
     private final int defaultBucketNumber;
     private final int defaultReplicationFactor;
     private final boolean logTableAllowCreation;
@@ -264,6 +270,7 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                 authorizer,
                 dynamicConfigManager,
                 ioExecutor);
+        this.conf = conf;
         this.defaultBucketNumber = conf.getInt(ConfigOptions.DEFAULT_BUCKET_NUMBER);
         this.defaultReplicationFactor = conf.getInt(ConfigOptions.DEFAULT_REPLICATION_FACTOR);
         this.logTableAllowCreation = conf.getBoolean(ConfigOptions.LOG_TABLE_ALLOW_CREATION);
@@ -285,6 +292,9 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
 
         this.kvSnapshotLeaseManager = kvSnapshotLeaseManager;
         this.coordinatorLeaderElection = coordinatorLeaderElection;
+
+        // Initialize system tables (e.g. sys.consumer_offsets)
+        initSystemTables();
     }
 
     @Override
@@ -301,6 +311,56 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
     public void shutdown() {
         IOUtils.closeQuietly(producerOffsetsManager, "producer snapshot manager");
         IOUtils.closeQuietly(lakeCatalogDynamicLoader, "lake catalog");
+    }
+
+    /**
+     * Initializes system database and tables required by the coordinator.
+     *
+     * <p>Creates the {@code fluss_system} database and the {@code sys.consumer_offsets} KV table if
+     * they do not already exist.
+     */
+    private void initSystemTables() {
+        if (!metadataManager.databaseExists(SYSTEM_DATABASE_NAME)) {
+            metadataManager.createDatabase(SYSTEM_DATABASE_NAME, DatabaseDescriptor.EMPTY, true);
+            LOG.info("Created system database: {}", SYSTEM_DATABASE_NAME);
+        }
+
+        TablePath consumerOffsetsPath =
+                TablePath.of(SYSTEM_DATABASE_NAME, CONSUMER_OFFSETS_TABLE_NAME);
+        if (!metadataManager.tableExists(consumerOffsetsPath)) {
+            Schema schema =
+                    Schema.newBuilder()
+                            .column("offset_key", DataTypes.BYTES())
+                            .column("offset_value", DataTypes.BYTES())
+                            .primaryKey("offset_key")
+                            .build();
+
+            int bucketCount = conf.getInt(ConfigOptions.CONSUMER_OFFSETS_BUCKET_COUNT);
+            int replicationFactor = conf.getInt(ConfigOptions.CONSUMER_OFFSETS_REPLICATION_FACTOR);
+
+            TableDescriptor tableDescriptor =
+                    TableDescriptor.builder()
+                            .schema(schema)
+                            .property(
+                                    ConfigOptions.TABLE_REPLICATION_FACTOR.key(),
+                                    String.valueOf(replicationFactor))
+                            .distributedBy(bucketCount)
+                            .build();
+
+            TableAssignment tableAssignment = null;
+            TabletServerInfo[] servers = metadataCache.getLiveServers();
+            if (servers.length > 0) {
+                tableAssignment = generateAssignment(bucketCount, replicationFactor, servers);
+            }
+
+            metadataManager.createTable(
+                    consumerOffsetsPath, tableDescriptor, tableAssignment, true);
+            LOG.info(
+                    "Created system table: {} with {} buckets, replication factor {}",
+                    consumerOffsetsPath,
+                    bucketCount,
+                    replicationFactor);
+        }
     }
 
     @Override
@@ -424,6 +484,10 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
     @Override
     public CompletableFuture<DropDatabaseResponse> dropDatabase(DropDatabaseRequest request) {
         authorizeDatabase(OperationType.DROP, request.getDatabaseName());
+        if (SYSTEM_DATABASE_NAME.equals(request.getDatabaseName())) {
+            throw new InvalidDatabaseException(
+                    "Cannot drop system database: " + SYSTEM_DATABASE_NAME);
+        }
         DropDatabaseResponse response = new DropDatabaseResponse();
         metadataManager.dropDatabase(
                 request.getDatabaseName(), request.isIgnoreIfNotExists(), request.isCascade());
@@ -505,6 +569,9 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
         TablePath tablePath = toTablePath(request.getTablePath());
         tablePath.validate();
         authorizeTable(OperationType.ALTER, tablePath);
+        if (SYSTEM_DATABASE_NAME.equals(tablePath.getDatabaseName())) {
+            throw new InvalidTableException("Cannot alter system table: " + tablePath);
+        }
 
         List<TableChange> alterTableConfigChanges =
                 toAlterTableConfigChanges(request.getConfigChangesList());
@@ -667,6 +734,9 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
     public CompletableFuture<DropTableResponse> dropTable(DropTableRequest request) {
         TablePath tablePath = toTablePath(request.getTablePath());
         authorizeTable(OperationType.DROP, tablePath);
+        if (SYSTEM_DATABASE_NAME.equals(tablePath.getDatabaseName())) {
+            throw new InvalidTableException("Cannot drop system table: " + tablePath);
+        }
 
         DropTableResponse response = new DropTableResponse();
         metadataManager.dropTable(tablePath, request.isIgnoreIfNotExists());

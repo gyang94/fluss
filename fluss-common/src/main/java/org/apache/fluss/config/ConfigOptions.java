@@ -430,6 +430,23 @@ public class ConfigOptions {
                             "The interval for cleaning up expired producer offsets "
                                     + "and orphan files in remote storage. Default is 1 hour.");
 
+    /** Number of buckets for the sys.consumer_offsets system table. */
+    public static final ConfigOption<Integer> CONSUMER_OFFSETS_BUCKET_COUNT =
+            key("consumer.offsets.bucket.count")
+                    .intType()
+                    .defaultValue(16)
+                    .withDescription(
+                            "Number of buckets for the sys.consumer_offsets system table.");
+
+    /** Replication factor for the sys.consumer_offsets system table. */
+    public static final ConfigOption<Integer> CONSUMER_OFFSETS_REPLICATION_FACTOR =
+            key("consumer.offsets.replication.factor")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "Replication factor for the sys.consumer_offsets system table. "
+                                    + "Defaults to 1. Set to cluster default in production.");
+
     // ------------------------------------------------------------------------
     //  ConfigOptions for Tablet Server
     // ------------------------------------------------------------------------

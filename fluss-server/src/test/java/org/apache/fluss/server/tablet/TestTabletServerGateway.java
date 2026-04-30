@@ -24,12 +24,18 @@ import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.ApiMessage;
 import org.apache.fluss.rpc.messages.ApiVersionsRequest;
 import org.apache.fluss.rpc.messages.ApiVersionsResponse;
+import org.apache.fluss.rpc.messages.CommitOffsetsRequest;
+import org.apache.fluss.rpc.messages.CommitOffsetsResponse;
 import org.apache.fluss.rpc.messages.DatabaseExistsRequest;
 import org.apache.fluss.rpc.messages.DatabaseExistsResponse;
 import org.apache.fluss.rpc.messages.DescribeClusterConfigsRequest;
 import org.apache.fluss.rpc.messages.DescribeClusterConfigsResponse;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
 import org.apache.fluss.rpc.messages.FetchLogResponse;
+import org.apache.fluss.rpc.messages.FetchOffsetsRequest;
+import org.apache.fluss.rpc.messages.FetchOffsetsResponse;
+import org.apache.fluss.rpc.messages.FindCoordinatorRequest;
+import org.apache.fluss.rpc.messages.FindCoordinatorResponse;
 import org.apache.fluss.rpc.messages.GetDatabaseInfoRequest;
 import org.apache.fluss.rpc.messages.GetDatabaseInfoResponse;
 import org.apache.fluss.rpc.messages.GetFileSystemSecurityTokenRequest;
@@ -454,6 +460,22 @@ public class TestTabletServerGateway implements TabletServerGateway {
         StopReplicaResponse stopReplicaResponse = new StopReplicaResponse();
         stopReplicaResponse.addAllStopReplicasResps(protoStopReplicaRespForBuckets);
         return stopReplicaResponse;
+    }
+
+    @Override
+    public CompletableFuture<FindCoordinatorResponse> findCoordinator(
+            FindCoordinatorRequest request) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public CompletableFuture<CommitOffsetsResponse> commitOffsets(CommitOffsetsRequest request) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public CompletableFuture<FetchOffsetsResponse> fetchOffsets(FetchOffsetsRequest request) {
+        throw new UnsupportedOperationException();
     }
 
     @Override

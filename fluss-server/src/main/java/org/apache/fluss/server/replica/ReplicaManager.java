@@ -67,6 +67,7 @@ import org.apache.fluss.rpc.protocol.ApiKeys;
 import org.apache.fluss.rpc.protocol.Errors;
 import org.apache.fluss.rpc.protocol.MergeMode;
 import org.apache.fluss.server.coordinator.CoordinatorContext;
+import org.apache.fluss.server.coordinator.group.CoordinatorRuntime;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.entity.LakeBucketOffset;
 import org.apache.fluss.server.entity.NotifyKvSnapshotOffsetData;
@@ -202,6 +203,10 @@ public class ReplicaManager implements ServerReconfigurable {
     // remote log manager for remote log storage.
     private final RemoteLogManager remoteLogManager;
 
+    // GroupCoordinator runtime for managing consumer offset shards.
+    @Nullable private CoordinatorRuntime coordinatorRuntime;
+    private long consumerOffsetsTableId = -1;
+
     // for metrics
     private final TabletServerMetricGroup serverMetricGroup;
     private final UserMetrics userMetrics;
@@ -311,6 +316,22 @@ public class ReplicaManager implements ServerReconfigurable {
         this.ioExecutor = ioExecutor;
         this.minInSyncReplicas = conf.get(ConfigOptions.LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER);
         registerMetrics();
+    }
+
+    /**
+     * Set the CoordinatorRuntime for managing GroupCoordinator shards. Called from TabletServer
+     * after both ReplicaManager and CoordinatorRuntime are created.
+     */
+    public void setCoordinatorRuntime(CoordinatorRuntime coordinatorRuntime) {
+        this.coordinatorRuntime = coordinatorRuntime;
+    }
+
+    /**
+     * Set the table ID of the sys.consumer_offsets table. When a bucket for this table becomes
+     * leader or follower, the corresponding GroupCoordinator shard is loaded or unloaded.
+     */
+    public void setConsumerOffsetsTableId(long tableId) {
+        this.consumerOffsetsTableId = tableId;
     }
 
     public void startup() {
@@ -1105,6 +1126,27 @@ public class ReplicaManager implements ServerReconfigurable {
                     updateWithLakeTableSnapshot(replica);
                 }
 
+                // Load GroupCoordinator shard for sys.consumer_offsets buckets
+                if (coordinatorRuntime != null && tb.getTableId() == consumerOffsetsTableId) {
+                    if (replica.getKvTablet() != null) {
+                        coordinatorRuntime.loadShardFromKv(
+                                tb.getBucket(),
+                                data.getLeaderEpoch(),
+                                scanner -> {
+                                    try {
+                                        replica.getKvTablet().scanAll(scanner);
+                                    } catch (Exception ex) {
+                                        throw new RuntimeException(
+                                                "Failed to scan KV for shard loading", ex);
+                                    }
+                                });
+                    } else {
+                        coordinatorRuntime.scheduleLoadOperation(
+                                tb.getBucket(), data.getLeaderEpoch());
+                        coordinatorRuntime.markShardLoaded(tb.getBucket());
+                    }
+                }
+
                 // start the remote log tiering tasks for leaders
                 remoteLogManager.startLogTiering(replica);
                 result.put(tb, new NotifyLeaderAndIsrResultForBucket(tb));
@@ -1155,6 +1197,10 @@ public class ReplicaManager implements ServerReconfigurable {
                 Replica replica = getReplicaOrException(data.getTableBucket());
                 if (replica.makeFollower(data)) {
                     replicasBecomeFollower.add(replica);
+                }
+                // Unload GroupCoordinator shard for sys.consumer_offsets buckets
+                if (coordinatorRuntime != null && tb.getTableId() == consumerOffsetsTableId) {
+                    coordinatorRuntime.scheduleUnloadOperation(tb.getBucket());
                 }
                 // stop the remote log tiering tasks for followers
                 remoteLogManager.stopLogTiering(replica);

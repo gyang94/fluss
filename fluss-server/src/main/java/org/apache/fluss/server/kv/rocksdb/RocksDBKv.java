@@ -40,6 +40,7 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BiConsumer;
 
 /** A wrapper for the operation of {@link org.rocksdb.RocksDB}. */
 public class RocksDBKv implements AutoCloseable {
@@ -149,6 +150,26 @@ public class RocksDBKv implements AutoCloseable {
         }
 
         return pkList;
+    }
+
+    /**
+     * Scan all key-value entries in the store.
+     *
+     * @param consumer callback invoked with (key, value) for each entry
+     */
+    public void scanAll(BiConsumer<byte[], byte[]> consumer) {
+        ReadOptions readOptions = new ReadOptions();
+        RocksIterator iterator = db.newIterator(defaultColumnFamilyHandle, readOptions);
+        try {
+            iterator.seekToFirst();
+            while (iterator.isValid()) {
+                consumer.accept(iterator.key(), iterator.value());
+                iterator.next();
+            }
+        } finally {
+            readOptions.close();
+            iterator.close();
+        }
     }
 
     public void put(byte[] key, byte[] value) throws IOException {

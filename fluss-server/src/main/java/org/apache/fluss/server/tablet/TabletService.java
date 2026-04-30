@@ -30,8 +30,14 @@ import org.apache.fluss.rpc.entity.LookupResultForBucket;
 import org.apache.fluss.rpc.entity.PrefixLookupResultForBucket;
 import org.apache.fluss.rpc.entity.ResultForBucket;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
+import org.apache.fluss.rpc.messages.CommitOffsetsRequest;
+import org.apache.fluss.rpc.messages.CommitOffsetsResponse;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
 import org.apache.fluss.rpc.messages.FetchLogResponse;
+import org.apache.fluss.rpc.messages.FetchOffsetsRequest;
+import org.apache.fluss.rpc.messages.FetchOffsetsResponse;
+import org.apache.fluss.rpc.messages.FindCoordinatorRequest;
+import org.apache.fluss.rpc.messages.FindCoordinatorResponse;
 import org.apache.fluss.rpc.messages.GetTableStatsRequest;
 import org.apache.fluss.rpc.messages.GetTableStatsResponse;
 import org.apache.fluss.rpc.messages.InitWriterRequest;
@@ -73,6 +79,7 @@ import org.apache.fluss.server.DynamicConfigManager;
 import org.apache.fluss.server.RpcServiceBase;
 import org.apache.fluss.server.authorizer.Authorizer;
 import org.apache.fluss.server.coordinator.MetadataManager;
+import org.apache.fluss.server.coordinator.group.GroupCoordinatorService;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.entity.NotifyLeaderAndIsrData;
 import org.apache.fluss.server.entity.UserContext;
@@ -137,6 +144,7 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
     private final ReplicaManager replicaManager;
     private final TabletServerMetadataCache metadataCache;
     private final TabletServerMetadataProvider metadataFunctionProvider;
+    private final GroupCoordinatorService groupCoordinatorService;
 
     public TabletService(
             int serverId,
@@ -147,7 +155,8 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
             MetadataManager metadataManager,
             @Nullable Authorizer authorizer,
             DynamicConfigManager dynamicConfigManager,
-            ExecutorService ioExecutor) {
+            ExecutorService ioExecutor,
+            GroupCoordinatorService groupCoordinatorService) {
         super(
                 remoteFileSystem,
                 ServerType.TABLET_SERVER,
@@ -161,6 +170,7 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
         this.metadataCache = metadataCache;
         this.metadataFunctionProvider =
                 new TabletServerMetadataProvider(zkClient, metadataManager, metadataCache);
+        this.groupCoordinatorService = groupCoordinatorService;
     }
 
     @Override
@@ -170,6 +180,22 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
 
     @Override
     public void shutdown() {}
+
+    @Override
+    public CompletableFuture<FindCoordinatorResponse> findCoordinator(
+            FindCoordinatorRequest request) {
+        return groupCoordinatorService.findCoordinator(request);
+    }
+
+    @Override
+    public CompletableFuture<CommitOffsetsResponse> commitOffsets(CommitOffsetsRequest request) {
+        return groupCoordinatorService.commitOffsets(request);
+    }
+
+    @Override
+    public CompletableFuture<FetchOffsetsResponse> fetchOffsets(FetchOffsetsRequest request) {
+        return groupCoordinatorService.fetchOffsets(request);
+    }
 
     @Override
     public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {

@@ -21,6 +21,8 @@ import org.apache.fluss.exception.ApiException;
 import org.apache.fluss.exception.AuthenticationException;
 import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.exception.ConfigException;
+import org.apache.fluss.exception.CoordinatorLoadInProgressException;
+import org.apache.fluss.exception.CoordinatorNotAvailableException;
 import org.apache.fluss.exception.CorruptMessageException;
 import org.apache.fluss.exception.CorruptRecordException;
 import org.apache.fluss.exception.DatabaseAlreadyExistException;
@@ -30,12 +32,15 @@ import org.apache.fluss.exception.DeletionDisabledException;
 import org.apache.fluss.exception.DuplicateSequenceException;
 import org.apache.fluss.exception.FencedLeaderEpochException;
 import org.apache.fluss.exception.FencedTieringEpochException;
+import org.apache.fluss.exception.IllegalGenerationException;
 import org.apache.fluss.exception.IneligibleReplicaException;
 import org.apache.fluss.exception.InvalidAlterTableException;
 import org.apache.fluss.exception.InvalidColumnProjectionException;
+import org.apache.fluss.exception.InvalidCommitOffsetException;
 import org.apache.fluss.exception.InvalidConfigException;
 import org.apache.fluss.exception.InvalidCoordinatorException;
 import org.apache.fluss.exception.InvalidDatabaseException;
+import org.apache.fluss.exception.InvalidGroupIdException;
 import org.apache.fluss.exception.InvalidPartitionException;
 import org.apache.fluss.exception.InvalidProducerIdException;
 import org.apache.fluss.exception.InvalidReplicationFactorException;
@@ -57,6 +62,7 @@ import org.apache.fluss.exception.LogStorageException;
 import org.apache.fluss.exception.NetworkException;
 import org.apache.fluss.exception.NoRebalanceInProgressException;
 import org.apache.fluss.exception.NonPrimaryKeyTableException;
+import org.apache.fluss.exception.NotCoordinatorException;
 import org.apache.fluss.exception.NotCoordinatorLeaderException;
 import org.apache.fluss.exception.NotEnoughReplicasAfterAppendException;
 import org.apache.fluss.exception.NotEnoughReplicasException;
@@ -83,6 +89,7 @@ import org.apache.fluss.exception.TimeoutException;
 import org.apache.fluss.exception.TooManyBucketsException;
 import org.apache.fluss.exception.TooManyPartitionsException;
 import org.apache.fluss.exception.TooManyScannersException;
+import org.apache.fluss.exception.UnknownMemberIdException;
 import org.apache.fluss.exception.UnknownScannerIdException;
 import org.apache.fluss.exception.UnknownServerException;
 import org.apache.fluss.exception.UnknownTableOrBucketException;
@@ -265,7 +272,29 @@ public enum Errors {
     TOO_MANY_SCANNERS(
             69,
             "The per-bucket or per-server scanner session limit has been reached.",
-            TooManyScannersException::new);
+            TooManyScannersException::new),
+    NOT_COORDINATOR_EXCEPTION(
+            70,
+            "This server is not the coordinator for the requested group.",
+            NotCoordinatorException::new),
+    COORDINATOR_LOAD_IN_PROGRESS_EXCEPTION(
+            71,
+            "The coordinator is still loading its state.",
+            CoordinatorLoadInProgressException::new),
+    COORDINATOR_NOT_AVAILABLE_EXCEPTION(
+            72,
+            "No coordinator is available for the requested group.",
+            CoordinatorNotAvailableException::new),
+    INVALID_GROUP_ID_EXCEPTION(
+            73, "The provided group ID is invalid.", InvalidGroupIdException::new),
+    INVALID_COMMIT_OFFSET_EXCEPTION(
+            74, "The committed offset is invalid.", InvalidCommitOffsetException::new),
+    ILLEGAL_GENERATION_EXCEPTION(
+            75,
+            "The generation ID does not match the expected value.",
+            IllegalGenerationException::new),
+    UNKNOWN_MEMBER_ID_EXCEPTION(
+            76, "The member ID is not recognized.", UnknownMemberIdException::new);
 
     private static final Logger LOG = LoggerFactory.getLogger(Errors.class);
 

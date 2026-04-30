@@ -18,8 +18,14 @@
 package org.apache.fluss.rpc.gateway;
 
 import org.apache.fluss.rpc.RpcGateway;
+import org.apache.fluss.rpc.messages.CommitOffsetsRequest;
+import org.apache.fluss.rpc.messages.CommitOffsetsResponse;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
 import org.apache.fluss.rpc.messages.FetchLogResponse;
+import org.apache.fluss.rpc.messages.FetchOffsetsRequest;
+import org.apache.fluss.rpc.messages.FetchOffsetsResponse;
+import org.apache.fluss.rpc.messages.FindCoordinatorRequest;
+import org.apache.fluss.rpc.messages.FindCoordinatorResponse;
 import org.apache.fluss.rpc.messages.GetTableStatsRequest;
 import org.apache.fluss.rpc.messages.GetTableStatsResponse;
 import org.apache.fluss.rpc.messages.InitWriterRequest;
@@ -194,4 +200,28 @@ public interface TabletServerGateway extends RpcGateway, AdminReadOnlyGateway {
      */
     @RPC(api = ApiKeys.SCAN_KV)
     CompletableFuture<ScanKvResponse> scanKv(ScanKvRequest request);
+
+    /**
+     * Find the coordinator for a consumer group.
+     *
+     * @return the coordinator server information
+     */
+    @RPC(api = ApiKeys.FIND_COORDINATOR)
+    CompletableFuture<FindCoordinatorResponse> findCoordinator(FindCoordinatorRequest request);
+
+    /**
+     * Commit offsets for a consumer group.
+     *
+     * @return the commit result per table bucket
+     */
+    @RPC(api = ApiKeys.COMMIT_OFFSETS)
+    CompletableFuture<CommitOffsetsResponse> commitOffsets(CommitOffsetsRequest request);
+
+    /**
+     * Fetch committed offsets for a consumer group.
+     *
+     * @return the fetched offsets per table bucket
+     */
+    @RPC(api = ApiKeys.FETCH_OFFSETS)
+    CompletableFuture<FetchOffsetsResponse> fetchOffsets(FetchOffsetsRequest request);
 }

@@ -91,6 +91,7 @@ import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiConsumer;
 
 import static org.apache.fluss.utils.concurrent.LockUtils.inReadLock;
 import static org.apache.fluss.utils.concurrent.LockUtils.inWriteLock;
@@ -754,6 +755,20 @@ public final class KvTablet {
                 () -> {
                     rocksDBKv.checkIfRocksDBClosed();
                     return rocksDBKv.limitScan(limit);
+                });
+    }
+
+    /**
+     * Scan all key-value entries in this KV tablet.
+     *
+     * @param consumer callback invoked with (key, value) for each entry
+     */
+    public void scanAll(BiConsumer<byte[], byte[]> consumer) throws IOException {
+        inReadLock(
+                kvLock,
+                () -> {
+                    rocksDBKv.checkIfRocksDBClosed();
+                    rocksDBKv.scanAll(consumer);
                 });
     }
 

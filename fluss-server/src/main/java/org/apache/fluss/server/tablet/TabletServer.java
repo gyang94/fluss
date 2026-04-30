@@ -39,6 +39,8 @@ import org.apache.fluss.server.authorizer.Authorizer;
 import org.apache.fluss.server.authorizer.AuthorizerLoader;
 import org.apache.fluss.server.coordinator.LakeCatalogDynamicLoader;
 import org.apache.fluss.server.coordinator.MetadataManager;
+import org.apache.fluss.server.coordinator.group.CoordinatorRuntime;
+import org.apache.fluss.server.coordinator.group.GroupCoordinatorService;
 import org.apache.fluss.server.kv.KvManager;
 import org.apache.fluss.server.kv.snapshot.DefaultCompletedKvSnapshotCommitter;
 import org.apache.fluss.server.log.LogManager;
@@ -165,6 +167,9 @@ public class TabletServer extends ServerBase {
     private LakeCatalogDynamicLoader lakeCatalogDynamicLoader;
 
     @GuardedBy("lock")
+    private CoordinatorRuntime coordinatorRuntime;
+
+    @GuardedBy("lock")
     private CoordinatorGateway coordinatorGateway;
 
     @GuardedBy("lock")
@@ -281,6 +286,13 @@ public class TabletServer extends ServerBase {
             // Start dynamicConfigManager after all reconfigurable components are registered
             dynamicConfigManager.startup();
 
+            this.coordinatorRuntime = new CoordinatorRuntime();
+            int consumerOffsetsBucketCount =
+                    conf.getInt(ConfigOptions.CONSUMER_OFFSETS_BUCKET_COUNT);
+            GroupCoordinatorService groupCoordinatorService =
+                    new GroupCoordinatorService(coordinatorRuntime, consumerOffsetsBucketCount);
+            replicaManager.setCoordinatorRuntime(coordinatorRuntime);
+
             this.tabletService =
                     new TabletService(
                             serverId,
@@ -291,7 +303,8 @@ public class TabletServer extends ServerBase {
                             metadataManager,
                             authorizer,
                             dynamicConfigManager,
-                            ioExecutor);
+                            ioExecutor,
+                            groupCoordinatorService);
 
             RequestsMetrics requestsMetrics =
                     RequestsMetrics.createTabletServerRequestMetrics(tabletServerMetricGroup);
@@ -406,6 +419,14 @@ public class TabletServer extends ServerBase {
             try {
                 if (tabletService != null) {
                     tabletService.shutdown();
+                }
+            } catch (Throwable t) {
+                exception = ExceptionUtils.firstOrSuppressed(t, exception);
+            }
+
+            try {
+                if (coordinatorRuntime != null) {
+                    coordinatorRuntime.close();
                 }
             } catch (Throwable t) {
                 exception = ExceptionUtils.firstOrSuppressed(t, exception);

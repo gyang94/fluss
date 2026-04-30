@@ -103,7 +103,10 @@ public enum ApiKeys {
     DROP_KV_SNAPSHOT_LEASE(1058, 0, 0, PUBLIC),
     GET_TABLE_STATS(1059, 0, 0, PUBLIC),
     ALTER_DATABASE(1060, 0, 0, PUBLIC),
-    SCAN_KV(1061, 0, 0, PUBLIC);
+    SCAN_KV(1061, 0, 0, PUBLIC),
+    FIND_COORDINATOR(1062, 0, 0, PUBLIC),
+    COMMIT_OFFSETS(1063, 0, 0, PUBLIC),
+    FETCH_OFFSETS(1064, 0, 0, PUBLIC);
 
     private static final Map<Integer, ApiKeys> ID_TO_TYPE =
             Arrays.stream(ApiKeys.values())
