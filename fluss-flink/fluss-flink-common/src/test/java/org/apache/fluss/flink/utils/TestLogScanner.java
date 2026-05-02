@@ -19,6 +19,7 @@ package org.apache.fluss.flink.utils;
 
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
+import org.apache.fluss.client.table.scanner.log.OffsetCommitCallback;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.metadata.TableBucket;
 
@@ -121,6 +122,9 @@ public class TestLogScanner implements LogScanner {
     }
 
     @Override
+    public void setGroupId(String groupId) {}
+
+    @Override
     public void subscribe(int bucket, long offset) {}
 
     @Override
@@ -131,6 +135,21 @@ public class TestLogScanner implements LogScanner {
 
     @Override
     public void unsubscribe(int bucket) {}
+
+    @Override
+    public void commitSync() {}
+
+    @Override
+    public void commitSync(Map<TableBucket, Long> offsets) {}
+
+    @Override
+    public void commitAsync() {}
+
+    @Override
+    public void commitAsync(OffsetCommitCallback callback) {}
+
+    @Override
+    public void commitAsync(Map<TableBucket, Long> offsets, OffsetCommitCallback callback) {}
 
     @Override
     public void wakeup() {}

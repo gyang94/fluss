@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.cluster.Endpoint;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.cluster.ServerType;
+import org.apache.fluss.cluster.TabletServerInfo;
 import org.apache.fluss.cluster.rebalance.RebalancePlanForBucket;
 import org.apache.fluss.cluster.rebalance.RebalanceProgress;
 import org.apache.fluss.cluster.rebalance.RebalanceStatus;
@@ -156,6 +157,7 @@ import static org.apache.fluss.server.coordinator.statemachine.ReplicaState.Repl
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeAdjustIsrResponse;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeListRebalanceProgressResponse;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeRebalanceResponse;
+import static org.apache.fluss.server.utils.TableAssignmentUtils.generateAssignment;
 import static org.apache.fluss.utils.concurrent.FutureUtils.completeFromCallable;
 
 /** An implementation for {@link EventProcessor}. */
@@ -678,24 +680,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
         }
 
         if (!tableInfo.isPartitioned()) {
-            Set<TableBucket> tableBuckets = new HashSet<>();
-            tableAssignment
-                    .getBucketAssignments()
-                    .keySet()
-                    .forEach(bucketId -> tableBuckets.add(new TableBucket(tableId, bucketId)));
-            updateTabletServerMetadataCache(
-                    new HashSet<>(coordinatorContext.getLiveTabletServers().values()),
-                    null,
-                    null,
-                    tableBuckets);
-
-            // register table metrics.
-            coordinatorMetricGroup.addTableBucketMetricGroup(
-                    PhysicalTablePath.of(tablePath),
-                    tableId,
-                    null,
-                    tableAssignment.getBucketAssignments().keySet());
-
+            loadNonPartitionedTable(tableInfo, tableAssignment);
         } else {
             updateTabletServerMetadataCache(
                     new HashSet<>(coordinatorContext.getLiveTabletServers().values()),
@@ -1080,6 +1065,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
 
         ServerNode serverNode = serverInfo.nodeOrThrow(internalListenerName);
         coordinatorChannelManager.addTabletServer(serverNode);
+        maybeInitializeConsumerOffsetsTable();
 
         // update coordinatorServer metadata cache for the new added table server.
         serverMetadataCache.updateMetadata(
@@ -1116,6 +1102,98 @@ public class CoordinatorEventProcessor implements EventProcessor {
         // and offline partitions to see if those tablet servers become leaders for some/all
         // of those
         tableBucketStateMachine.triggerOnlineBucketStateChange();
+    }
+
+    private void maybeInitializeConsumerOffsetsTable() {
+        TablePath consumerOffsetsPath =
+                TablePath.of(
+                        CoordinatorService.SYSTEM_DATABASE_NAME,
+                        CoordinatorService.CONSUMER_OFFSETS_TABLE_NAME);
+        TableInfo tableInfo;
+        try {
+            tableInfo = metadataManager.getTable(consumerOffsetsPath);
+        } catch (TableNotExistException e) {
+            return;
+        }
+
+        long tableId = tableInfo.getTableId();
+        if (!coordinatorContext.getTableAssignment(tableId).isEmpty()) {
+            if (!coordinatorContext.containsTableId(tableId)) {
+                coordinatorContext.putTableInfo(tableInfo);
+                coordinatorContext.putTablePath(tableId, consumerOffsetsPath);
+            }
+            return;
+        }
+
+        try {
+            TableAssignment tableAssignment = resolveOrCreateConsumerOffsetsAssignment(tableInfo);
+            if (tableAssignment == null) {
+                return;
+            }
+
+            coordinatorContext.putTableInfo(tableInfo);
+            loadNonPartitionedTable(tableInfo, tableAssignment);
+            LOG.info(
+                    "Initialized system table {} with assignment {} after tablet server registration.",
+                    consumerOffsetsPath,
+                    tableAssignment);
+        } catch (Exception e) {
+            throw new UnknownServerException(
+                    "Failed to initialize system table " + consumerOffsetsPath + ".", e);
+        }
+    }
+
+    @Nullable
+    private TableAssignment resolveOrCreateConsumerOffsetsAssignment(TableInfo tableInfo)
+            throws Exception {
+        Optional<TableAssignment> tableAssignment =
+                zooKeeperClient.getTableAssignment(tableInfo.getTableId());
+        if (tableAssignment.isPresent()) {
+            return tableAssignment.get();
+        }
+
+        int replicationFactor = tableInfo.getTableConfig().getReplicationFactor();
+        if (coordinatorContext.getLiveTabletServers().size() < replicationFactor) {
+            LOG.info(
+                    "Skip assigning system table {} because only {} live tablet servers are available "
+                            + "for replication factor {}.",
+                    tableInfo.getTablePath(),
+                    coordinatorContext.getLiveTabletServers().size(),
+                    replicationFactor);
+            return null;
+        }
+
+        TabletServerInfo[] liveServers =
+                coordinatorContext.getLiveTabletServers().values().stream()
+                        .map(serverInfo -> new TabletServerInfo(serverInfo.id(), serverInfo.rack()))
+                        .toArray(TabletServerInfo[]::new);
+        TableAssignment newTableAssignment =
+                generateAssignment(tableInfo.getNumBuckets(), replicationFactor, liveServers);
+        zooKeeperClient.registerTableAssignment(tableInfo.getTableId(), newTableAssignment);
+        return newTableAssignment;
+    }
+
+    private void loadNonPartitionedTable(TableInfo tableInfo, TableAssignment tableAssignment) {
+        long tableId = tableInfo.getTableId();
+        TablePath tablePath = tableInfo.getTablePath();
+        tableManager.onCreateNewTable(tablePath, tableId, tableAssignment);
+
+        Set<TableBucket> tableBuckets = new HashSet<>();
+        tableAssignment
+                .getBucketAssignments()
+                .keySet()
+                .forEach(bucketId -> tableBuckets.add(new TableBucket(tableId, bucketId)));
+        updateTabletServerMetadataCache(
+                new HashSet<>(coordinatorContext.getLiveTabletServers().values()),
+                null,
+                null,
+                tableBuckets);
+
+        coordinatorMetricGroup.addTableBucketMetricGroup(
+                PhysicalTablePath.of(tablePath),
+                tableId,
+                null,
+                tableAssignment.getBucketAssignments().keySet());
     }
 
     private void processDeadTabletServer(DeadTabletServerEvent deadTabletServerEvent) {

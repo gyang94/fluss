@@ -56,6 +56,7 @@ import java.util.concurrent.TimeoutException;
 public class MetadataUtils {
 
     private static final Logger LOG = LoggerFactory.getLogger(MetadataUtils.class);
+    private static final long DEFAULT_METADATA_REQUEST_TIMEOUT_MS = 30_000L;
 
     private static final Random randOffset = new Random();
 
@@ -67,7 +68,15 @@ public class MetadataUtils {
     public static Cluster sendMetadataRequestAndRebuildCluster(
             AdminReadOnlyGateway gateway, Set<TablePath> tablePaths)
             throws ExecutionException, InterruptedException, TimeoutException {
-        return sendMetadataRequestAndRebuildCluster(gateway, false, null, tablePaths, null, null);
+        return sendMetadataRequestAndRebuildCluster(
+                gateway, tablePaths, DEFAULT_METADATA_REQUEST_TIMEOUT_MS);
+    }
+
+    public static Cluster sendMetadataRequestAndRebuildCluster(
+            AdminReadOnlyGateway gateway, Set<TablePath> tablePaths, long timeoutMs)
+            throws ExecutionException, InterruptedException, TimeoutException {
+        return sendMetadataRequestAndRebuildCluster(
+                gateway, false, null, tablePaths, null, null, timeoutMs);
     }
 
     /**
@@ -84,11 +93,36 @@ public class MetadataUtils {
             @Nullable Collection<Long> tablePartitionIds,
             ServerNode serverNode)
             throws ExecutionException, InterruptedException, TimeoutException {
+        return sendMetadataRequestAndRebuildCluster(
+                cluster,
+                client,
+                tablePaths,
+                tablePartitionNames,
+                tablePartitionIds,
+                serverNode,
+                DEFAULT_METADATA_REQUEST_TIMEOUT_MS);
+    }
+
+    public static Cluster sendMetadataRequestAndRebuildCluster(
+            Cluster cluster,
+            RpcClient client,
+            @Nullable Set<TablePath> tablePaths,
+            @Nullable Collection<PhysicalTablePath> tablePartitionNames,
+            @Nullable Collection<Long> tablePartitionIds,
+            ServerNode serverNode,
+            long timeoutMs)
+            throws ExecutionException, InterruptedException, TimeoutException {
         AdminReadOnlyGateway gateway =
                 GatewayClientProxy.createGatewayProxy(
                         () -> serverNode, client, AdminReadOnlyGateway.class);
         return sendMetadataRequestAndRebuildCluster(
-                gateway, true, cluster, tablePaths, tablePartitionNames, tablePartitionIds);
+                gateway,
+                true,
+                cluster,
+                tablePaths,
+                tablePartitionNames,
+                tablePartitionIds,
+                timeoutMs);
     }
 
     /** maybe partial update cluster. */
@@ -100,9 +134,29 @@ public class MetadataUtils {
             @Nullable Collection<PhysicalTablePath> tablePartitions,
             @Nullable Collection<Long> tablePartitionIds)
             throws ExecutionException, InterruptedException, TimeoutException {
+        return sendMetadataRequestAndRebuildCluster(
+                gateway,
+                partialUpdate,
+                originCluster,
+                tablePaths,
+                tablePartitions,
+                tablePartitionIds,
+                DEFAULT_METADATA_REQUEST_TIMEOUT_MS);
+    }
+
+    public static Cluster sendMetadataRequestAndRebuildCluster(
+            AdminReadOnlyGateway gateway,
+            boolean partialUpdate,
+            Cluster originCluster,
+            @Nullable Set<TablePath> tablePaths,
+            @Nullable Collection<PhysicalTablePath> tablePartitions,
+            @Nullable Collection<Long> tablePartitionIds,
+            long timeoutMs)
+            throws ExecutionException, InterruptedException, TimeoutException {
         MetadataRequest metadataRequest =
                 ClientRpcMessageUtils.makeMetadataRequest(
                         tablePaths, tablePartitions, tablePartitionIds);
+        long requestTimeoutMs = Math.max(1L, timeoutMs);
         return gateway.metadata(metadataRequest)
                 .thenApply(
                         response -> {
@@ -154,7 +208,9 @@ public class MetadataUtils {
                                     newTablePathToTableId,
                                     newPartitionIdByPath);
                         })
-                .get(30, TimeUnit.SECONDS); // TODO currently, we don't have timeout logic in
+                .get(
+                        requestTimeoutMs,
+                        TimeUnit.MILLISECONDS); // TODO currently, we don't have timeout logic in
         // RpcClient, it will let the get() block forever. So we
         // time out here
     }

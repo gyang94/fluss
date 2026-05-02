@@ -22,16 +22,17 @@ import org.apache.fluss.annotation.Internal;
 /** Bucket scan status for log fetch. */
 @Internal
 class BucketScanStatus {
-    private long offset; // last consumed position
+    private long offset; // next fetch position
     private long highWatermark; // the high watermark from last fetch
+    private boolean validPosition;
     // TODO add resetStrategy and nextAllowedRetryTimeMs.
 
     public BucketScanStatus() {
-        this.offset = 0L;
+        this(0L);
     }
 
-    public BucketScanStatus(Long position) {
-        this.offset = position;
+    public BucketScanStatus(long position) {
+        setOffset(position);
     }
 
     public long getOffset() {
@@ -42,11 +43,16 @@ class BucketScanStatus {
         return highWatermark;
     }
 
-    public void setOffset(Long offset) {
+    public void setOffset(long offset) {
         this.offset = offset;
+        this.validPosition = offset >= 0;
     }
 
-    public void setHighWatermark(Long highWatermark) {
+    public void setHighWatermark(long highWatermark) {
         this.highWatermark = highWatermark;
+    }
+
+    public boolean hasValidPosition() {
+        return validPosition;
     }
 }

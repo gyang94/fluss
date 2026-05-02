@@ -21,7 +21,9 @@ import org.apache.fluss.annotation.PublicEvolving;
 import org.apache.fluss.client.metadata.MetadataUpdater;
 import org.apache.fluss.client.metrics.ScannerMetricGroup;
 import org.apache.fluss.client.table.scanner.RemoteFileDownloader;
+import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.InvalidGroupIdException;
 import org.apache.fluss.exception.WakeupException;
 import org.apache.fluss.metadata.SchemaGetter;
 import org.apache.fluss.metadata.TableBucket;
@@ -41,8 +43,14 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.ConcurrentModificationException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
+import static org.apache.fluss.utils.Preconditions.checkArgument;
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
  * The default impl of {@link LogScanner}.
@@ -64,6 +72,13 @@ public class LogScannerImpl implements LogScanner {
     private final LogFetcher logFetcher;
     private final long tableId;
     private final boolean isPartitionedTable;
+    private final long requestTimeoutMs;
+    private final long retryBackoffMs;
+
+    private @Nullable String groupId;
+    private @Nullable OffsetCommitter offsetCommitter;
+    private final ConcurrentLinkedQueue<OffsetCommitter.OffsetCommitCompletion>
+            completedOffsetCommits = new ConcurrentLinkedQueue<>();
 
     private volatile boolean closed = false;
 
@@ -87,6 +102,8 @@ public class LogScannerImpl implements LogScanner {
         this.tablePath = tableInfo.getTablePath();
         this.tableId = tableInfo.getTableId();
         this.isPartitionedTable = tableInfo.isPartitioned();
+        this.requestTimeoutMs = conf.get(ConfigOptions.CLIENT_REQUEST_TIMEOUT).toMillis();
+        this.retryBackoffMs = conf.get(ConfigOptions.CLIENT_RETRY_BACKOFF).toMillis();
         // add this table to metadata updater.
         metadataUpdater.checkAndUpdateTableMetadata(Collections.singleton(tablePath));
         this.logScannerStatus = new LogScannerStatus();
@@ -133,6 +150,8 @@ public class LogScannerImpl implements LogScanner {
     public ScanRecords poll(Duration timeout) {
         acquireAndEnsureOpen();
         try {
+            invokeCompletedOffsetCommitCallbacks();
+
             if (!logScannerStatus.prepareToPoll()) {
                 throw new IllegalStateException("LogScanner is not subscribed any buckets.");
             }
@@ -167,6 +186,22 @@ public class LogScannerImpl implements LogScanner {
         } finally {
             release();
             scannerMetricGroup.recordPollEnd(System.currentTimeMillis());
+        }
+    }
+
+    @Override
+    public void setGroupId(String groupId) {
+        acquireAndEnsureOpen();
+        try {
+            checkNotNull(groupId, "groupId must not be null");
+            checkArgument(!groupId.trim().isEmpty(), "groupId must not be empty");
+            this.groupId = groupId;
+            if (offsetCommitter != null) {
+                offsetCommitter.close();
+                offsetCommitter = null;
+            }
+        } finally {
+            release();
         }
     }
 
@@ -243,8 +278,82 @@ public class LogScannerImpl implements LogScanner {
     }
 
     @Override
+    public void commitSync() {
+        acquireAndEnsureOpen();
+        try {
+            invokeCompletedOffsetCommitCallbacks();
+            ensureGroupIdConfigured();
+            Map<TableBucket, Long> offsets = logScannerStatus.allCommittableOffsets();
+            if (!offsets.isEmpty()) {
+                getOrCreateOffsetCommitter().commitOffsetsSync(offsets, requestTimeoutMs);
+            }
+        } finally {
+            release();
+        }
+    }
+
+    @Override
+    public void commitSync(Map<TableBucket, Long> offsets) {
+        acquireAndEnsureOpen();
+        try {
+            invokeCompletedOffsetCommitCallbacks();
+            ensureGroupIdConfigured();
+            Map<TableBucket, Long> validatedOffsets = validateExplicitOffsets(offsets);
+            if (!validatedOffsets.isEmpty()) {
+                getOrCreateOffsetCommitter().commitOffsetsSync(validatedOffsets, requestTimeoutMs);
+            }
+        } finally {
+            release();
+        }
+    }
+
+    @Override
     public void wakeup() {
         logFetcher.wakeup();
+    }
+
+    @Override
+    public void commitAsync() {
+        commitAsync(new DefaultOffsetCommitCallback());
+    }
+
+    @Override
+    public void commitAsync(@Nullable OffsetCommitCallback callback) {
+        acquireAndEnsureOpen();
+        try {
+            invokeCompletedOffsetCommitCallbacks();
+            ensureGroupIdConfigured();
+            Map<TableBucket, Long> offsets = logScannerStatus.allCommittableOffsets();
+            getOrCreateOffsetCommitter()
+                    .commitOffsetsAsync(offsets, callback, completedOffsetCommits);
+        } finally {
+            release();
+        }
+    }
+
+    @Override
+    public void commitAsync(
+            Map<TableBucket, Long> offsets, @Nullable OffsetCommitCallback callback) {
+        acquireAndEnsureOpen();
+        try {
+            invokeCompletedOffsetCommitCallbacks();
+            ensureGroupIdConfigured();
+            Map<TableBucket, Long> validatedOffsets = validateExplicitOffsets(offsets);
+            getOrCreateOffsetCommitter()
+                    .commitOffsetsAsync(validatedOffsets, callback, completedOffsetCommits);
+        } finally {
+            release();
+        }
+    }
+
+    private void invokeCompletedOffsetCommitCallbacks() {
+        while (true) {
+            OffsetCommitter.OffsetCommitCompletion completion = completedOffsetCommits.poll();
+            if (completion == null) {
+                return;
+            }
+            completion.invoke();
+        }
     }
 
     private ScanRecords pollForFetches() {
@@ -257,6 +366,55 @@ public class LogScannerImpl implements LogScanner {
         logFetcher.sendFetches();
 
         return logFetcher.collectFetch();
+    }
+
+    private void ensureGroupIdConfigured() {
+        if (groupId == null || groupId.trim().isEmpty()) {
+            throw new InvalidGroupIdException(
+                    "Consumer group ID is not set. Call setGroupId() before committing offsets.");
+        }
+    }
+
+    private OffsetCommitter getOrCreateOffsetCommitter() {
+        if (offsetCommitter == null) {
+            offsetCommitter = new OffsetCommitter(groupId, metadataUpdater, retryBackoffMs);
+        }
+        return offsetCommitter;
+    }
+
+    private Map<TableBucket, Long> validateExplicitOffsets(Map<TableBucket, Long> offsets) {
+        checkNotNull(offsets, "offsets must not be null");
+
+        Map<TableBucket, Long> validatedOffsets = new HashMap<>();
+        for (Map.Entry<TableBucket, Long> entry : offsets.entrySet()) {
+            TableBucket tableBucket = checkNotNull(entry.getKey(), "offsets contains null bucket");
+            Long offset =
+                    checkNotNull(entry.getValue(), "offset for %s must not be null", tableBucket);
+
+            checkArgument(offset >= 0, "offset for %s must be >= 0", tableBucket);
+            checkArgument(
+                    tableBucket.getTableId() == tableId,
+                    "bucket %s does not belong to table %s",
+                    tableBucket,
+                    tablePath);
+
+            if (isPartitionedTable) {
+                checkArgument(
+                        tableBucket.getPartitionId() != null,
+                        "bucket %s must include partitionId for partitioned table %s",
+                        tableBucket,
+                        tablePath);
+            } else {
+                checkArgument(
+                        tableBucket.getPartitionId() == null,
+                        "bucket %s must not include partitionId for non-partitioned table %s",
+                        tableBucket,
+                        tablePath);
+            }
+
+            validatedOffsets.put(tableBucket, offset);
+        }
+        return validatedOffsets;
     }
 
     /**
@@ -311,6 +469,11 @@ public class LogScannerImpl implements LogScanner {
         try {
             if (!closed) {
                 LOG.trace("Closing log scanner for table: {}", tablePath);
+                invokeCompletedOffsetCommitCallbacks();
+                if (offsetCommitter != null) {
+                    offsetCommitter.close();
+                    offsetCommitter = null;
+                }
                 scannerMetricGroup.close();
                 logFetcher.close();
             }
@@ -320,6 +483,19 @@ public class LogScannerImpl implements LogScanner {
         } finally {
             closed = true;
             release();
+        }
+    }
+
+    /** Default callback that logs async commit errors at WARN level. */
+    private static final class DefaultOffsetCommitCallback implements OffsetCommitCallback {
+        private static final Logger LOG =
+                LoggerFactory.getLogger(DefaultOffsetCommitCallback.class);
+
+        @Override
+        public void onComplete(Map<TableBucket, Long> offsets, @Nullable Exception exception) {
+            if (exception != null) {
+                LOG.warn("Async offset commit of offsets {} failed.", offsets, exception);
+            }
         }
     }
 }

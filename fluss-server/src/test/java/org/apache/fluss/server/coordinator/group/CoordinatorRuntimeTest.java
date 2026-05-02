@@ -151,6 +151,86 @@ class CoordinatorRuntimeTest {
     }
 
     @Test
+    void testReadWaitsForPendingWriteAckAndSeesCommittedState() throws Exception {
+        runtime.scheduleLoadOperation(0, 1);
+        runtime.markShardLoaded(0);
+
+        CompletableFuture<Void> writeFuture = new CompletableFuture<>();
+        runtime.setKvWriter((bucketId, records) -> writeFuture);
+
+        String groupId = "pending-write-group";
+        CommitOffsetsRequest commitRequest = buildCommitRequest(groupId, 100L, 3);
+        FetchOffsetsRequest fetchRequest = new FetchOffsetsRequest();
+        fetchRequest.setGroupId(groupId);
+
+        CompletableFuture<CommitOffsetsResponse> commitFuture =
+                runtime.scheduleWriteOperation(0, shard -> shard.commitOffset(commitRequest));
+        CompletableFuture<FetchOffsetsResponse> fetchFuture =
+                runtime.scheduleReadOperation(0, shard -> shard.fetchOffsets(fetchRequest));
+
+        assertThat(commitFuture.isDone()).isFalse();
+        assertThat(fetchFuture.isDone()).isFalse();
+
+        writeFuture.complete(null);
+
+        assertThat(commitFuture.get().getResultAt(0).getErrorCode()).isEqualTo(Errors.NONE.code());
+        FetchOffsetsResponse fetchResponse = fetchFuture.get();
+        assertThat(fetchResponse.getResultsCount()).isEqualTo(1);
+        assertThat(fetchResponse.getResultAt(0).getOffset()).isEqualTo(100L);
+        assertThat(fetchResponse.getResultAt(0).getLeaderEpoch()).isEqualTo(3);
+    }
+
+    @Test
+    void testFailedWriteDoesNotReplayStateIntoCache() throws Exception {
+        runtime.scheduleLoadOperation(0, 1);
+        runtime.markShardLoaded(0);
+
+        CompletableFuture<Void> writeFuture = new CompletableFuture<>();
+        runtime.setKvWriter((bucketId, records) -> writeFuture);
+
+        String groupId = "failed-write-group";
+        CommitOffsetsRequest commitRequest = buildCommitRequest(groupId, 100L, 3);
+        FetchOffsetsRequest fetchRequest = new FetchOffsetsRequest();
+        fetchRequest.setGroupId(groupId);
+
+        CompletableFuture<CommitOffsetsResponse> commitFuture =
+                runtime.scheduleWriteOperation(0, shard -> shard.commitOffset(commitRequest));
+        CompletableFuture<FetchOffsetsResponse> fetchFuture =
+                runtime.scheduleReadOperation(0, shard -> shard.fetchOffsets(fetchRequest));
+
+        writeFuture.completeExceptionally(new RuntimeException("write failed"));
+
+        assertThatThrownBy(commitFuture::get)
+                .isInstanceOf(ExecutionException.class)
+                .hasCauseInstanceOf(RuntimeException.class)
+                .hasRootCauseMessage("write failed");
+        assertThat(fetchFuture.get().getResultsCount()).isZero();
+    }
+
+    @Test
+    void testCompletedWriteRemovesBucketFromOperationQueue() throws Exception {
+        runtime.scheduleLoadOperation(0, 1);
+        runtime.markShardLoaded(0);
+
+        CompletableFuture<Void> writeFuture = new CompletableFuture<>();
+        runtime.setKvWriter((bucketId, records) -> writeFuture);
+
+        CompletableFuture<String> future =
+                runtime.scheduleWriteOperation(
+                        0,
+                        shard ->
+                                new CoordinatorResult<>(
+                                        Collections.singletonList(validRecord()), "done"));
+
+        assertThat(runtime.getOperationQueueCount()).isEqualTo(1);
+
+        writeFuture.complete(null);
+
+        assertThat(future.get()).isEqualTo("done");
+        assertThat(runtime.getOperationQueueCount()).isZero();
+    }
+
+    @Test
     void testLoadAndUnloadLifecycle() {
         runtime.scheduleLoadOperation(0, 1);
         assertThat(runtime.getShardCount()).isEqualTo(1);
@@ -209,5 +289,18 @@ class CoordinatorRuntimeTest {
             byte[] value = OffsetKeyValueCodec.encodeValue(oam);
             return new CoordinatorResult.KvRecord(key, value);
         }
+    }
+
+    private static CommitOffsetsRequest buildCommitRequest(
+            String groupId, long offset, int leaderEpoch) {
+        CommitOffsetsRequest commitRequest = new CommitOffsetsRequest();
+        commitRequest.setGroupId(groupId);
+        commitRequest.setGenerationId(-1);
+        PbCommitOffsetEntry entry = commitRequest.addOffset();
+        entry.setTableId(1L);
+        entry.setBucketId(0);
+        entry.setOffset(offset);
+        entry.setLeaderEpoch(leaderEpoch);
+        return commitRequest;
     }
 }

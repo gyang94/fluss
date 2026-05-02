@@ -28,6 +28,7 @@ import org.apache.fluss.flink.source.metrics.FlinkSourceReaderMetrics;
 import org.apache.fluss.flink.source.reader.fetcher.FlinkSourceFetcherManager;
 import org.apache.fluss.flink.source.split.HybridSnapshotLogSplit;
 import org.apache.fluss.flink.source.split.HybridSnapshotLogSplitState;
+import org.apache.fluss.flink.source.split.LogSplit;
 import org.apache.fluss.flink.source.split.LogSplitState;
 import org.apache.fluss.flink.source.split.SourceSplitBase;
 import org.apache.fluss.flink.source.split.SourceSplitState;
@@ -47,10 +48,14 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.function.Consumer;
 
 /** The source reader for Fluss. */
@@ -63,6 +68,15 @@ public class FlinkSourceReader<OUT>
     /** the tableBuckets ignore to send FinishedKvSnapshotConsumeEvent as it already sending. */
     private final Set<TableBucket> finishedKvSnapshotConsumeBuckets;
 
+    /**
+     * Offsets to commit on checkpoint completion, keyed by checkpoint ID. Access is synchronized
+     * via Collections.synchronizedSortedMap.
+     */
+    private final SortedMap<Long, Map<TableBucket, Long>> offsetsToCommit;
+
+    /** Whether offset commit on checkpoint is enabled. */
+    private final boolean commitOffsetsOnCheckpoint;
+
     public FlinkSourceReader(
             FutureCompletingBlockingQueue<RecordsWithSplitIds<RecordAndPos>> elementsQueue,
             Configuration flussConfig,
@@ -73,7 +87,8 @@ public class FlinkSourceReader<OUT>
             @Nullable Predicate logRecordBatchFilter,
             FlinkSourceReaderMetrics flinkSourceReaderMetrics,
             FlinkRecordEmitter<OUT> recordEmitter,
-            LakeSource<LakeSplit> lakeSource) {
+            LakeSource<LakeSplit> lakeSource,
+            @Nullable String groupId) {
         super(
                 elementsQueue,
                 new FlinkSourceFetcherManager(
@@ -86,12 +101,15 @@ public class FlinkSourceReader<OUT>
                                         projectedFields,
                                         logRecordBatchFilter,
                                         lakeSource,
-                                        flinkSourceReaderMetrics),
+                                        flinkSourceReaderMetrics,
+                                        groupId),
                         (ignore) -> {}),
                 recordEmitter,
                 context.getConfiguration(),
                 context);
         this.finishedKvSnapshotConsumeBuckets = new HashSet<>();
+        this.offsetsToCommit = Collections.synchronizedSortedMap(new TreeMap<>());
+        this.commitOffsetsOnCheckpoint = (groupId != null);
     }
 
     @Override
@@ -105,6 +123,33 @@ public class FlinkSourceReader<OUT>
 
         // do not modify this state.
         List<SourceSplitBase> sourceSplitBases = super.snapshotState(checkpointId);
+
+        // Capture offsets for commit on checkpoint completion
+        if (commitOffsetsOnCheckpoint) {
+            Map<TableBucket, Long> offsets = new HashMap<>();
+            for (SourceSplitBase sourceSplitBase : sourceSplitBases) {
+                TableBucket tableBucket = sourceSplitBase.getTableBucket();
+                if (sourceSplitBase.isLogSplit()) {
+                    LogSplit logSplit = sourceSplitBase.asLogSplit();
+                    long offset = logSplit.getStartingOffset();
+                    if (offset >= 0) {
+                        offsets.put(tableBucket, offset);
+                    }
+                } else if (sourceSplitBase.isHybridSnapshotLogSplit()) {
+                    HybridSnapshotLogSplit hybridSplit = sourceSplitBase.asHybridSnapshotLogSplit();
+                    if (hybridSplit.isSnapshotFinished()) {
+                        long offset = hybridSplit.getLogStartingOffset();
+                        if (offset >= 0) {
+                            offsets.put(tableBucket, offset);
+                        }
+                    }
+                }
+            }
+            if (!offsets.isEmpty()) {
+                offsetsToCommit.put(checkpointId, offsets);
+            }
+        }
+
         for (SourceSplitBase sourceSplitBase : sourceSplitBases) {
             TableBucket tableBucket = sourceSplitBase.getTableBucket();
             if (finishedKvSnapshotConsumeBuckets.contains(tableBucket)) {
@@ -138,6 +183,43 @@ public class FlinkSourceReader<OUT>
         }
 
         return sourceSplitBases;
+    }
+
+    @Override
+    public void notifyCheckpointComplete(long checkpointId) throws Exception {
+        super.notifyCheckpointComplete(checkpointId);
+
+        if (!commitOffsetsOnCheckpoint) {
+            return;
+        }
+
+        Map<TableBucket, Long> offsets = offsetsToCommit.get(checkpointId);
+        if (offsets == null || offsets.isEmpty()) {
+            removeOffsetsToCommitUpTo(checkpointId);
+            return;
+        }
+
+        ((FlinkSourceFetcherManager) splitFetcherManager)
+                .commitOffsets(
+                        offsets,
+                        (committedOffsets, exception) -> {
+                            if (exception != null) {
+                                LOG.warn(
+                                        "Failed to commit offsets for checkpoint {}",
+                                        checkpointId,
+                                        exception);
+                            } else {
+                                LOG.debug(
+                                        "Successfully committed offsets for checkpoint {}",
+                                        checkpointId);
+                            }
+                            removeOffsetsToCommitUpTo(checkpointId);
+                        });
+    }
+
+    private void removeOffsetsToCommitUpTo(long checkpointId) {
+        // headMap is exclusive of checkpointId, so +1 to include it
+        offsetsToCommit.headMap(checkpointId + 1).clear();
     }
 
     @Override

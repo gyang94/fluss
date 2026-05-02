@@ -91,7 +91,8 @@ class FlinkSourceSplitReaderTest extends FlinkTestBase {
                                         new int[] {1, 0},
                                         null,
                                         null,
-                                        createMockSourceReaderMetrics()))
+                                        createMockSourceReaderMetrics(),
+                                        null))
                 .isInstanceOf(ValidationException.class)
                 .hasMessage(
                         "The Flink query schema is not matched to Fluss table schema. \n"
@@ -109,7 +110,8 @@ class FlinkSourceSplitReaderTest extends FlinkTestBase {
                                         null,
                                         null,
                                         null,
-                                        createMockSourceReaderMetrics()))
+                                        createMockSourceReaderMetrics(),
+                                        null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Field name2 does not exist in the row type.");
 
@@ -123,7 +125,8 @@ class FlinkSourceSplitReaderTest extends FlinkTestBase {
                         null,
                         null,
                         null,
-                        createMockSourceReaderMetrics());
+                        createMockSourceReaderMetrics(),
+                        null);
         assertThat(flinkSourceSplitReader.getProjectedFields()).isNull();
     }
 
@@ -430,7 +433,14 @@ class FlinkSourceSplitReaderTest extends FlinkTestBase {
 
     private FlinkSourceSplitReader createSplitReader(TablePath tablePath, RowType rowType) {
         return new FlinkSourceSplitReader(
-                clientConf, tablePath, rowType, null, null, null, createMockSourceReaderMetrics());
+                clientConf,
+                tablePath,
+                rowType,
+                null,
+                null,
+                null,
+                createMockSourceReaderMetrics(),
+                null);
     }
 
     private FlinkSourceReaderMetrics createMockSourceReaderMetrics() {

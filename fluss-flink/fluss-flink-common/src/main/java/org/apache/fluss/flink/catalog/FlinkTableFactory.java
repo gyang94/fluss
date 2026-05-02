@@ -236,6 +236,7 @@ public class FlinkTableFactory implements DynamicTableSourceFactory, DynamicTabl
                                 FlinkConnectorOptions.SCAN_PARTITION_DISCOVERY_INTERVAL,
                                 FlinkConnectorOptions.SCAN_KV_SNAPSHOT_LEASE_ID,
                                 FlinkConnectorOptions.SCAN_KV_SNAPSHOT_LEASE_DURATION,
+                                FlinkConnectorOptions.SCAN_COMMIT_OFFSET_GROUP_ID,
                                 FlinkConnectorOptions.LOOKUP_ASYNC,
                                 FlinkConnectorOptions.LOOKUP_INSERT_IF_NOT_EXISTS,
                                 FlinkConnectorOptions.SINK_IGNORE_DELETE,
@@ -268,6 +269,12 @@ public class FlinkTableFactory implements DynamicTableSourceFactory, DynamicTabl
                         flussConfig.setString(key, value);
                     }
                 });
+
+        // forward scan.commit.offset.group-id if present
+        String groupId = tableOptions.get(FlinkConnectorOptions.SCAN_COMMIT_OFFSET_GROUP_ID.key());
+        if (groupId != null) {
+            flussConfig.setString(FlinkConnectorOptions.SCAN_COMMIT_OFFSET_GROUP_ID.key(), groupId);
+        }
 
         // Todo support LookupOptions.MAX_RETRIES. Currently, Fluss doesn't support connector level
         // retry. The option 'client.lookup.max-retries' is only for dealing with the

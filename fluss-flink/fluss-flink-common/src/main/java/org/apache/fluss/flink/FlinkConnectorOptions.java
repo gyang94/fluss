@@ -137,6 +137,14 @@ public class FlinkConnectorOptions {
                                     + "The format is 'timestamp' or 'yyyy-MM-dd HH:mm:ss'. "
                                     + "Like '1678883047356' or '2023-12-09 23:09:12'.");
 
+    public static final ConfigOption<String> SCAN_COMMIT_OFFSET_GROUP_ID =
+            ConfigOptions.key("scan.commit.offset.group-id")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Consumer group ID for committing offsets on checkpoint. "
+                                    + "If not set, offset commit is disabled.");
+
     public static final ConfigOption<Duration> SCAN_PARTITION_DISCOVERY_INTERVAL =
             ConfigOptions.key("scan.partition.discovery.interval")
                     .durationType()

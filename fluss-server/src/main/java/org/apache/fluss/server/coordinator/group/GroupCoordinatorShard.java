@@ -56,10 +56,9 @@ public class GroupCoordinatorShard {
      * @return a result containing KV records and the response
      */
     public CoordinatorResult<CommitOffsetsResponse> commitOffset(CommitOffsetsRequest request) {
-        if (request.hasMemberId()) {
-            groupMetadataManager.validateOffsetCommit(
-                    request.getGroupId(), request.getMemberId(), request.getGenerationId());
-        }
+        int generationId = request.hasGenerationId() ? request.getGenerationId() : -1;
+        String memberId = request.hasMemberId() ? request.getMemberId() : "";
+        groupMetadataManager.validateOffsetCommit(request.getGroupId(), memberId, generationId);
         return offsetMetadataManager.commitOffset(request);
     }
 

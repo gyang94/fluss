@@ -25,6 +25,7 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Predicate;
@@ -83,6 +84,17 @@ public class LogScannerStatus {
         for (TableBucket bucket : buckets) {
             bucketStatusMap.remove(bucket);
         }
+    }
+
+    synchronized Map<TableBucket, Long> allCommittableOffsets() {
+        Map<TableBucket, Long> offsets = new HashMap<>();
+        bucketStatusMap.forEach(
+                (tableBucket, bucketScanStatus) -> {
+                    if (bucketScanStatus.hasValidPosition()) {
+                        offsets.put(tableBucket, bucketScanStatus.getOffset());
+                    }
+                });
+        return offsets;
     }
 
     synchronized List<TableBucket> fetchableBuckets(Predicate<TableBucket> isAvailable) {

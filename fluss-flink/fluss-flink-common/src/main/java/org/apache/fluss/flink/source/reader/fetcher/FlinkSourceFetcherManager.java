@@ -17,6 +17,7 @@
 
 package org.apache.fluss.flink.source.reader.fetcher;
 
+import org.apache.fluss.client.table.scanner.log.OffsetCommitCallback;
 import org.apache.fluss.flink.adapter.SingleThreadFetcherManagerAdapter;
 import org.apache.fluss.flink.source.reader.FlinkSourceSplitReader;
 import org.apache.fluss.flink.source.reader.RecordAndPos;
@@ -104,6 +105,43 @@ public class FlinkSourceFetcherManager
                         Set<TableBucket> unsubscribedBuckets =
                                 sourceSplitReader.removePartitions(removedPartitions);
                         unsubscribeTableBucketsCallback.accept(unsubscribedBuckets);
+                        return true;
+                    }
+
+                    @Override
+                    public void wakeUp() {}
+                });
+    }
+
+    /**
+     * Commits offsets asynchronously by enqueueing a task on the fetcher thread.
+     *
+     * @param offsets the offsets to commit
+     * @param callback the callback to invoke on completion
+     */
+    public void commitOffsets(Map<TableBucket, Long> offsets, OffsetCommitCallback callback) {
+        SplitFetcher<RecordAndPos, SourceSplitBase> splitFetcher = fetchers.get(0);
+        if (splitFetcher != null) {
+            enqueueCommitOffsetsTask(splitFetcher, offsets, callback);
+        } else {
+            splitFetcher = createSplitFetcher();
+            enqueueCommitOffsetsTask(splitFetcher, offsets, callback);
+            startFetcher(splitFetcher);
+        }
+    }
+
+    private void enqueueCommitOffsetsTask(
+            SplitFetcher<RecordAndPos, SourceSplitBase> splitFetcher,
+            Map<TableBucket, Long> offsets,
+            OffsetCommitCallback callback) {
+        FlinkSourceSplitReader sourceSplitReader =
+                (FlinkSourceSplitReader) splitFetcher.getSplitReader();
+
+        splitFetcher.enqueueTask(
+                new SplitFetcherTask() {
+                    @Override
+                    public boolean run() {
+                        sourceSplitReader.commitOffsets(offsets, callback);
                         return true;
                     }
 

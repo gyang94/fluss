@@ -52,6 +52,7 @@ import org.apache.flink.core.io.SimpleVersionedSerializer;
 import javax.annotation.Nullable;
 
 import static org.apache.fluss.config.ConfigOptions.CLIENT_SCANNER_IO_TMP_DIR;
+import static org.apache.fluss.flink.FlinkConnectorOptions.SCAN_COMMIT_OFFSET_GROUP_ID;
 import static org.apache.fluss.flink.utils.FlinkConnectorOptionsUtils.getClientScannerIoTmpDir;
 
 /** Flink source for Fluss. */
@@ -212,6 +213,11 @@ public class FlinkSource<OUT>
                         sourceOutputType));
         FlinkRecordEmitter<OUT> recordEmitter = new FlinkRecordEmitter<>(deserializationSchema);
 
+        String groupId =
+                flussConf.containsKey(SCAN_COMMIT_OFFSET_GROUP_ID.key())
+                        ? flussConf.toMap().get(SCAN_COMMIT_OFFSET_GROUP_ID.key())
+                        : null;
+
         return new FlinkSourceReader<>(
                 elementsQueue,
                 flussConf,
@@ -222,7 +228,8 @@ public class FlinkSource<OUT>
                 logRecordBatchFilter,
                 flinkSourceReaderMetrics,
                 recordEmitter,
-                lakeSource);
+                lakeSource,
+                groupId);
     }
 
     @Override

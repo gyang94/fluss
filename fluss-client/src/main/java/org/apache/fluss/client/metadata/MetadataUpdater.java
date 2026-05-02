@@ -54,6 +54,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
@@ -74,7 +75,13 @@ public class MetadataUpdater {
     protected volatile Cluster cluster;
 
     public MetadataUpdater(Configuration conf, RpcClient rpcClient) {
-        this(rpcClient, conf, initializeCluster(conf, rpcClient));
+        this(
+                rpcClient,
+                conf,
+                initializeCluster(
+                        conf,
+                        rpcClient,
+                        conf.get(ConfigOptions.CLIENT_REQUEST_TIMEOUT).toMillis()));
     }
 
     @VisibleForTesting
@@ -246,6 +253,30 @@ public class MetadataUpdater {
             @Nullable Collection<PhysicalTablePath> tablePartitionNames,
             @Nullable Collection<Long> tablePartitionIds)
             throws PartitionNotExistException {
+        updateMetadataInternal(
+                tablePaths,
+                tablePartitionNames,
+                tablePartitionIds,
+                conf.get(ConfigOptions.CLIENT_REQUEST_TIMEOUT).toMillis(),
+                false);
+    }
+
+    public void updateMetadata(
+            @Nullable Set<TablePath> tablePaths,
+            @Nullable Collection<PhysicalTablePath> tablePartitionNames,
+            @Nullable Collection<Long> tablePartitionIds,
+            long timeoutMs)
+            throws PartitionNotExistException {
+        updateMetadataInternal(tablePaths, tablePartitionNames, tablePartitionIds, timeoutMs, true);
+    }
+
+    private void updateMetadataInternal(
+            @Nullable Set<TablePath> tablePaths,
+            @Nullable Collection<PhysicalTablePath> tablePartitionNames,
+            @Nullable Collection<Long> tablePartitionIds,
+            long timeoutMs,
+            boolean swallowBootstrapInitFailure)
+            throws PartitionNotExistException {
         ServerNode serverNode =
                 getOneAvailableTabletServerNode(cluster, unavailableTabletServerIds);
         try {
@@ -253,7 +284,7 @@ public class MetadataUpdater {
                 if (serverNode == null) {
                     LOG.info(
                             "No available tablet server to update metadata, try to re-initialize cluster using bootstrap server.");
-                    cluster = initializeCluster(conf, rpcClient);
+                    cluster = initializeCluster(conf, rpcClient, timeoutMs);
                 } else {
                     cluster =
                             sendMetadataRequestAndRebuildCluster(
@@ -262,7 +293,8 @@ public class MetadataUpdater {
                                     tablePaths,
                                     tablePartitionNames,
                                     tablePartitionIds,
-                                    serverNode);
+                                    serverNode,
+                                    timeoutMs);
                 }
             }
 
@@ -284,6 +316,10 @@ public class MetadataUpdater {
                             unavailableTabletServerIds);
                 }
                 LOG.warn("Failed to update metadata, but the exception is re-triable.", t);
+            } else if (swallowBootstrapInitFailure
+                    && serverNode == null
+                    && t instanceof IllegalStateException) {
+                LOG.warn("Failed to re-initialize metadata from bootstrap servers.", t);
             } else if (t instanceof PartitionNotExistException) {
                 LOG.debug("Failed to update metadata because the partition does not exist", t);
                 throw (PartitionNotExistException) t;
@@ -298,11 +334,23 @@ public class MetadataUpdater {
      * servers according to the config {@link ConfigOptions#BOOTSTRAP_SERVERS}.
      */
     private static Cluster initializeCluster(Configuration conf, RpcClient rpcClient) {
+        return initializeCluster(
+                conf, rpcClient, conf.get(ConfigOptions.CLIENT_REQUEST_TIMEOUT).toMillis());
+    }
+
+    private static Cluster initializeCluster(
+            Configuration conf, RpcClient rpcClient, long timeoutMs) {
         List<InetSocketAddress> inetSocketAddresses =
                 ClientUtils.parseAndValidateAddresses(conf.get(ConfigOptions.BOOTSTRAP_SERVERS));
         Cluster cluster = null;
         Exception lastException = null;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         for (InetSocketAddress address : inetSocketAddresses) {
+            long remainingMs = remainingTimeMs(deadlineNanos);
+            if (remainingMs <= 0) {
+                lastException = new TimeoutException("Timed out initializing cluster metadata.");
+                break;
+            }
             ServerNode serverNode = null;
             try {
                 serverNode =
@@ -316,9 +364,13 @@ public class MetadataUpdater {
                     // if there is only one bootstrap server, we can retry to connect to it.
                     cluster =
                             tryToInitializeClusterWithRetries(
-                                    rpcClient, serverNode, adminReadOnlyGateway, MAX_RETRY_TIMES);
+                                    rpcClient,
+                                    serverNode,
+                                    adminReadOnlyGateway,
+                                    MAX_RETRY_TIMES,
+                                    remainingMs);
                 } else {
-                    cluster = tryToInitializeCluster(adminReadOnlyGateway);
+                    cluster = tryToInitializeCluster(adminReadOnlyGateway, remainingMs);
                     break;
                 }
             } catch (Exception e) {
@@ -355,10 +407,27 @@ public class MetadataUpdater {
             AdminReadOnlyGateway gateway,
             int maxRetryTimes)
             throws Exception {
+        return tryToInitializeClusterWithRetries(
+                rpcClient, serverNode, gateway, maxRetryTimes, TimeUnit.SECONDS.toMillis(30));
+    }
+
+    @VisibleForTesting
+    static @Nullable Cluster tryToInitializeClusterWithRetries(
+            RpcClient rpcClient,
+            ServerNode serverNode,
+            AdminReadOnlyGateway gateway,
+            int maxRetryTimes,
+            long timeoutMs)
+            throws Exception {
         int retryCount = 0;
+        long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (retryCount <= maxRetryTimes) {
+            long remainingMs = remainingTimeMs(deadlineNanos);
+            if (remainingMs <= 0) {
+                throw new TimeoutException("Timed out initializing cluster metadata.");
+            }
             try {
-                return tryToInitializeCluster(gateway);
+                return tryToInitializeCluster(gateway, remainingMs);
             } catch (Exception e) {
                 Throwable cause = stripExecutionException(e);
                 // in case of bootstrap is recovering, we should retry to connect.
@@ -374,6 +443,7 @@ public class MetadataUpdater {
                 rpcClient.disconnect(serverNode.uid());
 
                 long delayMs = (long) (RETRY_INTERVAL_MS * Math.pow(2, retryCount));
+                delayMs = Math.min(delayMs, remainingMs);
                 LOG.warn(
                         "Failed to connect to bootstrap server: {} (retry {}/{}). Retrying in {} ms.",
                         serverNode,
@@ -397,7 +467,17 @@ public class MetadataUpdater {
 
     private static Cluster tryToInitializeCluster(AdminReadOnlyGateway adminReadOnlyGateway)
             throws Exception {
-        return sendMetadataRequestAndRebuildCluster(adminReadOnlyGateway, Collections.emptySet());
+        return tryToInitializeCluster(adminReadOnlyGateway, TimeUnit.SECONDS.toMillis(30));
+    }
+
+    private static Cluster tryToInitializeCluster(
+            AdminReadOnlyGateway adminReadOnlyGateway, long timeoutMs) throws Exception {
+        return sendMetadataRequestAndRebuildCluster(
+                adminReadOnlyGateway, Collections.<TablePath>emptySet(), timeoutMs);
+    }
+
+    private static long remainingTimeMs(long deadlineNanos) {
+        return TimeUnit.NANOSECONDS.toMillis(Math.max(0L, deadlineNanos - System.nanoTime()));
     }
 
     /** Invalid the bucket metadata for the given physical table paths. */

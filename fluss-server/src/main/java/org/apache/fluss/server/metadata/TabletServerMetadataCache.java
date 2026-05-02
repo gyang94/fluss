@@ -139,6 +139,14 @@ public class TabletServerMetadataCache implements ServerMetadataCache {
         }
     }
 
+    /** Returns the cached bucket metadata for a non-partitioned table bucket, if available. */
+    public Optional<BucketMetadata> getBucketMetadata(long tableId, int bucketId) {
+        ServerMetadataSnapshot snapshot = serverMetadataSnapshot;
+        Map<Integer, BucketMetadata> bucketMetadataForTable =
+                snapshot.getBucketMetadataForTable(tableId);
+        return Optional.ofNullable(bucketMetadataForTable.get(bucketId));
+    }
+
     public SchemaGetter subscribeWithInitialSchema(
             TablePath tablePath, long tableId, int initialSchemaId, Schema initialSchema) {
         return serverSchemaCache.subscribeWithInitialSchema(

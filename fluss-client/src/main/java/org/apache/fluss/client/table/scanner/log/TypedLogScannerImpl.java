@@ -25,6 +25,8 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.RowType;
 
+import javax.annotation.Nullable;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -69,6 +71,11 @@ public class TypedLogScannerImpl<T> implements TypedLogScanner<T> {
     }
 
     @Override
+    public void setGroupId(String groupId) {
+        delegate.setGroupId(groupId);
+    }
+
+    @Override
     public void subscribeFromBeginning(int bucket) {
         delegate.subscribeFromBeginning(bucket);
     }
@@ -91,6 +98,32 @@ public class TypedLogScannerImpl<T> implements TypedLogScanner<T> {
     @Override
     public void unsubscribe(long partitionId, int bucket) {
         delegate.unsubscribe(partitionId, bucket);
+    }
+
+    @Override
+    public void commitSync() {
+        delegate.commitSync();
+    }
+
+    @Override
+    public void commitSync(Map<TableBucket, Long> offsets) {
+        delegate.commitSync(offsets);
+    }
+
+    @Override
+    public void commitAsync() {
+        delegate.commitAsync();
+    }
+
+    @Override
+    public void commitAsync(@Nullable OffsetCommitCallback callback) {
+        delegate.commitAsync(callback);
+    }
+
+    @Override
+    public void commitAsync(
+            Map<TableBucket, Long> offsets, @Nullable OffsetCommitCallback callback) {
+        delegate.commitAsync(offsets, callback);
     }
 
     @Override

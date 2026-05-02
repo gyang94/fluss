@@ -494,9 +494,16 @@ public class CoordinatorServer extends ServerBase {
         MetadataManager metadataManager =
                 new MetadataManager(zkClient, conf, lakeCatalogDynamicLoader);
         List<String> databases = metadataManager.listDatabases();
-        if (databases.isEmpty()) {
+        if (!databases.contains(DEFAULT_DATABASE)) {
             metadataManager.createDatabase(DEFAULT_DATABASE, DatabaseDescriptor.EMPTY, true);
             LOG.info("Created default database '{}' because no database exists.", DEFAULT_DATABASE);
+        }
+
+        // create system database for internal tables (e.g. consumer_offsets).
+        if (!databases.contains(CoordinatorService.SYSTEM_DATABASE_NAME)) {
+            metadataManager.createDatabase(
+                    CoordinatorService.SYSTEM_DATABASE_NAME, DatabaseDescriptor.EMPTY, true);
+            LOG.info("Created system database '{}'.", CoordinatorService.SYSTEM_DATABASE_NAME);
         }
         // create Kafka default database if Kafka is enabled.
         if (conf.get(ConfigOptions.KAFKA_ENABLED)) {

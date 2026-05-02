@@ -194,7 +194,7 @@ public final class FlussClusterExtension
                             coordinatorGateway.dropTable(
                                     newDropTableRequest(BUILTIN_DATABASE, table, true)));
                 }
-            } else if ("fluss_system".equals(db)) {
+            } else if ("sys".equals(db)) {
                 // skip system database entirely - it contains internal tables
                 // managed by CoordinatorService
                 continue;

@@ -184,7 +184,7 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
     @Override
     public CompletableFuture<FindCoordinatorResponse> findCoordinator(
             FindCoordinatorRequest request) {
-        return groupCoordinatorService.findCoordinator(request);
+        return groupCoordinatorService.findCoordinator(request, currentSession().getListenerName());
     }
 
     @Override

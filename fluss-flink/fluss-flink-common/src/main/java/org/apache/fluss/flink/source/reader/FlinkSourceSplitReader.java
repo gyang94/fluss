@@ -24,6 +24,7 @@ import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.client.table.scanner.batch.BatchScanner;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
+import org.apache.fluss.client.table.scanner.log.OffsetCommitCallback;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.PartitionNotExistException;
@@ -124,7 +125,8 @@ public class FlinkSourceSplitReader implements SplitReader<RecordAndPos, SourceS
             @Nullable int[] projectedFields,
             @Nullable Predicate logRecordBatchFilter,
             @Nullable LakeSource<LakeSplit> lakeSource,
-            FlinkSourceReaderMetrics flinkSourceReaderMetrics) {
+            FlinkSourceReaderMetrics flinkSourceReaderMetrics,
+            @Nullable String groupId) {
         this.flinkMetricRegistry =
                 new FlinkMetricRegistry(flinkSourceReaderMetrics.getSourceReaderMetricGroup());
         this.connection = ConnectionFactory.createConnection(flussConf, flinkMetricRegistry);
@@ -142,6 +144,9 @@ public class FlinkSourceSplitReader implements SplitReader<RecordAndPos, SourceS
                         .project(projectedFields)
                         .filter(logRecordBatchFilter)
                         .createLogScanner();
+        if (groupId != null) {
+            logScanner.setGroupId(groupId);
+        }
         this.stoppingOffsets = new HashMap<>();
         this.emptyLogSplits = new HashSet<>();
         this.lakeSource = lakeSource;
@@ -316,6 +321,16 @@ public class FlinkSourceSplitReader implements SplitReader<RecordAndPos, SourceS
             flinkSourceReaderMetrics.registerTableBucket(tableBucket);
             subscribedBuckets.put(tableBucket, split.splitId());
         }
+    }
+
+    /**
+     * Commits offsets asynchronously via the underlying log scanner.
+     *
+     * @param offsets the offsets to commit
+     * @param callback the callback to invoke on completion
+     */
+    public void commitOffsets(Map<TableBucket, Long> offsets, OffsetCommitCallback callback) {
+        logScanner.commitAsync(offsets, callback);
     }
 
     public Set<TableBucket> removePartitions(Map<Long, String> removedPartitions) {

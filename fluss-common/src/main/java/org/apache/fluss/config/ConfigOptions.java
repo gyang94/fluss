@@ -1180,6 +1180,13 @@ public class ConfigOptions {
                                     + "this timeout is the max time that delayed write try to complete. "
                                     + "The default setting is 30 seconds.");
 
+    public static final ConfigOption<Duration> CLIENT_RETRY_BACKOFF =
+            key("client.retry-backoff")
+                    .durationType()
+                    .defaultValue(Duration.ofMillis(100))
+                    .withDescription(
+                            "Backoff duration between retry attempts for client operations.");
+
     public static final ConfigOption<Boolean> CLIENT_SCANNER_LOG_CHECK_CRC =
             key("client.scanner.log.check-crc")
                     .booleanType()

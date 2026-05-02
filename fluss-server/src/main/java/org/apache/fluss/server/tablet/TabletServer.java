@@ -24,6 +24,8 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.InvalidServerRackInfoException;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.metrics.registry.MetricRegistry;
 import org.apache.fluss.rpc.GatewayClientProxy;
 import org.apache.fluss.rpc.RpcClient;
@@ -41,6 +43,7 @@ import org.apache.fluss.server.coordinator.LakeCatalogDynamicLoader;
 import org.apache.fluss.server.coordinator.MetadataManager;
 import org.apache.fluss.server.coordinator.group.CoordinatorRuntime;
 import org.apache.fluss.server.coordinator.group.GroupCoordinatorService;
+import org.apache.fluss.server.coordinator.group.ReplicaManagerKvWriter;
 import org.apache.fluss.server.kv.KvManager;
 import org.apache.fluss.server.kv.snapshot.DefaultCompletedKvSnapshotCommitter;
 import org.apache.fluss.server.log.LogManager;
@@ -89,6 +92,8 @@ import static org.apache.fluss.server.utils.ServerRpcMessageUtils.toTableBucket;
 public class TabletServer extends ServerBase {
 
     private static final String SERVER_NAME = "TabletServer";
+    private static final TablePath CONSUMER_OFFSETS_TABLE_PATH =
+            TablePath.of("sys", "consumer_offsets");
 
     private static final Logger LOG = LoggerFactory.getLogger(TabletServer.class);
 
@@ -277,6 +282,10 @@ public class TabletServer extends ServerBase {
                             userMetrics,
                             clock,
                             ioExecutor);
+            TableInfo consumerOffsetsTableInfo = tryGetConsumerOffsetsTableInfo(metadataManager);
+            if (consumerOffsetsTableInfo != null) {
+                replicaManager.setConsumerOffsetsTableId(consumerOffsetsTableInfo.getTableId());
+            }
             replicaManager.startup();
 
             // Register DefaultSnapshotContext for dynamic kv.snapshot.interval
@@ -287,10 +296,20 @@ public class TabletServer extends ServerBase {
             dynamicConfigManager.startup();
 
             this.coordinatorRuntime = new CoordinatorRuntime();
-            int consumerOffsetsBucketCount =
-                    conf.getInt(ConfigOptions.CONSUMER_OFFSETS_BUCKET_COUNT);
+            coordinatorRuntime.setKvWriter(
+                    new ReplicaManagerKvWriter(
+                            replicaManager,
+                            metadataCache,
+                            metadataManager,
+                            consumerOffsetsTableInfo));
             GroupCoordinatorService groupCoordinatorService =
-                    new GroupCoordinatorService(coordinatorRuntime, consumerOffsetsBucketCount);
+                    new GroupCoordinatorService(
+                            coordinatorRuntime,
+                            metadataCache,
+                            metadataManager,
+                            interListenerName,
+                            coordinatorGateway,
+                            conf);
             replicaManager.setCoordinatorRuntime(coordinatorRuntime);
 
             this.tabletService =
@@ -556,6 +575,20 @@ public class TabletServer extends ServerBase {
         if (!shutdownSucceeded) {
             LOG.warn(
                     "Proceeding to do an unclean shutdown as all the controlled shutdown attempts failed.");
+        }
+    }
+
+    @Nullable
+    private TableInfo tryGetConsumerOffsetsTableInfo(MetadataManager metadataManager) {
+        try {
+            return metadataManager.getTable(CONSUMER_OFFSETS_TABLE_PATH);
+        } catch (Exception e) {
+            LOG.warn(
+                    "Failed to resolve {} during TabletServer startup. Consumer offset coordination "
+                            + "will wait for metadata to become available.",
+                    CONSUMER_OFFSETS_TABLE_PATH,
+                    e);
+            return null;
         }
     }
 

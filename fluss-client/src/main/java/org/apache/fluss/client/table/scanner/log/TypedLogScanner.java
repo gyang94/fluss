@@ -18,8 +18,12 @@
 package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.annotation.PublicEvolving;
+import org.apache.fluss.metadata.TableBucket;
+
+import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.util.Map;
 
 /**
  * A typed scanner is used to scan log data as POJOs of specify table from Fluss.
@@ -37,6 +41,13 @@ public interface TypedLogScanner<T> extends AutoCloseable {
      * @return the result of poll.
      */
     TypedScanRecords<T> poll(Duration timeout);
+
+    /**
+     * Set the consumer group ID used by offset commit operations.
+     *
+     * @param groupId the consumer group ID
+     */
+    void setGroupId(String groupId);
 
     /**
      * Subscribe to the given table bucket from beginning dynamically. If the table bucket is
@@ -81,6 +92,37 @@ public interface TypedLogScanner<T> extends AutoCloseable {
      * @param bucket the table bucket to unsubscribe.
      */
     void unsubscribe(long partitionId, int bucket);
+
+    /**
+     * Commit the current next-fetch offsets for all subscribed buckets that have concrete scan
+     * positions.
+     */
+    void commitSync();
+
+    /**
+     * Commit the provided offsets synchronously.
+     *
+     * @param offsets the offsets to commit
+     */
+    void commitSync(Map<TableBucket, Long> offsets);
+
+    /** Asynchronously commit the current next-fetch offsets for all subscribed buckets. */
+    void commitAsync();
+
+    /**
+     * Asynchronously commit the current next-fetch offsets with a callback.
+     *
+     * @param callback the callback to invoke on completion, or null for default error logging
+     */
+    void commitAsync(@Nullable OffsetCommitCallback callback);
+
+    /**
+     * Asynchronously commit the provided offsets with a callback.
+     *
+     * @param offsets the offsets to commit
+     * @param callback the callback to invoke on completion, or null for default error logging
+     */
+    void commitAsync(Map<TableBucket, Long> offsets, @Nullable OffsetCommitCallback callback);
 
     /**
      * Wake up the log scanner in case the fetcher thread in log scanner is blocking in {@link

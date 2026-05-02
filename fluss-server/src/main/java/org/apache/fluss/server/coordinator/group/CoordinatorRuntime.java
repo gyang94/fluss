@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.exception.CoordinatorLoadInProgressException;
 import org.apache.fluss.exception.NotCoordinatorException;
+import org.apache.fluss.utils.ExceptionUtils;
 import org.apache.fluss.utils.MapUtils;
 
 import org.slf4j.Logger;
@@ -43,12 +44,13 @@ import java.util.function.Function;
  * <ol>
  *   <li>Look up the active (loaded) shard for the given bucket
  *   <li>Execute the operation to produce a {@link CoordinatorResult}
- *   <li>Replay records into the shard's in-memory cache
  *   <li>If records are non-empty and a {@link KvWriter} is set, persist via the writer
+ *   <li>Replay records into the in-memory cache only after the write is durable
  *   <li>Complete the future with the response once the write is acknowledged
  * </ol>
  *
- * <p>Read operations execute directly on the shard and return immediately.
+ * <p>Read and write operations are serialized per bucket to preserve shard thread-safety and to
+ * ensure reads only observe committed coordinator state.
  */
 @Internal
 @ThreadSafe
@@ -57,6 +59,7 @@ public class CoordinatorRuntime {
     private static final Logger LOG = LoggerFactory.getLogger(CoordinatorRuntime.class);
 
     private final Map<Integer, GroupCoordinatorShard> shards;
+    private final Map<Integer, CompletableFuture<Void>> operationQueues;
 
     @Nullable private KvWriter kvWriter;
 
@@ -75,6 +78,7 @@ public class CoordinatorRuntime {
 
     public CoordinatorRuntime() {
         this.shards = MapUtils.newConcurrentMap();
+        this.operationQueues = MapUtils.newConcurrentMap();
     }
 
     /**
@@ -101,28 +105,7 @@ public class CoordinatorRuntime {
      */
     public <T> CompletableFuture<T> scheduleWriteOperation(
             int bucketId, Function<GroupCoordinatorShard, CoordinatorResult<T>> op) {
-        try {
-            GroupCoordinatorShard shard = getActiveShard(bucketId);
-            CoordinatorResult<T> result = op.apply(shard);
-
-            // Replay records into the in-memory cache.
-            for (CoordinatorResult.KvRecord record : result.records()) {
-                shard.replay(record.key(), record.value());
-            }
-
-            // If no records or no writer, complete immediately.
-            if (result.records().isEmpty() || kvWriter == null) {
-                return CompletableFuture.completedFuture(result.response());
-            }
-
-            // Persist via the KV writer and return the response after acknowledgement.
-            return kvWriter.writeAndWaitForHwm(bucketId, result.records())
-                    .thenApply(ignored -> result.response());
-        } catch (Exception e) {
-            CompletableFuture<T> failed = new CompletableFuture<>();
-            failed.completeExceptionally(e);
-            return failed;
-        }
+        return enqueueOperation(bucketId, () -> executeWriteOperation(bucketId, op));
     }
 
     /**
@@ -135,15 +118,96 @@ public class CoordinatorRuntime {
      */
     public <T> CompletableFuture<T> scheduleReadOperation(
             int bucketId, Function<GroupCoordinatorShard, T> op) {
+        return enqueueOperation(bucketId, () -> executeReadOperation(bucketId, op));
+    }
+
+    private <T> CompletableFuture<T> executeWriteOperation(
+            int bucketId, Function<GroupCoordinatorShard, CoordinatorResult<T>> op) {
         try {
             GroupCoordinatorShard shard = getActiveShard(bucketId);
-            T result = op.apply(shard);
-            return CompletableFuture.completedFuture(result);
+            CoordinatorResult<T> result = op.apply(shard);
+
+            if (result.records().isEmpty()) {
+                return CompletableFuture.completedFuture(result.response());
+            }
+
+            if (kvWriter == null) {
+                replayRecords(shard, result.records());
+                return CompletableFuture.completedFuture(result.response());
+            }
+
+            return kvWriter.writeAndWaitForHwm(bucketId, result.records())
+                    .thenApply(
+                            ignored -> {
+                                replayRecords(shard, result.records());
+                                return result.response();
+                            });
         } catch (Exception e) {
             CompletableFuture<T> failed = new CompletableFuture<>();
             failed.completeExceptionally(e);
             return failed;
         }
+    }
+
+    private <T> CompletableFuture<T> executeReadOperation(
+            int bucketId, Function<GroupCoordinatorShard, T> op) {
+        try {
+            GroupCoordinatorShard shard = getActiveShard(bucketId);
+            return CompletableFuture.completedFuture(op.apply(shard));
+        } catch (Exception e) {
+            CompletableFuture<T> failed = new CompletableFuture<>();
+            failed.completeExceptionally(e);
+            return failed;
+        }
+    }
+
+    private void replayRecords(
+            GroupCoordinatorShard shard, List<CoordinatorResult.KvRecord> records) {
+        for (CoordinatorResult.KvRecord record : records) {
+            shard.replay(record.key(), record.value());
+        }
+    }
+
+    private <T> CompletableFuture<T> enqueueOperation(
+            int bucketId, OperationSupplier<T> operationSupplier) {
+        CompletableFuture<T> resultFuture = new CompletableFuture<>();
+        CompletableFuture<Void> queueTail =
+                operationQueues.compute(
+                        bucketId,
+                        (ignored, previousTail) -> {
+                            CompletableFuture<Void> safePreviousTail =
+                                    previousTail == null
+                                            ? CompletableFuture.completedFuture(null)
+                                            : previousTail.handle(
+                                                    (ignoredResult, ignoredError) -> null);
+
+                            return safePreviousTail.thenCompose(
+                                    ignoredResult -> {
+                                        CompletableFuture<T> operationFuture;
+                                        try {
+                                            operationFuture = operationSupplier.get();
+                                        } catch (Throwable t) {
+                                            resultFuture.completeExceptionally(t);
+                                            return CompletableFuture.completedFuture(null);
+                                        }
+
+                                        return operationFuture.handle(
+                                                (operationResult, operationError) -> {
+                                                    if (operationError == null) {
+                                                        resultFuture.complete(operationResult);
+                                                    } else {
+                                                        resultFuture.completeExceptionally(
+                                                                ExceptionUtils
+                                                                        .stripCompletionException(
+                                                                                operationError));
+                                                    }
+                                                    return null;
+                                                });
+                                    });
+                        });
+        queueTail.whenComplete(
+                (ignoredResult, ignoredError) -> operationQueues.remove(bucketId, queueTail));
+        return resultFuture;
     }
 
     /**
@@ -202,12 +266,19 @@ public class CoordinatorRuntime {
     /** Removes all shards from this runtime. */
     public void close() {
         shards.clear();
+        operationQueues.clear();
     }
 
     /** Returns the number of registered shards. */
     @VisibleForTesting
     int getShardCount() {
         return shards.size();
+    }
+
+    /** Returns the number of buckets that currently have queued operations. */
+    @VisibleForTesting
+    int getOperationQueueCount() {
+        return operationQueues.size();
     }
 
     /** Returns the shard for the given bucket, or {@code null} if none exists. */
@@ -235,5 +306,10 @@ public class CoordinatorRuntime {
                     "Coordinator for bucket " + bucketId + " is still loading.");
         }
         return shard;
+    }
+
+    @FunctionalInterface
+    private interface OperationSupplier<T> {
+        CompletableFuture<T> get();
     }
 }

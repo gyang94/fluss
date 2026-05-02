@@ -152,6 +152,8 @@ import static org.apache.fluss.utils.concurrent.LockUtils.inLock;
 /** A manager for replica. */
 public class ReplicaManager implements ServerReconfigurable {
     private static final Logger LOG = LoggerFactory.getLogger(ReplicaManager.class);
+    private static final TablePath CONSUMER_OFFSETS_TABLE_PATH =
+            TablePath.of("sys", "consumer_offsets");
 
     public static final String HIGH_WATERMARK_CHECKPOINT_FILE_NAME = "high-watermark-checkpoint";
     private final Configuration conf;
@@ -1127,7 +1129,7 @@ public class ReplicaManager implements ServerReconfigurable {
                 }
 
                 // Load GroupCoordinator shard for sys.consumer_offsets buckets
-                if (coordinatorRuntime != null && tb.getTableId() == consumerOffsetsTableId) {
+                if (coordinatorRuntime != null && isConsumerOffsetsBucket(tb)) {
                     if (replica.getKvTablet() != null) {
                         coordinatorRuntime.loadShardFromKv(
                                 tb.getBucket(),
@@ -1199,7 +1201,7 @@ public class ReplicaManager implements ServerReconfigurable {
                     replicasBecomeFollower.add(replica);
                 }
                 // Unload GroupCoordinator shard for sys.consumer_offsets buckets
-                if (coordinatorRuntime != null && tb.getTableId() == consumerOffsetsTableId) {
+                if (coordinatorRuntime != null && isConsumerOffsetsBucket(tb)) {
                     coordinatorRuntime.scheduleUnloadOperation(tb.getBucket());
                 }
                 // stop the remote log tiering tasks for followers
@@ -2026,6 +2028,17 @@ public class ReplicaManager implements ServerReconfigurable {
 
     private boolean isRequiredAcksInvalid(int requiredAcks) {
         return requiredAcks != 0 && requiredAcks != 1 && requiredAcks != -1;
+    }
+
+    private boolean isConsumerOffsetsBucket(TableBucket tableBucket) {
+        if (consumerOffsetsTableId >= 0 && tableBucket.getTableId() == consumerOffsetsTableId) {
+            return true;
+        }
+
+        return metadataCache
+                .getTablePath(tableBucket.getTableId())
+                .map(CONSUMER_OFFSETS_TABLE_PATH::equals)
+                .orElse(false);
     }
 
     @VisibleForTesting

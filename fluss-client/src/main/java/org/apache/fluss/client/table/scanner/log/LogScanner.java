@@ -18,8 +18,12 @@
 package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.annotation.PublicEvolving;
+import org.apache.fluss.metadata.TableBucket;
+
+import javax.annotation.Nullable;
 
 import java.time.Duration;
+import java.util.Map;
 
 /**
  * The scanner is used to scan log data of specify table from Fluss.
@@ -55,6 +59,15 @@ public interface LogScanner extends AutoCloseable {
      *     read from.
      */
     ScanRecords poll(Duration timeout);
+
+    /**
+     * Set the consumer group ID used by offset commit operations.
+     *
+     * <p>This must be configured before calling {@link #commitSync()} or {@link #commitSync(Map)}.
+     *
+     * @param groupId the consumer group ID
+     */
+    void setGroupId(String groupId);
 
     /**
      * Subscribe to the given table bucket in given offset dynamically. If the table bucket is
@@ -115,6 +128,54 @@ public interface LogScanner extends AutoCloseable {
      * @throws java.lang.IllegalStateException if the table is a partitioned table.
      */
     void unsubscribe(int bucket);
+
+    /**
+     * Commit the current next-fetch offsets for all subscribed buckets that have concrete scan
+     * positions.
+     *
+     * <p>The committed offsets follow Kafka semantics and represent the next offsets to fetch.
+     */
+    void commitSync();
+
+    /**
+     * Commit the provided offsets synchronously.
+     *
+     * <p>The committed offsets represent the next offsets to fetch.
+     *
+     * @param offsets the offsets to commit
+     */
+    void commitSync(Map<TableBucket, Long> offsets);
+
+    /**
+     * Asynchronously commit the current next-fetch offsets for all subscribed buckets.
+     *
+     * <p>Any errors encountered are either passed to the default callback (which logs at WARN
+     * level) or silently ignored. Equivalent to {@code commitAsync(null)}.
+     */
+    void commitAsync();
+
+    /**
+     * Asynchronously commit the current next-fetch offsets for all subscribed buckets, with a
+     * callback to be invoked when the commit completes or fails.
+     *
+     * <p>The callback is invoked on the user's thread during subsequent calls to {@code poll()},
+     * {@code commitSync()}, {@code commitAsync()}, or {@code close()}.
+     *
+     * @param callback the callback to invoke on completion, or null for default error logging
+     */
+    void commitAsync(@Nullable OffsetCommitCallback callback);
+
+    /**
+     * Asynchronously commit the provided offsets, with a callback to be invoked when the commit
+     * completes or fails.
+     *
+     * <p>The callback is invoked on the user's thread during subsequent calls to {@code poll()},
+     * {@code commitSync()}, {@code commitAsync()}, or {@code close()}.
+     *
+     * @param offsets the offsets to commit
+     * @param callback the callback to invoke on completion, or null for default error logging
+     */
+    void commitAsync(Map<TableBucket, Long> offsets, @Nullable OffsetCommitCallback callback);
 
     /**
      * Subscribe to the given partitioned table bucket from beginning dynamically. If the table

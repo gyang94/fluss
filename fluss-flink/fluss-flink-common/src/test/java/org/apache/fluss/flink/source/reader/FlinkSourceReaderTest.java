@@ -186,6 +186,7 @@ class FlinkSourceReaderTest extends FlinkTestBase {
                 null,
                 new FlinkSourceReaderMetrics(context.metricGroup()),
                 recordEmitter,
-                lakeSource);
+                lakeSource,
+                null);
     }
 }
