@@ -196,19 +196,23 @@ class FlinkCatalogTest {
                         mockLakeCatalog);
         catalog.open();
 
-        // First check if database exists, and drop it if it does
+        // Clean up any leftover tables from previous tests
         if (catalog.databaseExists(DEFAULT_DB)) {
-            catalog.dropDatabase(DEFAULT_DB, true, true);
-        }
-        try {
-            catalog.createDatabase(
-                    DEFAULT_DB, new CatalogDatabaseImpl(Collections.emptyMap(), null), true);
-        } catch (CatalogException e) {
-            // the auto partitioned manager may create the db zk node
-            // in another thread, so if exception is NodeExistsException, just ignore
-            if (!ExceptionUtils.findThrowableWithMessage(e, "KeeperException$NodeExistsException")
-                    .isPresent()) {
-                throw e;
+            for (String table : catalog.listTables(DEFAULT_DB)) {
+                catalog.dropTable(new ObjectPath(DEFAULT_DB, table), true);
+            }
+        } else {
+            try {
+                catalog.createDatabase(
+                        DEFAULT_DB, new CatalogDatabaseImpl(Collections.emptyMap(), null), true);
+            } catch (CatalogException e) {
+                // the auto partitioned manager may create the db zk node
+                // in another thread, so if exception is NodeExistsException, just ignore
+                if (!ExceptionUtils.findThrowableWithMessage(
+                                e, "KeeperException$NodeExistsException")
+                        .isPresent()) {
+                    throw e;
+                }
             }
         }
     }

@@ -314,6 +314,12 @@ public class MetadataManager {
 
     public void dropDatabase(String name, boolean ignoreIfNotExists, boolean cascade)
             throws DatabaseNotExistException, DatabaseNotEmptyException {
+        if (CoordinatorServer.DEFAULT_DATABASE.equals(name)) {
+            throw new UnsupportedOperationException(
+                    "Cannot drop the default database '"
+                            + name
+                            + "'. The default database is required for cluster operation.");
+        }
         if (!databaseExists(name)) {
             if (ignoreIfNotExists) {
                 return;
