@@ -17,9 +17,11 @@
 
 package org.apache.fluss.server.log;
 
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.ConfigOptions;
-import org.apache.fluss.exception.FlussException;
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.TableConfig;
+import org.apache.fluss.exception.FlussException;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.exception.LogStorageException;
 import org.apache.fluss.exception.PartitionNotExistException;
@@ -326,11 +328,9 @@ public final class LogManager extends TabletManagerBase {
                 });
     }
 
-    /**
-     * using the default {@link ConfigOptions#TABLE_LOG_TTL} when no table properties are
-     * configured.
-     */
+    @VisibleForTesting
     public LogTablet getOrCreateLog(
+            File dataDir,
             PhysicalTablePath tablePath,
             TableBucket tableBucket,
             LogFormat logFormat,
@@ -339,7 +339,13 @@ public final class LogManager extends TabletManagerBase {
             throws Exception {
         long logTtlMs = new TableConfig(new Configuration()).getLogTTLMs();
         return getOrCreateLog(
-                tablePath, tableBucket, logFormat, tieredLogLocalSegments, logTtlMs, isChangelog);
+                dataDir,
+                tablePath,
+                tableBucket,
+                logFormat,
+                tieredLogLocalSegments,
+                logTtlMs,
+                isChangelog);
     }
 
     public Optional<LogTablet> getLog(TableBucket tableBucket) {
