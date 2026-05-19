@@ -116,19 +116,23 @@ public class TableCommand {
             props.forEach(builder::property);
 
             admin.createTable(tablePath, builder.build(), opts.ifNotExists())
-                    .get(30, TimeUnit.SECONDS);
+                    .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             System.out.println("Created table \"" + tablePath + "\".");
         }
 
         void listTables(TableCommandOptions opts) throws Exception {
             String database = opts.database();
-            List<String> tables = admin.listTables(database).get(30, TimeUnit.SECONDS);
+            List<String> tables =
+                    admin.listTables(database)
+                            .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             tables.forEach(System.out::println);
         }
 
         void describeTable(TableCommandOptions opts) throws Exception {
             TablePath tablePath = opts.tablePath();
-            TableInfo tableInfo = admin.getTableInfo(tablePath).get(30, TimeUnit.SECONDS);
+            TableInfo tableInfo =
+                    admin.getTableInfo(tablePath)
+                            .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
 
             Schema schema = tableInfo.getSchema();
             boolean hasPK = tableInfo.hasPrimaryKey();
@@ -178,7 +182,8 @@ public class TableCommand {
 
         void dropTable(TableCommandOptions opts) throws Exception {
             TablePath tablePath = opts.tablePath();
-            admin.dropTable(tablePath, opts.ifExists()).get(30, TimeUnit.SECONDS);
+            admin.dropTable(tablePath, opts.ifExists())
+                    .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             System.out.println("Dropped table \"" + tablePath + "\".");
         }
 
@@ -325,7 +330,7 @@ public class TableCommand {
             if (pk == null) {
                 return Collections.emptyList();
             }
-            return Arrays.asList(pk.split(","));
+            return Arrays.asList(trimElements(pk.split(",")));
         }
 
         List<String> partitionKeys() {
@@ -333,7 +338,14 @@ public class TableCommand {
             if (pb == null) {
                 return Collections.emptyList();
             }
-            return Arrays.asList(pb.split(","));
+            return Arrays.asList(trimElements(pb.split(",")));
+        }
+
+        private static String[] trimElements(String[] elements) {
+            for (int i = 0; i < elements.length; i++) {
+                elements[i] = elements[i].trim();
+            }
+            return elements;
         }
 
         Integer buckets() {

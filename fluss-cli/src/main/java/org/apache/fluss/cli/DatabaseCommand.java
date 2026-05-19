@@ -93,18 +93,21 @@ public class DatabaseCommand {
             DatabaseDescriptor.Builder builder = DatabaseDescriptor.builder();
             props.forEach(builder::customProperty);
             admin.createDatabase(dbName, builder.build(), opts.ifNotExists())
-                    .get(30, TimeUnit.SECONDS);
+                    .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             System.out.println("Created database \"" + dbName + "\".");
         }
 
         void listDatabases() throws Exception {
-            List<String> databases = admin.listDatabases().get(30, TimeUnit.SECONDS);
+            List<String> databases =
+                    admin.listDatabases().get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             databases.forEach(System.out::println);
         }
 
         void describeDatabase(DatabaseCommandOptions opts) throws Exception {
             String dbName = opts.database();
-            DatabaseInfo info = admin.getDatabaseInfo(dbName).get(30, TimeUnit.SECONDS);
+            DatabaseInfo info =
+                    admin.getDatabaseInfo(dbName)
+                            .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             System.out.println("Database: " + dbName);
             info.getDatabaseDescriptor()
                     .getComment()
@@ -120,7 +123,8 @@ public class DatabaseCommand {
 
         void dropDatabase(DatabaseCommandOptions opts) throws Exception {
             String dbName = opts.database();
-            admin.dropDatabase(dbName, opts.ifExists(), opts.cascade()).get(30, TimeUnit.SECONDS);
+            admin.dropDatabase(dbName, opts.ifExists(), opts.cascade())
+                    .get(CommandUtils.DEFAULT_TIMEOUT_SECS, TimeUnit.SECONDS);
             System.out.println("Dropped database \"" + dbName + "\".");
         }
 

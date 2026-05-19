@@ -39,7 +39,7 @@ import java.util.stream.Collectors;
 @Internal
 public final class CommandUtils {
 
-    public static final long DEFAULT_TIMEOUT_MS = 30_000;
+    public static final long DEFAULT_TIMEOUT_SECS = 30;
 
     private CommandUtils() {}
 
