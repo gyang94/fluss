@@ -20,8 +20,13 @@ package org.apache.fluss.cli;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.client.Connection;
+import org.apache.fluss.client.FlussConnection;
 import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.client.metadata.MetadataUpdater;
+import org.apache.fluss.cluster.BucketLocation;
+import org.apache.fluss.cluster.Cluster;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
@@ -178,6 +183,43 @@ public class TableCommand {
                 propsMap.forEach((k, v) -> System.out.println("  " + k + " = " + v));
                 customPropsMap.forEach((k, v) -> System.out.println("  " + k + " = " + v));
             }
+
+            printBucketDistribution(tablePath);
+        }
+
+        private void printBucketDistribution(TablePath tablePath) {
+            MetadataUpdater metadataUpdater = ((FlussConnection) connection).getMetadataUpdater();
+            metadataUpdater.updateTableOrPartitionMetadata(tablePath, null);
+            Cluster cluster = metadataUpdater.getCluster();
+            PhysicalTablePath physicalTablePath = PhysicalTablePath.of(tablePath);
+            java.util.List<BucketLocation> bucketLocations =
+                    cluster.getAvailableBucketsForPhysicalTablePath(physicalTablePath);
+            if (bucketLocations == null || bucketLocations.isEmpty()) {
+                return;
+            }
+            System.out.println("Bucket Distribution:");
+            System.out.printf("  %-8s%-8s%-12s%s%n", "Bucket", "Leader", "Replicas", "Isr");
+            for (BucketLocation loc : bucketLocations) {
+                String leader = loc.getLeader() == null ? "none" : String.valueOf(loc.getLeader());
+                System.out.printf(
+                        "  %-8d%-8s%-12s%s%n",
+                        loc.getBucketId(),
+                        leader,
+                        formatIntArray(loc.getReplicas()),
+                        formatIntArray(loc.getIsr()));
+            }
+        }
+
+        private static String formatIntArray(int[] arr) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < arr.length; i++) {
+                if (i > 0) {
+                    sb.append(",");
+                }
+                sb.append(arr[i]);
+            }
+            sb.append("]");
+            return sb.toString();
         }
 
         void dropTable(TableCommandOptions opts) throws Exception {
