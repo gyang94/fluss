@@ -35,7 +35,12 @@ FLUSS_CLASSPATH=`constructFlussClassPath`
 CLASS_TO_RUN=$1
 shift
 
-log_setting=("-Dlog4j.configuration=file:${FLUSS_CONF_DIR}/log4j-console.properties" "-Dlog4j.configurationFile=file:${FLUSS_CONF_DIR}/log4j-console.properties")
+CLI_LOG_CONF="${FLUSS_CONF_DIR}/log4j-cli.properties"
+if [ -f "$CLI_LOG_CONF" ]; then
+  log_setting=("-Dlog4j.configuration=file:${CLI_LOG_CONF}" "-Dlog4j.configurationFile=file:${CLI_LOG_CONF}")
+else
+  log_setting=("-Dlog4j.configuration=file:${FLUSS_CONF_DIR}/log4j-console.properties" "-Dlog4j.configurationFile=file:${FLUSS_CONF_DIR}/log4j-console.properties")
+fi
 
 FLUSS_ENV_JAVA_OPTS=$(eval echo ${FLUSS_ENV_JAVA_OPTS})
 

@@ -54,3 +54,29 @@ services:
         data.dir: /tmp/fluss-data
         remote.data.dir: /tmp/fluss-remote-data
     command: tabletServer
+
+  tablet-server-1:
+    image: fluss-local
+    depends_on:
+      - coordinator
+    environment:
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper:2181
+        bind.listeners: FLUSS://tablet-server-1:9123
+        tablet-server.id: 1
+        data.dir: /tmp/fluss-data
+        remote.data.dir: /tmp/fluss-remote-data
+    command: tabletServer
+
+  tablet-server-2:
+    image: fluss-local
+    depends_on:
+      - coordinator
+    environment:
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper:2181
+        bind.listeners: FLUSS://tablet-server-2:9123
+        tablet-server.id: 2
+        data.dir: /tmp/fluss-data
+        remote.data.dir: /tmp/fluss-remote-data
+    command: tabletServer
