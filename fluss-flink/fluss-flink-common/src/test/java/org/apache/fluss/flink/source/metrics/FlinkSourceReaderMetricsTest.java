@@ -17,13 +17,21 @@
 
 package org.apache.fluss.flink.source.metrics;
 
+import org.apache.fluss.client.table.scanner.ScanRecord;
+import org.apache.fluss.flink.source.reader.FlinkRecordsWithSplitIds;
+import org.apache.fluss.flink.source.reader.RecordAndPos;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.record.ChangeType;
+import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.utils.CloseableIterator;
 
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.testutils.MetricListener;
 import org.apache.flink.runtime.metrics.groups.InternalSourceReaderMetricGroup;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.Optional;
 
 import static org.apache.fluss.flink.source.metrics.FlinkSourceReaderMetrics.BUCKET_GROUP;
@@ -62,6 +70,62 @@ class FlinkSourceReaderMetricsTest {
         assertCurrentOffset(t1, 18213L, metricListener);
         assertCurrentOffset(t2, 18613L, metricListener);
         assertCurrentOffset(t3, 15513L, metricListener);
+    }
+
+    @Test
+    void testNumBytesInCounter() {
+        MetricListener metricListener = new MetricListener();
+        InternalSourceReaderMetricGroup sourceReaderMetricGroup =
+                InternalSourceReaderMetricGroup.mock(metricListener.getMetricGroup());
+
+        FlinkSourceReaderMetrics flinkSourceReaderMetrics =
+                new FlinkSourceReaderMetrics(sourceReaderMetricGroup);
+
+        Counter numBytesInCounter = flinkSourceReaderMetrics.getNumBytesInCounter();
+        assertThat(numBytesInCounter.getCount()).isEqualTo(0);
+
+        flinkSourceReaderMetrics.recordBytesIn(1024);
+        assertThat(numBytesInCounter.getCount()).isEqualTo(1024);
+
+        flinkSourceReaderMetrics.recordBytesIn(2048);
+        assertThat(numBytesInCounter.getCount()).isEqualTo(3072);
+    }
+
+    @Test
+    void testNumBytesInViaFlinkRecordsWithSplitIds() {
+        MetricListener metricListener = new MetricListener();
+        InternalSourceReaderMetricGroup sourceReaderMetricGroup =
+                InternalSourceReaderMetricGroup.mock(metricListener.getMetricGroup());
+
+        FlinkSourceReaderMetrics flinkSourceReaderMetrics =
+                new FlinkSourceReaderMetrics(sourceReaderMetricGroup);
+
+        TableBucket tb = new TableBucket(0, 0);
+        flinkSourceReaderMetrics.registerTableBucket(tb);
+
+        ScanRecord r1 = new ScanRecord(0L, 1000L, ChangeType.APPEND_ONLY, GenericRow.of(1), 100);
+        ScanRecord r2 = new ScanRecord(1L, 1001L, ChangeType.APPEND_ONLY, GenericRow.of(2), 200);
+        ScanRecord unknownSize =
+                new ScanRecord(2L, 1002L, ChangeType.APPEND_ONLY, GenericRow.of(3));
+
+        CloseableIterator<RecordAndPos> records =
+                CloseableIterator.wrap(
+                        Arrays.asList(
+                                        new RecordAndPos(r1),
+                                        new RecordAndPos(r2),
+                                        new RecordAndPos(unknownSize))
+                                .iterator());
+
+        FlinkRecordsWithSplitIds splitRecords =
+                new FlinkRecordsWithSplitIds("split-0", tb, records, flinkSourceReaderMetrics);
+
+        assertThat(splitRecords.nextSplit()).isEqualTo("split-0");
+        splitRecords.nextRecordFromSplit();
+        splitRecords.nextRecordFromSplit();
+        splitRecords.nextRecordFromSplit();
+
+        Counter numBytesInCounter = flinkSourceReaderMetrics.getNumBytesInCounter();
+        assertThat(numBytesInCounter.getCount()).isEqualTo(300);
     }
 
     // ----------- Assertions --------------

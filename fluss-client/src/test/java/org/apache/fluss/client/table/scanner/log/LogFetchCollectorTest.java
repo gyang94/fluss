@@ -25,6 +25,7 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.LogRecordBatch;
 import org.apache.fluss.record.LogRecordReadContext;
@@ -266,7 +267,14 @@ public class LogFetchCollectorTest {
     private DefaultCompletedFetch makeCompletedFetch(
             TableBucket tableBucket, FetchLogResultForBucket resultForBucket, long offset) {
         return new DefaultCompletedFetch(
-                tableBucket, resultForBucket, readContext, logScannerStatus, true, offset, null);
+                tableBucket,
+                resultForBucket,
+                readContext,
+                logScannerStatus,
+                true,
+                offset,
+                null,
+                new ThreadSafeSimpleCounter());
     }
 
     @Test

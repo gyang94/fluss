@@ -375,6 +375,7 @@ public class LogFetcher implements Closeable {
 
             // update fetch metrics only when request success
             scannerMetricGroup.updateFetchLatency(System.currentTimeMillis() - requestStartTime);
+            scannerMetricGroup.fetchBytesTotal().inc(fetchLogResponse.totalSize());
             scannerMetricGroup.bytesPerRequest().update(fetchLogResponse.totalSize());
 
             for (PbFetchLogRespForTable respForTable : fetchLogResponse.getTablesRespsList()) {
@@ -432,7 +433,8 @@ public class LogFetcher implements Closeable {
                                                 // the data is pruned
                                                 isCheckCrcs,
                                                 fetchOffset,
-                                                hasRecords ? parsedByteBuf : null));
+                                                hasRecords ? parsedByteBuf : null,
+                                                scannerMetricGroup.recordsBytesTotal()));
                             }
                         }
                     }
@@ -497,7 +499,8 @@ public class LogFetcher implements Closeable {
                             highWatermark,
                             remoteReadContext,
                             logScannerStatus,
-                            isCheckCrcs);
+                            isCheckCrcs,
+                            scannerMetricGroup.recordsBytesTotal());
             logFetchBuffer.pend(pendingFetch);
             downloadFuture.onComplete(() -> logFetchBuffer.tryComplete(segment.tableBucket()));
         }

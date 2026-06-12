@@ -17,9 +17,11 @@
 
 package org.apache.fluss.flink.source.metrics;
 
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.flink.source.reader.FlinkSourceReader;
 import org.apache.fluss.metadata.TableBucket;
 
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.SourceReaderMetricGroup;
 import org.apache.flink.runtime.metrics.MetricNames;
@@ -59,6 +61,9 @@ public class FlinkSourceReaderMetrics {
     // Source reader metric group
     private final SourceReaderMetricGroup sourceReaderMetricGroup;
 
+    // Flink standard IO counter for bytes received
+    private final Counter numBytesInCounter;
+
     // Metric group for registering Fluss specific reader metrics
     private final MetricGroup flussSourceReaderMetricGroup;
 
@@ -70,8 +75,13 @@ public class FlinkSourceReaderMetrics {
 
     public FlinkSourceReaderMetrics(SourceReaderMetricGroup sourceReaderMetricGroup) {
         this.sourceReaderMetricGroup = sourceReaderMetricGroup;
+        this.numBytesInCounter = sourceReaderMetricGroup.getIOMetricGroup().getNumBytesInCounter();
         this.flussSourceReaderMetricGroup =
                 sourceReaderMetricGroup.addGroup(FLUSS_METRIC_GROUP).addGroup(READER_METRIC_GROUP);
+    }
+
+    public void recordBytesIn(long bytes) {
+        numBytesInCounter.inc(bytes);
     }
 
     public void reportRecordEventTime(long lag) {
@@ -125,5 +135,10 @@ public class FlinkSourceReaderMetrics {
 
     public SourceReaderMetricGroup getSourceReaderMetricGroup() {
         return sourceReaderMetricGroup;
+    }
+
+    @VisibleForTesting
+    Counter getNumBytesInCounter() {
+        return numBytesInCounter;
     }
 }

@@ -283,6 +283,8 @@ public class MetricNames {
     public static final String SCANNER_REMOTE_FETCH_BYTES_RATE = "remoteFetchBytesPerSecond";
     public static final String SCANNER_REMOTE_FETCH_RATE = "remoteFetchRequestsPerSecond";
     public static final String SCANNER_REMOTE_FETCH_ERROR_RATE = "remoteFetchErrorPerSecond";
+    public static final String SCANNER_FETCH_BYTES_RATE = "fetchBytesPerSecond";
+    public static final String SCANNER_RECORDS_BYTES_RATE = "recordsBytesPerSecond";
 
     // for netty
     public static final String NETTY_USED_DIRECT_MEMORY = "usedDirectMemory";

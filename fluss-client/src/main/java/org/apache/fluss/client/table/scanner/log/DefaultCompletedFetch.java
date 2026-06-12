@@ -19,6 +19,7 @@ package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.record.LogRecordReadContext;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
@@ -47,7 +48,8 @@ class DefaultCompletedFetch extends CompletedFetch {
             LogScannerStatus logScannerStatus,
             boolean isCheckCrc,
             Long fetchOffset,
-            @Nullable ByteBuf parsedByteBuf) {
+            @Nullable ByteBuf parsedByteBuf,
+            Counter recordsBytesTotal) {
         super(
                 tableBucket,
                 fetchLogResultForBucket.getError(),
@@ -58,7 +60,8 @@ class DefaultCompletedFetch extends CompletedFetch {
                 logScannerStatus,
                 isCheckCrc,
                 fetchOffset,
-                fetchLogResultForBucket.getFilteredEndOffset());
+                fetchLogResultForBucket.getFilteredEndOffset(),
+                recordsBytesTotal);
         this.parsedByteBuf = parsedByteBuf;
     }
 

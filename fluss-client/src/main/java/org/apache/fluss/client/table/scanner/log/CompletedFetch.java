@@ -22,6 +22,7 @@ import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.exception.CorruptRecordException;
 import org.apache.fluss.exception.FetchException;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.record.ArrowBatchData;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.CompactedLogRecord;
@@ -65,6 +66,7 @@ public abstract class CompletedFetch {
     private final boolean isCheckCrcs;
     private final Iterator<LogRecordBatch> batches;
     private final LogScannerStatus logScannerStatus;
+    private final Counter recordsBytesTotal;
     protected final LogRecordReadContext readContext;
     protected final InternalRow.FieldGetter[] selectedFieldGetters;
 
@@ -88,7 +90,8 @@ public abstract class CompletedFetch {
             LogScannerStatus logScannerStatus,
             boolean isCheckCrcs,
             long fetchOffset,
-            long filteredEndOffset) {
+            long filteredEndOffset,
+            Counter recordsBytesTotal) {
         this.tableBucket = tableBucket;
         this.error = error;
         this.sizeInBytes = sizeInBytes;
@@ -97,6 +100,7 @@ public abstract class CompletedFetch {
         this.readContext = readContext;
         this.isCheckCrcs = isCheckCrcs;
         this.logScannerStatus = logScannerStatus;
+        this.recordsBytesTotal = recordsBytesTotal;
         this.selectedFieldGetters = readContext.getSelectedFieldGetters();
         this.fetchOffset = fetchOffset;
         checkArgument(
@@ -364,6 +368,7 @@ public abstract class CompletedFetch {
         }
 
         currentBatch = batches.next();
+        recordsBytesTotal.inc(currentBatch.sizeInBytes());
         // TODO get last epoch.
         maybeEnsureValid(currentBatch);
         return currentBatch;

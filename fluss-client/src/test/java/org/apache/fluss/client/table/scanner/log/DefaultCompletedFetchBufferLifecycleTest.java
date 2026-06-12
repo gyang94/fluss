@@ -18,6 +18,7 @@
 package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.LogRecordReadContext;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
@@ -160,6 +161,7 @@ class DefaultCompletedFetchBufferLifecycleTest {
                 logScannerStatus,
                 true,
                 0L,
-                parsedByteBuf);
+                parsedByteBuf,
+                new ThreadSafeSimpleCounter());
     }
 }

@@ -17,6 +17,7 @@
 
 package org.apache.fluss.flink.source.reader;
 
+import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.flink.source.metrics.FlinkSourceReaderMetrics;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.utils.CloseableIterator;
@@ -136,6 +137,14 @@ public class FlinkRecordsWithSplitIds implements RecordsWithSplitIds<RecordAndPo
             // shouldn't emit it
             if (offset >= currentSplitStoppingOffset) {
                 return null;
+            }
+
+            // For Arrow-format records, getSizeInBytes() returns a batch-level average
+            // (batch.sizeInBytes / recordCount) rather than per-record size, so the
+            // UNKNOWN_SIZE_IN_BYTES guard below effectively never triggers for them.
+            int sizeInBytes = recordAndPos.record().getSizeInBytes();
+            if (sizeInBytes != ScanRecord.UNKNOWN_SIZE_IN_BYTES) {
+                flinkSourceReaderMetrics.recordBytesIn(sizeInBytes);
             }
 
             if (offset >= 0) {

@@ -26,6 +26,7 @@ import org.apache.fluss.metadata.SchemaGetter;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.FileLogRecords;
 import org.apache.fluss.record.LogRecordReadContext;
@@ -304,7 +305,8 @@ class RemoteCompletedFetchTest {
                 logScannerStatus,
                 true,
                 fetchOffset,
-                recycle);
+                recycle,
+                new ThreadSafeSimpleCounter());
     }
 
     private RemoteCompletedFetch makeCompletedFetch(

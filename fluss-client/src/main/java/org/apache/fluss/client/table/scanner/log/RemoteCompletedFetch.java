@@ -19,6 +19,7 @@ package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.record.FileLogRecords;
 import org.apache.fluss.record.LogRecordReadContext;
 import org.apache.fluss.rpc.protocol.ApiError;
@@ -45,7 +46,8 @@ class RemoteCompletedFetch extends CompletedFetch {
             LogScannerStatus logScannerStatus,
             boolean isCheckCrc,
             long fetchOffset,
-            Runnable recycleCallback) {
+            Runnable recycleCallback,
+            Counter recordsBytesTotal) {
         super(
                 tableBucket,
                 ApiError.NONE,
@@ -56,7 +58,8 @@ class RemoteCompletedFetch extends CompletedFetch {
                 logScannerStatus,
                 isCheckCrc,
                 fetchOffset,
-                CompletedFetch.NO_FILTERED_END_OFFSET);
+                CompletedFetch.NO_FILTERED_END_OFFSET,
+                recordsBytesTotal);
         this.fileLogRecords = fileLogRecords;
         this.recycleCallback = recycleCallback;
     }

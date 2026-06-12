@@ -24,6 +24,7 @@ import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.FileLogProjection;
 import org.apache.fluss.record.FileLogRecords;
@@ -346,7 +347,8 @@ public class DefaultCompletedFetchTest {
                         logScannerStatus,
                         true,
                         fetchOffset,
-                        null);
+                        null,
+                        new ThreadSafeSimpleCounter());
         List<ScanRecord> scanRecords = defaultCompletedFetch.fetchRecords(3);
         // close the read context to release arrow root resource,
         // this is important to test complex types
@@ -379,6 +381,36 @@ public class DefaultCompletedFetchTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(bytes = {LOG_MAGIC_VALUE_V0, LOG_MAGIC_VALUE_V1})
+    void testRecordsBytesTotalAccumulation(byte recordBatchMagic) throws Exception {
+        long fetchOffset = 0L;
+        TableBucket tb = new TableBucket(DATA2_TABLE_ID, 0);
+        FetchLogResultForBucket resultForBucket =
+                new FetchLogResultForBucket(
+                        tb, createMemoryLogRecords(DATA2, LogFormat.ARROW, recordBatchMagic), 10L);
+
+        ThreadSafeSimpleCounter counter = new ThreadSafeSimpleCounter();
+        DefaultCompletedFetch completedFetch =
+                new DefaultCompletedFetch(
+                        tb,
+                        resultForBucket,
+                        LogRecordReadContext.createReadContext(
+                                tableInfo, false, null, testingSchemaGetter),
+                        logScannerStatus,
+                        true,
+                        fetchOffset,
+                        null,
+                        counter);
+
+        assertThat(counter.getCount()).isEqualTo(0);
+
+        int totalSizeInBytes = resultForBucket.recordsOrEmpty().sizeInBytes();
+        completedFetch.fetchRecords(Integer.MAX_VALUE);
+
+        assertThat(counter.getCount()).isEqualTo(totalSizeInBytes);
+    }
+
     private DefaultCompletedFetch makeCompletedFetch(
             TableBucket tableBucket, FetchLogResultForBucket resultForBucket, long offset) {
         return makeCompletedFetch(tableBucket, resultForBucket, offset, null);
@@ -400,7 +432,8 @@ public class DefaultCompletedFetchTest {
                 logScannerStatus,
                 true,
                 offset,
-                null);
+                null,
+                new ThreadSafeSimpleCounter());
     }
 
     private static Collection<Arguments> typeAndMagic() {
