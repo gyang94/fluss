@@ -17,6 +17,7 @@
 
 package org.apache.fluss.client.table.scanner.log;
 
+import org.apache.fluss.client.metrics.TestingScannerMetricGroup;
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.metadata.LogFormat;
@@ -26,7 +27,6 @@ import org.apache.fluss.metadata.SchemaGetter;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
-import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.FileLogRecords;
 import org.apache.fluss.record.LogRecordReadContext;
@@ -306,7 +306,7 @@ class RemoteCompletedFetchTest {
                 true,
                 fetchOffset,
                 recycle,
-                new ThreadSafeSimpleCounter());
+                new FetchLogMetricsAggregator(TestingScannerMetricGroup.newInstance()));
     }
 
     private RemoteCompletedFetch makeCompletedFetch(

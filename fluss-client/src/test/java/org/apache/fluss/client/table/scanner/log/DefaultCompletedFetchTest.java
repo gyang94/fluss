@@ -17,6 +17,8 @@
 
 package org.apache.fluss.client.table.scanner.log;
 
+import org.apache.fluss.client.metrics.ScannerMetricGroup;
+import org.apache.fluss.client.metrics.TestingScannerMetricGroup;
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -24,7 +26,7 @@ import org.apache.fluss.metadata.SchemaInfo;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
-import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
+import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.FileLogProjection;
 import org.apache.fluss.record.FileLogRecords;
@@ -348,7 +350,7 @@ public class DefaultCompletedFetchTest {
                         true,
                         fetchOffset,
                         null,
-                        new ThreadSafeSimpleCounter());
+                        new FetchLogMetricsAggregator(TestingScannerMetricGroup.newInstance()));
         List<ScanRecord> scanRecords = defaultCompletedFetch.fetchRecords(3);
         // close the read context to release arrow root resource,
         // this is important to test complex types
@@ -390,7 +392,8 @@ public class DefaultCompletedFetchTest {
                 new FetchLogResultForBucket(
                         tb, createMemoryLogRecords(DATA2, LogFormat.ARROW, recordBatchMagic), 10L);
 
-        ThreadSafeSimpleCounter counter = new ThreadSafeSimpleCounter();
+        ScannerMetricGroup metricGroup = TestingScannerMetricGroup.newInstance();
+        Counter recordsBytesTotal = metricGroup.recordsBytesTotal();
         DefaultCompletedFetch completedFetch =
                 new DefaultCompletedFetch(
                         tb,
@@ -401,14 +404,16 @@ public class DefaultCompletedFetchTest {
                         true,
                         fetchOffset,
                         null,
-                        counter);
+                        new FetchLogMetricsAggregator(metricGroup));
 
-        assertThat(counter.getCount()).isEqualTo(0);
+        assertThat(recordsBytesTotal.getCount()).isEqualTo(0);
 
         int totalSizeInBytes = resultForBucket.recordsOrEmpty().sizeInBytes();
         completedFetch.fetchRecords(Integer.MAX_VALUE);
+        // metrics are reported once on drain(), which happens after all batches are consumed
+        completedFetch.drain();
 
-        assertThat(counter.getCount()).isEqualTo(totalSizeInBytes);
+        assertThat(recordsBytesTotal.getCount()).isEqualTo(totalSizeInBytes);
     }
 
     private DefaultCompletedFetch makeCompletedFetch(
@@ -433,7 +438,7 @@ public class DefaultCompletedFetchTest {
                 true,
                 offset,
                 null,
-                new ThreadSafeSimpleCounter());
+                new FetchLogMetricsAggregator(TestingScannerMetricGroup.newInstance()));
     }
 
     private static Collection<Arguments> typeAndMagic() {

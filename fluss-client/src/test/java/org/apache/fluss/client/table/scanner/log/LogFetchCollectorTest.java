@@ -19,13 +19,13 @@ package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.client.metadata.MetadataUpdater;
 import org.apache.fluss.client.metadata.TestingMetadataUpdater;
+import org.apache.fluss.client.metrics.TestingScannerMetricGroup;
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.compression.ArrowCompressionInfo;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.TableBucket;
-import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.LogRecordBatch;
 import org.apache.fluss.record.LogRecordReadContext;
@@ -274,7 +274,7 @@ public class LogFetchCollectorTest {
                 true,
                 offset,
                 null,
-                new ThreadSafeSimpleCounter());
+                new FetchLogMetricsAggregator(TestingScannerMetricGroup.newInstance()));
     }
 
     @Test

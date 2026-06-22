@@ -18,7 +18,6 @@
 package org.apache.fluss.client.table.scanner.log;
 
 import org.apache.fluss.metadata.TableBucket;
-import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.record.FileLogRecords;
 import org.apache.fluss.record.LogRecordReadContext;
 import org.apache.fluss.remote.RemoteLogSegment;
@@ -38,7 +37,7 @@ class RemotePendingFetch implements PendingFetch {
     private final LogRecordReadContext readContext;
     private final LogScannerStatus logScannerStatus;
     private final boolean isCheckCrc;
-    private final Counter recordsBytesTotal;
+    private final FetchLogMetricsAggregator metricsAggregator;
 
     RemotePendingFetch(
             RemoteLogSegment remoteLogSegment,
@@ -49,7 +48,7 @@ class RemotePendingFetch implements PendingFetch {
             LogRecordReadContext readContext,
             LogScannerStatus logScannerStatus,
             boolean isCheckCrc,
-            Counter recordsBytesTotal) {
+            FetchLogMetricsAggregator metricsAggregator) {
         this.remoteLogSegment = remoteLogSegment;
         this.downloadFuture = downloadFuture;
         this.posInLogSegment = posInLogSegment;
@@ -58,7 +57,7 @@ class RemotePendingFetch implements PendingFetch {
         this.readContext = readContext;
         this.logScannerStatus = logScannerStatus;
         this.isCheckCrc = isCheckCrc;
-        this.recordsBytesTotal = recordsBytesTotal;
+        this.metricsAggregator = metricsAggregator;
     }
 
     @Override
@@ -83,7 +82,7 @@ class RemotePendingFetch implements PendingFetch {
                 isCheckCrc,
                 fetchOffset,
                 downloadFuture.getRecycleCallback(),
-                recordsBytesTotal);
+                metricsAggregator);
     }
 
     @Override

@@ -22,7 +22,6 @@ import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.exception.CorruptRecordException;
 import org.apache.fluss.exception.FetchException;
 import org.apache.fluss.metadata.TableBucket;
-import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.record.ArrowBatchData;
 import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.record.CompactedLogRecord;
@@ -66,7 +65,7 @@ public abstract class CompletedFetch {
     private final boolean isCheckCrcs;
     private final Iterator<LogRecordBatch> batches;
     private final LogScannerStatus logScannerStatus;
-    private final Counter recordsBytesTotal;
+    private final FetchLogMetricsAggregator metricsAggregator;
     protected final LogRecordReadContext readContext;
     protected final InternalRow.FieldGetter[] selectedFieldGetters;
 
@@ -79,6 +78,7 @@ public abstract class CompletedFetch {
     private long nextFetchOffset;
     private boolean isConsumed = false;
     private boolean initialized = false;
+    private long consumedBytes = 0;
 
     public CompletedFetch(
             TableBucket tableBucket,
@@ -91,7 +91,7 @@ public abstract class CompletedFetch {
             boolean isCheckCrcs,
             long fetchOffset,
             long filteredEndOffset,
-            Counter recordsBytesTotal) {
+            FetchLogMetricsAggregator metricsAggregator) {
         this.tableBucket = tableBucket;
         this.error = error;
         this.sizeInBytes = sizeInBytes;
@@ -100,7 +100,7 @@ public abstract class CompletedFetch {
         this.readContext = readContext;
         this.isCheckCrcs = isCheckCrcs;
         this.logScannerStatus = logScannerStatus;
-        this.recordsBytesTotal = recordsBytesTotal;
+        this.metricsAggregator = metricsAggregator;
         this.selectedFieldGetters = readContext.getSelectedFieldGetters();
         this.fetchOffset = fetchOffset;
         checkArgument(
@@ -185,6 +185,7 @@ public abstract class CompletedFetch {
             maybeCloseRecordStream();
             cachedRecordException = null;
             isConsumed = true;
+            metricsAggregator.recordBytesConsumed(consumedBytes);
 
             // we move the bucket to the end if we received some bytes.
             if (recordsRead > 0) {
@@ -368,7 +369,7 @@ public abstract class CompletedFetch {
         }
 
         currentBatch = batches.next();
-        recordsBytesTotal.inc(currentBatch.sizeInBytes());
+        consumedBytes += currentBatch.sizeInBytes();
         // TODO get last epoch.
         maybeEnsureValid(currentBatch);
         return currentBatch;

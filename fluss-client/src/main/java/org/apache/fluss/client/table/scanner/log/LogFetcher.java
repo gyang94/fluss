@@ -118,6 +118,7 @@ public class LogFetcher implements Closeable {
 
     private final MetadataUpdater metadataUpdater;
     private final ScannerMetricGroup scannerMetricGroup;
+    private final FetchLogMetricsAggregator fetchLogMetricsAggregator;
 
     public LogFetcher(
             TableInfo tableInfo,
@@ -166,6 +167,7 @@ public class LogFetcher implements Closeable {
         this.arrowLogFetchCollector =
                 new ArrowLogFetchCollector(tablePath, logScannerStatus, conf, metadataUpdater);
         this.scannerMetricGroup = scannerMetricGroup;
+        this.fetchLogMetricsAggregator = new FetchLogMetricsAggregator(scannerMetricGroup);
         this.remoteLogDownloader =
                 new RemoteLogDownloader(tablePath, conf, remoteFileDownloader, scannerMetricGroup);
         remoteLogDownloader.start();
@@ -434,7 +436,7 @@ public class LogFetcher implements Closeable {
                                                 isCheckCrcs,
                                                 fetchOffset,
                                                 hasRecords ? parsedByteBuf : null,
-                                                scannerMetricGroup.recordsBytesTotal()));
+                                                fetchLogMetricsAggregator));
                             }
                         }
                     }
@@ -500,7 +502,7 @@ public class LogFetcher implements Closeable {
                             remoteReadContext,
                             logScannerStatus,
                             isCheckCrcs,
-                            scannerMetricGroup.recordsBytesTotal());
+                            fetchLogMetricsAggregator);
             logFetchBuffer.pend(pendingFetch);
             downloadFuture.onComplete(() -> logFetchBuffer.tryComplete(segment.tableBucket()));
         }

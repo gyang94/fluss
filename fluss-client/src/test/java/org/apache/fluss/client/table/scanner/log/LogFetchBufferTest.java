@@ -17,9 +17,9 @@
 
 package org.apache.fluss.client.table.scanner.log;
 
+import org.apache.fluss.client.metrics.TestingScannerMetricGroup;
 import org.apache.fluss.exception.WakeupException;
 import org.apache.fluss.metadata.TableBucket;
-import org.apache.fluss.metrics.ThreadSafeSimpleCounter;
 import org.apache.fluss.record.LogRecordReadContext;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 
@@ -267,7 +267,7 @@ public class LogFetchBufferTest {
                 true,
                 0L,
                 null,
-                new ThreadSafeSimpleCounter());
+                new FetchLogMetricsAggregator(TestingScannerMetricGroup.newInstance()));
     }
 
     private PendingFetch makePendingFetch(TableBucket tableBucket) throws Exception {
