@@ -26,8 +26,8 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.util.Map;
 
-/** Serializer for {@link HudiWriteResult}. */
-public class HudiWriteResultSerializer implements SimpleVersionedSerializer<HudiWriteResult> {
+/** Serializer for {@link HudiCommittable}. */
+public class HudiCommittableSerializer implements SimpleVersionedSerializer<HudiCommittable> {
 
     private static final int CURRENT_VERSION = 1;
 
@@ -37,20 +37,20 @@ public class HudiWriteResultSerializer implements SimpleVersionedSerializer<Hudi
     }
 
     @Override
-    public byte[] serialize(HudiWriteResult hudiWriteResult) throws IOException {
+    public byte[] serialize(HudiCommittable hudiCommittable) throws IOException {
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 DataOutputStream dos = new DataOutputStream(baos)) {
-            HudiWriteStatsSerde.writeStatsMap(dos, hudiWriteResult.getWriteStats());
-            HudiWriteStatsSerde.writeStatsMap(dos, hudiWriteResult.getCompactionWriteStats());
+            HudiWriteStatsSerde.writeStatsMap(dos, hudiCommittable.getWriteStats());
+            HudiWriteStatsSerde.writeStatsMap(dos, hudiCommittable.getCompactionWriteStats());
             return baos.toByteArray();
         }
     }
 
     @Override
-    public HudiWriteResult deserialize(int version, byte[] serialized) throws IOException {
+    public HudiCommittable deserialize(int version, byte[] serialized) throws IOException {
         if (version != CURRENT_VERSION) {
             throw new IOException(
-                    "Unsupported HudiWriteResult version "
+                    "Unsupported HudiCommittable version "
                             + version
                             + ", expected "
                             + CURRENT_VERSION);
@@ -65,6 +65,6 @@ public class HudiWriteResultSerializer implements SimpleVersionedSerializer<Hudi
                 throw new IOException("Corrupted serialization: trailing bytes " + dis.available());
             }
         }
-        return new HudiWriteResult(writeStats, compactionWriteStats);
+        return new HudiCommittable(writeStats, compactionWriteStats);
     }
 }
