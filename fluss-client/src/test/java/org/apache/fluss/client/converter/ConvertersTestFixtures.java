@@ -57,7 +57,11 @@ public final class ConvertersTestFixtures {
                 .field("offsetDateTimeField", DataTypes.TIMESTAMP_LTZ())
                 .field("arrayField", DataTypes.ARRAY(DataTypes.INT()))
                 .field("mapField", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))
+                .field("enumField", DataTypes.STRING())
                 .field("string_with_column_name", DataTypes.STRING())
+                .field("enumList", DataTypes.ARRAY(DataTypes.STRING()))
+                .field("enumValueMap", DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()))
+                .field("enumKeyMap", DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()))
                 .build();
     }
 
@@ -82,9 +86,14 @@ public final class ConvertersTestFixtures {
         public OffsetDateTime offsetDateTimeField;
         public Integer[] arrayField;
         public Map<String, Integer> mapField;
+        public StatusEnum enumField;
 
         @ColumnName("string_with_column_name")
         public String stringWithColumnName;
+
+        public List<StatusEnum> enumList;
+        public Map<String, StatusEnum> enumValueMap;
+        public Map<StatusEnum, String> enumKeyMap;
 
         public TestPojo() {}
 
@@ -106,7 +115,11 @@ public final class ConvertersTestFixtures {
                 OffsetDateTime offsetDateTimeField,
                 Integer[] arrayField,
                 Map<String, Integer> mapField,
-                String stringWithColumnName) {
+                StatusEnum enumField,
+                String stringWithColumnName,
+                List<StatusEnum> enumList,
+                Map<String, StatusEnum> enumValueMap,
+                Map<StatusEnum, String> enumKeyMap) {
             this.booleanField = booleanField;
             this.byteField = byteField;
             this.shortField = shortField;
@@ -124,7 +137,11 @@ public final class ConvertersTestFixtures {
             this.offsetDateTimeField = offsetDateTimeField;
             this.arrayField = arrayField;
             this.mapField = mapField;
+            this.enumField = enumField;
             this.stringWithColumnName = stringWithColumnName;
+            this.enumList = enumList;
+            this.enumValueMap = enumValueMap;
+            this.enumKeyMap = enumKeyMap;
         }
 
         public static TestPojo sample() {
@@ -151,7 +168,21 @@ public final class ConvertersTestFixtures {
                             put("test_2", 2);
                         }
                     },
-                    "string value");
+                    StatusEnum.OK,
+                    "string value",
+                    Arrays.asList(StatusEnum.error, StatusEnum.OK),
+                    new HashMap<String, StatusEnum>() {
+                        {
+                            put("key1", StatusEnum.OK);
+                            put("key2", StatusEnum.error);
+                        }
+                    },
+                    new HashMap<StatusEnum, String>() {
+                        {
+                            put(StatusEnum.OK, "value1");
+                            put(StatusEnum.error, "value2");
+                        }
+                    });
         }
 
         @Override
@@ -179,8 +210,12 @@ public final class ConvertersTestFixtures {
                     && Objects.equals(timestampLtzField, testPojo.timestampLtzField)
                     && Objects.equals(offsetDateTimeField, testPojo.offsetDateTimeField)
                     && Objects.equals(stringWithColumnName, testPojo.stringWithColumnName)
+                    && Objects.equals(enumField, testPojo.enumField)
                     && Arrays.equals(arrayField, testPojo.arrayField)
-                    && Objects.equals(mapField, testPojo.mapField);
+                    && Objects.equals(mapField, testPojo.mapField)
+                    && Objects.equals(enumList, testPojo.enumList)
+                    && Objects.equals(enumKeyMap, testPojo.enumKeyMap)
+                    && Objects.equals(enumValueMap, testPojo.enumValueMap);
         }
 
         @Override
@@ -201,7 +236,11 @@ public final class ConvertersTestFixtures {
                             timestampField,
                             timestampLtzField,
                             stringWithColumnName,
+                            enumField,
                             offsetDateTimeField,
+                            enumList,
+                            enumKeyMap,
+                            enumValueMap,
                             mapField);
             result = 31 * result + Arrays.hashCode(bytesField);
             result = 31 * result + Arrays.hashCode(arrayField);
@@ -484,5 +523,16 @@ public final class ConvertersTestFixtures {
         public List<AddressPojo> addresses;
 
         public ListOfRowPojo() {}
+    }
+
+    /** Enum to test enum conversion. */
+    public enum StatusEnum {
+        OK,
+        error;
+
+        @Override
+        public String toString() {
+            return "StatusEnum{}";
+        }
     }
 }
