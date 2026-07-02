@@ -33,7 +33,6 @@ import org.apache.fluss.types.DataTypeRoot;
 import org.apache.fluss.types.RowType;
 
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
@@ -146,22 +145,6 @@ public class PartitionUtils {
         }
         ZonedDateTime currentZonedDateTime =
                 ZonedDateTime.ofInstant(Instant.now(), autoPartitionStrategy.timeZone().toZoneId());
-        if (timeUnit == AutoPartitionTimeUnit.DAY) {
-            LocalDate earliestRetainedDate =
-                    currentZonedDateTime
-                            .plusDays(-autoPartitionStrategy.numToRetain())
-                            .toLocalDate();
-            LocalDate partitionDate = parseDayPartitionTime(partitionTime, autoPartitionStrategy);
-            if (partitionDate.isBefore(earliestRetainedDate)) {
-                throw new InvalidPartitionException(
-                        String.format(
-                                "Partition value '%s' is out-of-date. The earliest retained "
-                                        + "partition is '%s'.",
-                                partitionTime,
-                                earliestRetainedDate.format(dayFormatter(autoPartitionStrategy))));
-            }
-            return;
-        }
         // Get the earliest partition time that needs to be retained.
         String lastRetainPartitionTime =
                 generateAutoPartitionTime(
@@ -286,15 +269,6 @@ public class PartitionUtils {
         } catch (DateTimeParseException e) {
             return false;
         }
-    }
-
-    private static DateTimeFormatter dayFormatter(AutoPartitionStrategy autoPartitionStrategy) {
-        return DateTimeFormatter.ofPattern(autoPartitionStrategy.dayFormat().pattern());
-    }
-
-    private static LocalDate parseDayPartitionTime(
-            String partitionTime, AutoPartitionStrategy autoPartitionStrategy) {
-        return LocalDate.parse(partitionTime, dayFormatter(autoPartitionStrategy));
     }
 
     private static String getFormattedTime(ZonedDateTime zonedDateTime, String format) {

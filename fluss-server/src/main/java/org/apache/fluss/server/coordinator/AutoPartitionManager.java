@@ -47,9 +47,7 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
 import java.time.ZonedDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -500,23 +498,6 @@ public class AutoPartitionManager implements AutoCloseable {
                 ZonedDateTime.ofInstant(
                         currentInstant, autoPartitionStrategy.timeZone().toZoneId());
 
-        Iterator<Map.Entry<String, Set<String>>> iterator = currentPartitions.entrySet().iterator();
-        if (autoPartitionStrategy.timeUnit() == AutoPartitionTimeUnit.DAY) {
-            LocalDate earliestRetainedDate =
-                    currentZonedDateTime.plusDays(-numToRetain).toLocalDate();
-            DateTimeFormatter dayFormatter =
-                    DateTimeFormatter.ofPattern(autoPartitionStrategy.dayFormat().pattern());
-            while (iterator.hasNext()) {
-                Map.Entry<String, Set<String>> entry = iterator.next();
-                LocalDate partitionDate = LocalDate.parse(entry.getKey(), dayFormatter);
-                if (!partitionDate.isBefore(earliestRetainedDate)) {
-                    continue;
-                }
-                dropPartitions(tablePath, partitionKeys, iterator, entry);
-            }
-            return;
-        }
-
         // Get the earliest one partition time that need to retain.
         String lastRetainPartitionTime =
                 generateAutoPartitionTime(
@@ -537,7 +518,8 @@ public class AutoPartitionManager implements AutoCloseable {
         // (a=2,dt=20250505,b=1) (a=2,dt=20250506,b=1) (a=2,dt=20250507,b=1)
         // then partition of pattern:
         // (a=?,dt=20250506,b=?) (a=?,dt=20250507,b=?) will be retained.
-        iterator = currentPartitions.headMap(lastRetainPartitionTime).entrySet().iterator();
+        Iterator<Map.Entry<String, Set<String>>> iterator =
+                currentPartitions.headMap(lastRetainPartitionTime).entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, Set<String>> entry = iterator.next();
             dropPartitions(tablePath, partitionKeys, iterator, entry);
