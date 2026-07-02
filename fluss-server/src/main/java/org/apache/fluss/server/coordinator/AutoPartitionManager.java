@@ -47,7 +47,9 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -469,7 +471,11 @@ public class AutoPartitionManager implements AutoCloseable {
         for (int idx = 0; idx < partitionToPreCreate; idx++) {
             ResolvedPartitionSpec partition =
                     generateAutoPartition(
-                            partitionKeys, currentZonedDateTime, idx, autoPartitionTimeUnit);
+                            partitionKeys,
+                            currentZonedDateTime,
+                            idx,
+                            autoPartitionTimeUnit,
+                            autoPartitionStrategy);
             // if the partition already exists, we don't need to create it, otherwise, create it
             if (!currentPartitions.containsKey(partition.getPartitionName())) {
                 partitionsToCreate.add(partition);
@@ -494,10 +500,30 @@ public class AutoPartitionManager implements AutoCloseable {
                 ZonedDateTime.ofInstant(
                         currentInstant, autoPartitionStrategy.timeZone().toZoneId());
 
+        Iterator<Map.Entry<String, Set<String>>> iterator = currentPartitions.entrySet().iterator();
+        if (autoPartitionStrategy.timeUnit() == AutoPartitionTimeUnit.DAY) {
+            LocalDate earliestRetainedDate =
+                    currentZonedDateTime.plusDays(-numToRetain).toLocalDate();
+            DateTimeFormatter dayFormatter =
+                    DateTimeFormatter.ofPattern(autoPartitionStrategy.dayFormat().pattern());
+            while (iterator.hasNext()) {
+                Map.Entry<String, Set<String>> entry = iterator.next();
+                LocalDate partitionDate = LocalDate.parse(entry.getKey(), dayFormatter);
+                if (!partitionDate.isBefore(earliestRetainedDate)) {
+                    continue;
+                }
+                dropPartitions(tablePath, partitionKeys, iterator, entry);
+            }
+            return;
+        }
+
         // Get the earliest one partition time that need to retain.
         String lastRetainPartitionTime =
                 generateAutoPartitionTime(
-                        currentZonedDateTime, -numToRetain, autoPartitionStrategy.timeUnit());
+                        currentZonedDateTime,
+                        -numToRetain,
+                        autoPartitionStrategy.timeUnit(),
+                        autoPartitionStrategy);
 
         // For partition table with a single partition key, for example dt(yyyyMMdd)
         // assuming now is 20250508, and table.auto-partition.num-retention=2 then partition
@@ -511,42 +537,46 @@ public class AutoPartitionManager implements AutoCloseable {
         // (a=2,dt=20250505,b=1) (a=2,dt=20250506,b=1) (a=2,dt=20250507,b=1)
         // then partition of pattern:
         // (a=?,dt=20250506,b=?) (a=?,dt=20250507,b=?) will be retained.
-        Iterator<Map.Entry<String, Set<String>>> iterator =
-                currentPartitions.headMap(lastRetainPartitionTime).entrySet().iterator();
+        iterator = currentPartitions.headMap(lastRetainPartitionTime).entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, Set<String>> entry = iterator.next();
+            dropPartitions(tablePath, partitionKeys, iterator, entry);
+        }
+    }
 
-            Iterator<String> dropIterator;
-            if (entry.getValue() == null) {
-                dropIterator = new HashSet<>(Collections.singleton(entry.getKey())).iterator();
-            } else {
-                dropIterator = entry.getValue().iterator();
-            }
+    private void dropPartitions(
+            TablePath tablePath,
+            List<String> partitionKeys,
+            Iterator<Map.Entry<String, Set<String>>> iterator,
+            Map.Entry<String, Set<String>> entry) {
+        Iterator<String> dropIterator;
+        if (entry.getValue() == null) {
+            dropIterator = new HashSet<>(Collections.singleton(entry.getKey())).iterator();
+        } else {
+            dropIterator = entry.getValue().iterator();
+        }
 
-            while (dropIterator.hasNext()) {
-                String partitionName = dropIterator.next();
-                // drop the partition
-                try {
-                    metadataManager.dropPartition(
-                            tablePath,
-                            ResolvedPartitionSpec.fromPartitionName(partitionKeys, partitionName),
-                            false);
-                } catch (PartitionNotExistException e) {
-                    LOG.info(
-                            "Auto partitioning skip to delete partition {} for table [{}] as the partition is not exist.",
-                            partitionName,
-                            tablePath);
-                }
-
-                // only remove when zk success, this reflects to the partitionsByTable
-                dropIterator.remove();
+        while (dropIterator.hasNext()) {
+            String partitionName = dropIterator.next();
+            try {
+                metadataManager.dropPartition(
+                        tablePath,
+                        ResolvedPartitionSpec.fromPartitionName(partitionKeys, partitionName),
+                        false);
+            } catch (PartitionNotExistException e) {
                 LOG.info(
-                        "Auto partitioning deleted partition {} for table [{}].",
+                        "Auto partitioning skip to delete partition {} for table [{}] as the partition is not exist.",
                         partitionName,
                         tablePath);
             }
-            iterator.remove();
+
+            dropIterator.remove();
+            LOG.info(
+                    "Auto partitioning deleted partition {} for table [{}].",
+                    partitionName,
+                    tablePath);
         }
+        iterator.remove();
     }
 
     @VisibleForTesting
