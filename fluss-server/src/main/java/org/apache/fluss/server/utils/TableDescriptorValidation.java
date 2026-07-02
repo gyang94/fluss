@@ -18,6 +18,8 @@
 package org.apache.fluss.server.utils;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.config.AutoPartitionDayFormat;
+import org.apache.fluss.config.AutoPartitionTimeUnit;
 import org.apache.fluss.config.ConfigOption;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
@@ -88,6 +90,14 @@ public class TableDescriptorValidation {
             TableDescriptor tableDescriptor,
             int maxBucketNum,
             @Nullable DataLakeFormat clusterDataLakeFormat) {
+        validateTableDescriptor(tableDescriptor, maxBucketNum, clusterDataLakeFormat, true);
+    }
+
+    public static void validateTableDescriptor(
+            TableDescriptor tableDescriptor,
+            int maxBucketNum,
+            @Nullable DataLakeFormat clusterDataLakeFormat,
+            boolean enforceDateDayFormatCompatibility) {
         Schema schema = tableDescriptor.getSchema();
         boolean hasPrimaryKey = schema.getPrimaryKey().isPresent();
         Configuration tableConf = Configuration.fromMap(tableDescriptor.getProperties());
@@ -124,7 +134,11 @@ public class TableDescriptorValidation {
         checkMergeEngine(tableConf, hasPrimaryKey, schema);
         checkDeleteBehavior(tableConf, hasPrimaryKey);
         checkTieredLog(tableConf);
-        checkPartition(tableConf, tableDescriptor.getPartitionKeys(), schema.getRowType());
+        checkPartition(
+                tableConf,
+                tableDescriptor.getPartitionKeys(),
+                schema.getRowType(),
+                enforceDateDayFormatCompatibility);
         checkSystemColumns(schema.getRowType());
         validateStatisticsConfig(tableDescriptor);
         checkTableLakeFormatMatchesCluster(tableConf, clusterDataLakeFormat);
@@ -458,9 +472,31 @@ public class TableDescriptorValidation {
     }
 
     private static void checkPartition(
-            Configuration tableConf, List<String> partitionKeys, RowType rowType) {
+            Configuration tableConf,
+            List<String> partitionKeys,
+            RowType rowType,
+            boolean enforceDateDayFormatCompatibility) {
         boolean isPartitioned = !partitionKeys.isEmpty();
         AutoPartitionStrategy autoPartition = AutoPartitionStrategy.from(tableConf);
+        boolean hasExplicitDayFormat =
+                tableConf.contains(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT);
+
+        if (hasExplicitDayFormat && !autoPartition.isAutoPartitionEnabled()) {
+            throw new InvalidTableException(
+                    String.format(
+                            "Table property '%s' can only be set when '%s' is enabled.",
+                            ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
+                            ConfigOptions.TABLE_AUTO_PARTITION_ENABLED.key()));
+        }
+
+        if (hasExplicitDayFormat && autoPartition.timeUnit() != AutoPartitionTimeUnit.DAY) {
+            throw new InvalidTableException(
+                    String.format(
+                            "Table property '%s' can only be set when '%s' is '%s'.",
+                            ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
+                            ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key(),
+                            AutoPartitionTimeUnit.DAY));
+        }
 
         if (!isPartitioned && autoPartition.isAutoPartitionEnabled()) {
             throw new InvalidConfigException(
@@ -517,6 +553,25 @@ public class TableDescriptorValidation {
                                     "Currently, auto partitioned table must set auto partition time unit when auto "
                                             + "partition is enabled, please set table property '%s'.",
                                     ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key()));
+                }
+
+                if (enforceDateDayFormatCompatibility
+                        && autoPartition.timeUnit() == AutoPartitionTimeUnit.DAY) {
+                    String autoPartitionKey =
+                            StringUtils.isNullOrWhitespaceOnly(autoPartition.key())
+                                    ? partitionKeys.get(0)
+                                    : autoPartition.key();
+                    DataType autoPartitionDataType =
+                            rowType.getTypeAt(rowType.getFieldIndex(autoPartitionKey));
+                    if (autoPartitionDataType.getTypeRoot() == DataTypeRoot.DATE
+                            && autoPartition.dayFormat() != AutoPartitionDayFormat.YYYY_MM_DD) {
+                        throw new InvalidTableException(
+                                String.format(
+                                        "Table property '%s' must be '%s' when auto partition key '%s' has DATE type.",
+                                        ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
+                                        AutoPartitionDayFormat.YYYY_MM_DD.pattern(),
+                                        autoPartitionKey));
+                    }
                 }
             }
         }

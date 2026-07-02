@@ -17,6 +17,7 @@
 
 package org.apache.fluss.server.coordinator;
 
+import org.apache.fluss.config.AutoPartitionTimeUnit;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.DatabaseAlreadyExistException;
@@ -57,6 +58,9 @@ import org.apache.fluss.server.zk.data.PartitionRegistration;
 import org.apache.fluss.server.zk.data.TableAssignment;
 import org.apache.fluss.server.zk.data.TableRegistration;
 import org.apache.fluss.shaded.zookeeper3.org.apache.zookeeper.KeeperException;
+import org.apache.fluss.types.DataType;
+import org.apache.fluss.types.DataTypeRoot;
+import org.apache.fluss.utils.StringUtils;
 import org.apache.fluss.utils.function.RunnableWithException;
 import org.apache.fluss.utils.function.ThrowingRunnable;
 
@@ -65,6 +69,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -546,8 +551,27 @@ public class MetadataManager {
                     }
                 }
 
-                // reuse the same validate logic with the createTable() method
-                validateTableDescriptor(newDescriptor);
+                if (isLegacyDateDayAutoPartitionTable(tableDescriptor)
+                        && !newDescriptor
+                                .getProperties()
+                                .containsKey(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key())) {
+                    Map<String, String> updatedProperties =
+                            new HashMap<>(newDescriptor.getProperties());
+                    updatedProperties.put(
+                            ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(), "yyyy-MM-dd");
+                    newDescriptor = newDescriptor.withProperties(updatedProperties);
+                }
+
+                // reuse the same validate logic with the createTable() method, but avoid
+                // retroactively enforcing DATE+DAY day-format compatibility on legacy tables
+                TableDescriptorValidation.validateTableDescriptor(
+                        newDescriptor,
+                        maxBucketNum,
+                        lakeCatalogDynamicLoader.getLakeCatalogContainer().getDataLakeFormat(),
+                        shouldEnforceDateDayFormatCompatibility(
+                                tableInfo,
+                                newDescriptor,
+                                tablePropertyChanges.tableKeysToChange()));
                 // pre alter table properties, e.g. create lake table in lake storage if it's to
                 // enable datalake for the table
                 preAlterTableProperties(
@@ -574,6 +598,50 @@ public class MetadataManager {
                         "Failed to alter table properties: " + tablePath, e);
             }
         }
+    }
+
+    private boolean shouldEnforceDateDayFormatCompatibility(
+            TableInfo currentTable, TableDescriptor newDescriptor, Set<String> changedKeys) {
+        Set<String> compatibilityKeys =
+                new HashSet<>(
+                        Arrays.asList(
+                                ConfigOptions.TABLE_AUTO_PARTITION_ENABLED.key(),
+                                ConfigOptions.TABLE_AUTO_PARTITION_KEY.key(),
+                                ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key(),
+                                ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key()));
+        boolean touchesCompatibilityKeys =
+                changedKeys.stream().anyMatch(compatibilityKeys::contains);
+        boolean currentIsLegacyDateDayAutoPartition =
+                isLegacyDateDayAutoPartitionTable(currentTable.toTableDescriptor());
+        boolean newIsLegacyDateDayAutoPartition = isLegacyDateDayAutoPartitionTable(newDescriptor);
+        return touchesCompatibilityKeys
+                || (!currentIsLegacyDateDayAutoPartition && !newIsLegacyDateDayAutoPartition);
+    }
+
+    private boolean isLegacyDateDayAutoPartitionTable(TableDescriptor tableDescriptor) {
+        Configuration tableConf = Configuration.fromMap(tableDescriptor.getProperties());
+        if (!tableConf.get(ConfigOptions.TABLE_AUTO_PARTITION_ENABLED)
+                || tableConf.get(ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT)
+                        != AutoPartitionTimeUnit.DAY
+                || tableConf.contains(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT)) {
+            return false;
+        }
+        List<String> partitionKeys = tableDescriptor.getPartitionKeys();
+        String autoPartitionKey = tableConf.getString(ConfigOptions.TABLE_AUTO_PARTITION_KEY);
+        String timePartitionKey =
+                StringUtils.isNullOrWhitespaceOnly(autoPartitionKey)
+                        ? partitionKeys.get(0)
+                        : autoPartitionKey;
+        DataType partitionType =
+                tableDescriptor
+                        .getSchema()
+                        .getRowType()
+                        .getTypeAt(
+                                tableDescriptor
+                                        .getSchema()
+                                        .getRowType()
+                                        .getFieldIndex(timePartitionKey));
+        return partitionType.getTypeRoot() == DataTypeRoot.DATE;
     }
 
     private void preAlterTableProperties(
