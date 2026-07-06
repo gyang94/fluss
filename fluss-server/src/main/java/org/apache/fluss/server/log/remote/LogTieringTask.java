@@ -128,6 +128,8 @@ public class LogTieringTask implements Runnable {
             TableMetricGroup metricGroup = replica.tableMetrics();
             maybeUpdateCopiedOffset(logTablet);
 
+            long currentTimeMs = clock.milliseconds();
+
             // Get these candidate log segments to copy and these expired remote log segments to
             // clean up.
             List<EnrichedLogSegment> candidateToCopySegments =
@@ -135,7 +137,7 @@ public class LogTieringTask implements Runnable {
             // Only delete segments that have been tiered to lake to ensure data safety
             List<RemoteLogSegment> expiredRemoteLogSegments =
                     remoteLog.expiredRemoteLogSegments(
-                            clock.milliseconds(),
+                            currentTimeMs,
                             logTablet.isDataLakeEnabled() ? logTablet.getLakeLogEndOffset() : null);
 
             // 1. For these candidateToCopySegments, we will first copy segment files to
@@ -150,7 +152,7 @@ public class LogTieringTask implements Runnable {
             if (!copiedSegments.isEmpty() || !expiredRemoteLogSegments.isEmpty()) {
                 boolean success =
                         tryToCommitRemoteLogManifest(
-                                remoteLog, expiredRemoteLogSegments, copiedSegments);
+                                remoteLog, expiredRemoteLogSegments, copiedSegments, currentTimeMs);
 
                 if (success) {
                     if (!expiredRemoteLogSegments.isEmpty()) {
@@ -326,7 +328,8 @@ public class LogTieringTask implements Runnable {
     public boolean tryToCommitRemoteLogManifest(
             RemoteLogTablet remoteLogTablet,
             List<RemoteLogSegment> expiredSegments,
-            List<RemoteLogSegment> newAddedSegments) {
+            List<RemoteLogSegment> newAddedSegments,
+            long currentTimeMs) {
 
         // 1. apply the build snapshot method.
         RemoteLogManifest newRemoteLogManifest =
@@ -383,7 +386,7 @@ public class LogTieringTask implements Runnable {
                     LogTablet logTablet = replica.getLogTablet();
                     logTablet.updateRemoteLogStartOffset(newRemoteLogStartOffset);
                     // make the local log cleaner clean log segments that are committed to remote.
-                    logTablet.updateRemoteLogEndOffset(newRemoteLogEndOffset);
+                    logTablet.updateRemoteLogEndOffset(newRemoteLogEndOffset, currentTimeMs);
                     logTablet.updateRemoteLogSize(newRemoteLogSize);
                     return true;
                 }

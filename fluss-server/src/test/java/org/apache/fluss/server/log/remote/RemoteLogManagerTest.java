@@ -30,6 +30,7 @@ import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.entity.StopReplicaData;
 import org.apache.fluss.server.entity.StopReplicaResultForBucket;
 import org.apache.fluss.server.log.FetchParams;
+import org.apache.fluss.server.log.LogSegment;
 import org.apache.fluss.server.log.LogTablet;
 import org.apache.fluss.server.replica.Replica;
 import org.apache.fluss.server.replica.ReplicaManager;
@@ -429,6 +430,33 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         // since 2(by default) segments is configured to retain in local
         logTablet.updateMinRetainOffset(40L);
         assertThat(logTablet.getSegments()).hasSize(2);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testCleanupExpiredLocalSegmentsInsideRetainedN(boolean partitionedTable) throws Exception {
+        long tableId =
+                registerTableInZkClient(
+                        DATA1_TABLE_PATH,
+                        DATA1_SCHEMA,
+                        200L,
+                        Collections.emptyList(),
+                        Collections.singletonMap(
+                                ConfigOptions.TABLE_TIERED_LOG_LOCAL_SEGMENTS.key(), "3"));
+        TableBucket tb = makeTableBucket(tableId, partitionedTable);
+        makeLogTableAsLeader(tb, partitionedTable);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 3, false);
+        manualClock.advanceTime(Duration.ofDays(8));
+        addMultiSegmentsToLogTablet(logTablet, 2, false);
+
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        assertThat(remoteLogManager.relevantRemoteLogSegments(tb, 0L)).hasSize(4);
+        assertThat(logTablet.getSegments())
+                .extracting(LogSegment::getBaseOffset)
+                .containsExactly(30L, 40L);
     }
 
     @ParameterizedTest

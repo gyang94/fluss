@@ -79,7 +79,7 @@ public class RemoteLogTablet {
     /** The lock to protect the remote log segment list. */
     private final ReadWriteLock lock = new ReentrantReadWriteLock();
 
-    private final long ttlMs;
+    private volatile long ttlMs;
 
     /** The registered metrics for remote log. */
     private volatile MetricGroup remoteLogMetrics;
@@ -138,6 +138,10 @@ public class RemoteLogTablet {
 
     public long getRemoteSizeInBytes() {
         return remoteSizeInBytes;
+    }
+
+    public void updateLogTTLMs(long ttlMs) {
+        this.ttlMs = ttlMs;
     }
 
     public void unregisterMetrics() {

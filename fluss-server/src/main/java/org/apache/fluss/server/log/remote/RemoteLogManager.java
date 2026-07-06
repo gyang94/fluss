@@ -188,6 +188,13 @@ public class RemoteLogManager implements Closeable {
         return remoteLogs.values().stream().mapToLong(RemoteLogTablet::getRemoteSizeInBytes).sum();
     }
 
+    public void updateLogTTLMs(TableBucket tableBucket, long ttlMs) {
+        RemoteLogTablet remoteLogTablet = remoteLogs.get(tableBucket);
+        if (remoteLogTablet != null) {
+            remoteLogTablet.updateLogTTLMs(ttlMs);
+        }
+    }
+
     /** Stop the log tiering task for the given replica. */
     public void stopLogTiering(Replica replica) {
         if (remoteDisabled()) {

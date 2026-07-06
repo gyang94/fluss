@@ -23,6 +23,7 @@ import org.apache.fluss.rpc.protocol.Errors;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.log.FetchParams;
 import org.apache.fluss.server.log.LogTablet;
+import org.apache.fluss.server.replica.Replica;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -32,6 +33,8 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.fluss.record.TestData.DATA1_TABLE_ID;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,6 +45,108 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
     @BeforeEach
     public void setup() throws Exception {
         super.setup();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testTieringRoundSharesTTLTimeBetweenRemoteAndLocal(boolean partitionTable)
+            throws Exception {
+        TableBucket tb;
+        if (partitionTable) {
+            tb = new TableBucket(DATA1_TABLE_ID, 0L, 0);
+        } else {
+            tb = new TableBucket(DATA1_TABLE_ID, 0);
+        }
+        makeLogTableAsLeader(tb, partitionTable);
+        Replica replica = replicaManager.getReplicaOrException(tb);
+        replica.updateLogTTLMs(Duration.ofDays(1).toMillis());
+        replica.updateTieredLogLocalSegments(3);
+        LogTablet logTablet = replica.getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 5, false);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
+        assertThat(remoteLog.allRemoteLogSegments()).hasSize(4);
+        assertThat(logTablet.getSegments())
+                .extracting(segment -> segment.getBaseOffset())
+                .containsExactly(20L, 30L, 40L);
+
+        manualClock.advanceTime(Duration.ofDays(1));
+        AtomicBoolean advancedDuringCopy = new AtomicBoolean(false);
+        remoteLogStorage.copyLogSegmentHook =
+                () -> {
+                    if (advancedDuringCopy.compareAndSet(false, true)) {
+                        manualClock.advanceTime(1, TimeUnit.MILLISECONDS);
+                    }
+                };
+
+        addMultiSegmentsToLogTablet(logTablet, 1, false);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        assertThat(advancedDuringCopy).isTrue();
+        assertThat(remoteLog.allRemoteLogSegments()).hasSize(5);
+        assertThat(logTablet.getSegments())
+                .extracting(segment -> segment.getBaseOffset())
+                .containsExactly(30L, 40L, 50L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testUpdateLogTTLTriggersLocalCleanupWithoutNewWrites(boolean partitionTable)
+            throws Exception {
+        TableBucket tb;
+        if (partitionTable) {
+            tb = new TableBucket(DATA1_TABLE_ID, 0L, 0);
+        } else {
+            tb = new TableBucket(DATA1_TABLE_ID, 0);
+        }
+        makeLogTableAsLeader(tb, partitionTable);
+        Replica replica = replicaManager.getReplicaOrException(tb);
+        replica.updateTieredLogLocalSegments(3);
+        LogTablet logTablet = replica.getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 5, false);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        assertThat(logTablet.getSegments())
+                .extracting(segment -> segment.getBaseOffset())
+                .containsExactly(20L, 30L, 40L);
+
+        manualClock.advanceTime(Duration.ofDays(8));
+        replica.updateLogTTLMs(Duration.ofDays(1).toMillis());
+
+        assertThat(logTablet.getSegments())
+                .extracting(segment -> segment.getBaseOffset())
+                .containsExactly(40L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testUpdatedLogTTLPersistsAcrossRemoteLogReregistration(boolean partitionTable)
+            throws Exception {
+        TableBucket tb;
+        if (partitionTable) {
+            tb = new TableBucket(DATA1_TABLE_ID, 0L, 0);
+        } else {
+            tb = new TableBucket(DATA1_TABLE_ID, 0);
+        }
+        makeLogTableAsLeader(tb, partitionTable);
+        Replica replica = replicaManager.getReplicaOrException(tb);
+        replica.updateLogTTLMs(Duration.ofDays(1).toMillis());
+
+        remoteLogManager.stopLogTiering(replica);
+        remoteLogManager.registerReplica(replica);
+        remoteLogManager.startLogTiering(replica);
+
+        LogTablet logTablet = replica.getLogTablet();
+        addMultiSegmentsToLogTablet(logTablet, 5, false);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
+        assertThat(remoteLog.allRemoteLogSegments()).hasSize(4);
+
+        manualClock.advanceTime(Duration.ofDays(2));
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        assertThat(remoteLog.allRemoteLogSegments()).isEmpty();
     }
 
     @ParameterizedTest
