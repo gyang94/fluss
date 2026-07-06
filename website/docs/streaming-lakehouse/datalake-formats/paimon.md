@@ -8,7 +8,7 @@ sidebar_position: 1
 ## Introduction
 
 [Apache Paimon](https://paimon.apache.org/) innovatively combines a lake format with an LSM (Log-Structured Merge-tree) structure, bringing efficient updates into the lake architecture. 
-To integrate Fluss with Paimon, you must enable lakehouse storage and configure Paimon as the lakehouse storage. For more details, see [Enable Lakehouse Storage](maintenance/tiered-storage/lakehouse-storage.md#enable-lakehouse-storage).
+To integrate Fluss with Paimon, you must enable lakehouse storage and configure Paimon as the lakehouse storage. For more details, see [Deploying Streaming Lakehouse](../../install-deploy/deploying-streaming-lakehouse.md).
 
 ## Dependencies
 
@@ -39,7 +39,7 @@ Verify downloaded JARs against the [KEYS file](https://downloads.apache.org/incu
 
 ## Configure Paimon as LakeHouse Storage
 
-For general guidance on configuring Paimon as the lakehouse storage, you can refer to [Lakehouse Storage](maintenance/tiered-storage/lakehouse-storage.md) documentation. When starting the tiering service, make sure to use Paimon-specific configurations as parameters.
+For general guidance on configuring Paimon as the lakehouse storage, you can refer to [Deploying Streaming Lakehouse](../../install-deploy/deploying-streaming-lakehouse.md) documentation. When starting the tiering service, make sure to use Paimon-specific configurations as parameters.
 
 When a table is created or altered with the option `'table.datalake.enabled' = 'true'`, Fluss will automatically create a corresponding Paimon table with the same table path.
 The schema of the Paimon table matches that of the Fluss table, except for the addition of three system columns at the end: `__bucket`, `__offset`, and `__timestamp`.  
@@ -147,8 +147,8 @@ It supports both batch and streaming modes, using Paimon for historical data and
   This design enables Fluss to store only a small portion of the dataset in the Fluss cluster, reducing costs, while Paimon serves as the source of complete historical data when needed. 
 
 Key behavior for data retention:
-- **Expired Fluss log data** (controlled by `table.log.ttl`) remains accessible via Iceberg if previously tiered
-- **Cleaned-up partitions** in partitioned tables (controlled by `table.auto-partition.num-retention`) remain accessible via Iceberg if previously tiered
+- **Expired Fluss log data** (controlled by `table.log.ttl`) remains accessible via Paimon if previously tiered
+- **Cleaned-up partitions** in partitioned tables (controlled by `table.auto-partition.num-retention`) remain accessible via Paimon if previously tiered
 
 ### Reading with other Engines
 
@@ -182,7 +182,7 @@ SELECT * FROM paimon_catalog.fluss.enriched_orders$snapshots;
 ## Data Type Mapping
 
 When integrating with Paimon, Fluss automatically converts between Fluss data types and Paimon data types.  
-The following table shows the mapping between [Fluss data types](table-design/data-types.md) and Paimon data types:
+The following table shows the mapping between [Fluss data types](../../table-design/data-types.md) and Paimon data types:
 
 | Fluss Data Type                                                 | Paimon Data Type                                                |
 |-----------------------------------------------------------------|-----------------------------------------------------------------|

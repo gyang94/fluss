@@ -9,7 +9,7 @@ sidebar_position: 1
 
 [Lakekeeper](https://lakekeeper.io/) is an Apache-licensed Iceberg REST Catalog written in Rust. It provides a standards-compliant [Iceberg REST Catalog](https://iceberg.apache.org/concepts/catalog/#decoupling-using-the-rest-catalog) interface, making tiered Iceberg tables discoverable and queryable by any Iceberg-compatible engine.
 
-This guide explains how to configure Fluss to use Lakekeeper as its Iceberg catalog. For general Iceberg integration details (table mapping, data types, limitations), see [Iceberg](../formats/iceberg.md).
+This guide explains how to configure Fluss to use Lakekeeper as its Iceberg catalog. For general Iceberg integration details (table mapping, data types, limitations), see [Iceberg](../datalake-formats/iceberg.md).
 
 ## Quick Start with Docker Compose
 
@@ -20,7 +20,7 @@ A complete Docker Compose example including Fluss, the tiering service, and Lake
 When Fluss is configured with Lakekeeper as its Iceberg REST catalog:
 
 1. Fluss creates and manages Iceberg table metadata through Lakekeeper's REST API
-2. The [tiering service](maintenance/tiered-storage/lakehouse-storage.md#start-the-datalake-tiering-service) writes data to object storage and commits snapshots via Lakekeeper
+2. The [tiering service](../../install-deploy/deploying-streaming-lakehouse.md#starting-the-tiering-service) writes data to object storage and commits snapshots via Lakekeeper
 3. Any Iceberg-compatible engine (Flink, Spark, Trino, StarRocks, etc.) can discover and query the tiered tables through Lakekeeper
 
 ## Prerequisites
@@ -91,11 +91,11 @@ wget -P ${FLUSS_HOME}/plugins/iceberg/ \
     https://repo1.maven.org/maven2/io/trino/hadoop/hadoop-apache/3.3.5-2/hadoop-apache-3.3.5-2.jar
 ```
 
-See [Iceberg - Hadoop Dependencies](../formats/iceberg.md#1-hadoop-dependencies-configuration) for alternative approaches.
+See [Iceberg - Hadoop Dependencies](../datalake-formats/iceberg.md#1-hadoop-dependencies-configuration) for alternative approaches.
 
 ### Start Tiering Service
 
-Follow the [Iceberg tiering service setup](../formats/iceberg.md#start-tiering-service-to-iceberg) to prepare the required JARs and start the tiering service. Use REST catalog parameters when launching the Flink tiering job:
+Follow the [Iceberg tiering service setup](../datalake-formats/iceberg.md#start-tiering-service-to-iceberg) to prepare the required JARs and start the tiering service. Use REST catalog parameters when launching the Flink tiering job:
 
 ```bash
 ${FLINK_HOME}/bin/flink run /path/to/fluss-flink-tiering-$FLUSS_VERSION$.jar \
@@ -137,11 +137,11 @@ SET 'execution.runtime-mode' = 'batch';
 SELECT COUNT(*) FROM orders;
 ```
 
-For details on union reads, streaming reads, and reading with other engines, see [Iceberg - Read Tables](../formats/iceberg.md#read-tables).
+For details on union reads, streaming reads, and reading with other engines, see [Iceberg - Read Tables](../datalake-formats/iceberg.md#read-tables).
 
 ## Further Reading
 
-- [Iceberg Integration](../formats/iceberg.md) - Table mapping, data types, supported catalog types, and limitations
-- [Lakehouse Storage](maintenance/tiered-storage/lakehouse-storage.md) - General tiered storage setup
+- [Iceberg Integration](../datalake-formats/iceberg.md) - Table mapping, data types, supported catalog types, and limitations
+- [Lakehouse Storage](../../maintenance/tiered-storage/lakehouse-storage.md) - General tiered storage setup
 - [Lakekeeper Documentation](https://docs.lakekeeper.io) - Deploying and managing Lakekeeper
 - [Lakekeeper Fluss Engine Docs](https://docs.lakekeeper.io/docs/nightly/engines/#apache-fluss) - Lakekeeper-side configuration reference

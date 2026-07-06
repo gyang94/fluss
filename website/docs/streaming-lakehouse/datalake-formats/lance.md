@@ -8,7 +8,7 @@ sidebar_position: 3
 ## Introduction
 
 [Lance](https://lancedb.github.io/lance/) is a modern table format optimized for machine learning and AI applications. 
-To integrate Fluss with Lance, you must enable lakehouse storage and configure Lance as the lakehouse storage. For more details, see [Enable Lakehouse Storage](maintenance/tiered-storage/lakehouse-storage.md#enable-lakehouse-storage).
+To integrate Fluss with Lance, you must enable lakehouse storage and configure Lance as the lakehouse storage. For more details, see [Deploying Streaming Lakehouse](../../install-deploy/deploying-streaming-lakehouse.md).
 
 ## Dependencies
 
@@ -69,16 +69,15 @@ CREATE TABLE fluss_order_with_lake (
 ```
 
 ### Start Tiering Service to Lance
-Then, you must start the datalake tiering service to tier Fluss's data to Lance. For guidance, you can refer to [Start The Datalake Tiering Service
-](maintenance/tiered-storage/lakehouse-storage.md#start-the-datalake-tiering-service). Although the example uses Paimon, the process is also applicable to Lance. 
+Then, you must start the datalake tiering service to tier Fluss's data to Lance. For guidance, you can refer to [Deploying Streaming Lakehouse](../../install-deploy/deploying-streaming-lakehouse.md). Although the example uses Paimon, the process is also applicable to Lance.
 
-But in [Prepare required jars](maintenance/tiered-storage/lakehouse-storage.md#prepare-required-jars) step, you should follow this guidance:
-- Put the Fluss Flink connector JAR into `${FLINK_HOME}/lib`; pick the connector matching your Flink version (see [Dependencies](../../../engine-flink/getting-started.md#dependencies)). For Flink 1.20, use [fluss-flink-1.20-$FLUSS_VERSION$.jar]($FLUSS_MAVEN_REPO_URL$/org/apache/fluss/fluss-flink-1.20/$FLUSS_VERSION$/fluss-flink-1.20-$FLUSS_VERSION$.jar).
-- If you are using [Amazon S3](http://aws.amazon.com/s3/), [Aliyun OSS](https://www.aliyun.com/product/oss) or [HDFS(Hadoop Distributed File System)](https://hadoop.apache.org/docs/stable/) as Fluss's [remote storage](maintenance/tiered-storage/remote-storage.md),
-  you should download the corresponding Fluss filesystem JAR (see the [Filesystems](../../../maintenance/filesystems/overview.md) section) and also put it into `${FLINK_HOME}/lib`.
+For required JARs, you should follow this guidance:
+- Put the Fluss Flink connector JAR into `${FLINK_HOME}/lib`; pick the connector matching your Flink version (see [Dependencies](../../engine-flink/getting-started.md#dependencies)). For Flink 1.20, use [fluss-flink-1.20-$FLUSS_VERSION$.jar]($FLUSS_MAVEN_REPO_URL$/org/apache/fluss/fluss-flink-1.20/$FLUSS_VERSION$/fluss-flink-1.20-$FLUSS_VERSION$.jar).
+- If you are using [Amazon S3](http://aws.amazon.com/s3/), [Aliyun OSS](https://www.aliyun.com/product/oss) or [HDFS(Hadoop Distributed File System)](https://hadoop.apache.org/docs/stable/) as Fluss's [remote storage](../../maintenance/tiered-storage/remote-storage.md),
+  you should download the corresponding Fluss filesystem JAR (see [Filesystems](../../maintenance/tiered-storage/filesystems/overview.md)) and also put it into `${FLINK_HOME}/lib`.
 - Put [fluss-lake-lance-$FLUSS_VERSION$.jar]($FLUSS_MAVEN_REPO_URL$/org/apache/fluss/fluss-lake-lance/$FLUSS_VERSION$/fluss-lake-lance-$FLUSS_VERSION$.jar) into `${FLINK_HOME}/lib`.
 
-Additionally, when following the [Start Datalake Tiering Service](maintenance/tiered-storage/lakehouse-storage.md#start-datalake-tiering-service) guide, make sure to use Lance-specific configurations as parameters when starting the Flink tiering job:
+Make sure to use Lance-specific configurations as parameters when starting the Flink tiering job:
 ```shell
 <FLINK_HOME>/bin/flink run /path/to/fluss-flink-tiering-$FLUSS_VERSION$.jar \
     --fluss.bootstrap.servers localhost:9123 \
@@ -126,7 +125,7 @@ ds = lance.dataset("<warehouse_path>/<database_name>/<table_name>.lance")
 
 Lance internally stores data in Arrow format.
 When integrating with Lance, Fluss automatically converts between Fluss data types and Lance data types.  
-The following table shows the mapping between [Fluss data types](table-design/data-types.md) and Lance data types:
+The following table shows the mapping between [Fluss data types](../../table-design/data-types.md) and Lance data types:
 
 | Fluss Data Type               | Lance Data Type           |
 |-------------------------------|---------------------------|

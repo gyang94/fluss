@@ -8,7 +8,7 @@ sidebar_position: 2
 ## Introduction
 
 [Apache Iceberg](https://iceberg.apache.org/) is an open table format for huge analytic datasets. It provides ACID transactions, schema evolution, and efficient data organization for data lakes.
-To integrate Fluss with Iceberg, you must enable lakehouse storage and configure Iceberg as the lakehouse storage. For more details, see [Enable Lakehouse Storage](maintenance/tiered-storage/lakehouse-storage.md#enable-lakehouse-storage).
+To integrate Fluss with Iceberg, you must enable lakehouse storage and configure Iceberg as the lakehouse storage. For more details, see [Deploying Streaming Lakehouse](../../install-deploy/deploying-streaming-lakehouse.md).
 
 > **NOTE**: Iceberg requires JDK11 or later. Please ensure that both your Fluss deployment and the Flink cluster used for tiering services are running on JDK11+.
 
@@ -123,7 +123,7 @@ The Iceberg version that Fluss bundles is based on `1.10.1`. Please ensure the J
 
 ### Start Tiering Service to Iceberg
 
-To tier Fluss's data to Iceberg, you must start the datalake tiering service. For guidance, you can refer to [Start The Datalake Tiering Service](maintenance/tiered-storage/lakehouse-storage.md#start-the-datalake-tiering-service). Although the example uses Paimon, the process is also applicable to Iceberg.
+To tier Fluss's data to Iceberg, you must start the datalake tiering service. For guidance, you can refer to [Deploying Streaming Lakehouse](../../install-deploy/deploying-streaming-lakehouse.md). Although the example uses Paimon, the process is also applicable to Iceberg.
 
 #### Prerequisites: Hadoop Dependencies
 
@@ -166,17 +166,17 @@ export HADOOP_CLASSPATH=`$HADOOP_HOME/bin/hadoop classpath`
 
 #### Prepare Required JARs
 
-Follow the dependency management guidelines below for the [Prepare required jars](maintenance/tiered-storage/lakehouse-storage.md#prepare-required-jars) step:
+Follow the dependency management guidelines below for required JARs:
 
 ##### 1. Core Fluss Components
-- **Fluss Flink Connector**: Put the Fluss Flink connector JAR into `${FLINK_HOME}/lib` — see [Dependencies](../../../engine-flink/getting-started.md#dependencies) for all supported Flink versions.
+- **Fluss Flink Connector**: Put the Fluss Flink connector JAR into `${FLINK_HOME}/lib` — see [Dependencies](../../engine-flink/getting-started.md#dependencies) for all supported Flink versions.
   - For Flink 1.20: [fluss-flink-1.20-$FLUSS_VERSION$.jar]($FLUSS_MAVEN_REPO_URL$/org/apache/fluss/fluss-flink-1.20/$FLUSS_VERSION$/fluss-flink-1.20-$FLUSS_VERSION$.jar)
 
 ##### 2. Remote Storage Support
 If you are using remote storage, download the corresponding Fluss filesystem JAR and place it into `${FLINK_HOME}/lib`:
-- **Amazon S3**: see [S3 Dependencies](../../../maintenance/filesystems/s3.md#dependencies)
-- **Aliyun OSS**: see [OSS Dependencies](../../../maintenance/filesystems/oss.md#dependencies)
-- **HDFS**: see [HDFS Dependencies](../../../maintenance/filesystems/hdfs.md#dependencies)
+- **Amazon S3**: see [S3 Dependencies](../../maintenance/tiered-storage/filesystems/s3.md#dependencies)
+- **Aliyun OSS**: see [OSS Dependencies](../../maintenance/tiered-storage/filesystems/oss.md#dependencies)
+- **HDFS**: see [HDFS Dependencies](../../maintenance/tiered-storage/filesystems/hdfs.md#dependencies)
 
 ##### 3. Iceberg Lake Connector
 - **Fluss Lake Iceberg**: Put [fluss-lake-iceberg-$FLUSS_VERSION$.jar]($FLUSS_MAVEN_REPO_URL$/org/apache/fluss/fluss-lake-iceberg/$FLUSS_VERSION$/fluss-lake-iceberg-$FLUSS_VERSION$.jar) into `${FLINK_HOME}/lib`
@@ -197,7 +197,7 @@ failsafe-3.3.2.jar
 
 #### Start Datalake Tiering Service
 
-When following the [Start Datalake Tiering Service](maintenance/tiered-storage/lakehouse-storage.md#start-datalake-tiering-service) guide, use Iceberg-specific configurations as parameters when starting the Flink tiering job:
+Use Iceberg-specific configurations as parameters when starting the Flink tiering job:
 
 ```bash
 <FLINK_HOME>/bin/flink run /path/to/fluss-flink-tiering-$FLUSS_VERSION$.jar \
@@ -262,7 +262,7 @@ CREATE TABLE fluss_order_with_lake (
  ) WITH (
      'table.datalake.enabled' = 'true',
      'table.datalake.freshness' = '30s',
-     'table.datalake.auto-maintenance' = 'true',
+     'table.datalake.auto-compaction' = 'true',
      'iceberg.write.format.default' = 'orc',
      'iceberg.commit.retry.num-retries' = '5'
 );
@@ -441,27 +441,55 @@ You need to place the JARs required by Iceberg to read data into `${FLINK_HOME}/
 
 ##### Union Read
 
-To read the full dataset, which includes both Fluss (fresh) and Iceberg (historical) data, simply query the table without any suffix. The following example illustrates this:
+To read the full dataset, which includes both Fluss (fresh) and Iceberg (historical) data, simply query the table without any suffix.
 
-```sql
--- Set execution mode to streaming or batch, here just take batch as an example
+**Table type support:**
+- **Log tables**: Supported in both batch and streaming mode.
+- **Primary key tables**: Supported in both batch and streaming mode. Updates tiered to Iceberg are written as equality deletes.
+
+```sql title="Batch mode"
 SET 'execution.runtime-mode' = 'batch';
 
 -- Query will union data from Fluss and Iceberg
-select SUM(visit_count) from fluss_access_log;
+SELECT SUM(visit_count) FROM fluss_access_log;
+
+-- Aggregations work across both data sources
+SELECT COUNT(*), SUM(visit_count) FROM fluss_access_log;
+
+-- Predicates are applied across both Fluss and Iceberg data
+SELECT * FROM fluss_access_log WHERE visit_date >= '2024-01-01';
 ```
 
-It supports both batch and streaming modes, utilizing Iceberg for historical data and Fluss for fresh data:
+```sql title="Streaming mode"
+SET 'execution.runtime-mode' = 'streaming';
 
-- **Batch mode** (only log table)
+-- Reads the latest Iceberg snapshot first, then continues from Fluss
+SELECT * FROM fluss_access_log;
+```
 
-- **Streaming mode** (primary key table and log table)
-
-  Flink first reads the latest Iceberg snapshot (tiered via tiering service), then switches to Fluss starting from the log offset matching that snapshot. This design minimizes Fluss storage requirements (reducing costs) while using Iceberg as a complete historical archive.
+Flink first reads the latest Iceberg snapshot (tiered via tiering service), then switches to Fluss starting from the log offset matching that snapshot. This design minimizes Fluss storage requirements (reducing costs) while using Iceberg as a complete historical archive.
 
 Key behavior for data retention:
 - **Expired Fluss log data** (controlled by `table.log.ttl`) remains accessible via Iceberg if previously tiered
 - **Cleaned-up partitions** in partitioned tables (controlled by `table.auto-partition.num-retention`) remain accessible via Iceberg if previously tiered
+
+#### Lake-Only Read
+
+To query only the data already tiered to Iceberg, add the `$lake` suffix to the table name:
+
+```sql title="Lake-only read"
+-- Reads only the data tiered to Iceberg, not the fresh data still in Fluss
+SELECT * FROM fluss_access_log$lake;
+```
+
+Data becomes visible through `$lake` as soon as the tiering service commits it: each tiering round produces one Iceberg snapshot, and the commit is readable immediately once it succeeds — there's no separate flush or refresh step.
+
+You can also query Iceberg's system tables through the `$lake$<system-table>` suffix, for example to inspect commit history via the `snapshots` table:
+
+```sql title="Read Iceberg snapshots metadata"
+-- Each row corresponds to one tiering commit
+SELECT committed_at, snapshot_id, operation, summary FROM fluss_access_log$lake$snapshots;
+```
 
 ### Reading with Other Engines
 
