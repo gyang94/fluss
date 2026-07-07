@@ -225,7 +225,8 @@ class PartitionUtilsTest {
         dashedDayConf.setString(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT, "yyyy-MM-dd");
         AutoPartitionStrategy dashedDayStrategy = AutoPartitionStrategy.from(dashedDayConf);
 
-        LocalDate today = Instant.now().atZone(dashedDayStrategy.timeZone().toZoneId()).toLocalDate();
+        LocalDate today =
+                Instant.now().atZone(dashedDayStrategy.timeZone().toZoneId()).toLocalDate();
 
         assertThatNoException()
                 .isThrownBy(
@@ -260,7 +261,8 @@ class PartitionUtilsTest {
         dashedDayConf.setString(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT, "yyyy-MM-dd");
         AutoPartitionStrategy dashedDayStrategy = AutoPartitionStrategy.from(dashedDayConf);
 
-        LocalDate today = Instant.now().atZone(dashedDayStrategy.timeZone().toZoneId()).toLocalDate();
+        LocalDate today =
+                Instant.now().atZone(dashedDayStrategy.timeZone().toZoneId()).toLocalDate();
         LocalDate earliestRetained = today.minusDays(7);
         LocalDate outOfDate = today.minusDays(8);
 

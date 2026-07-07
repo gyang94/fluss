@@ -1121,8 +1121,8 @@ class AutoPartitionManagerTest {
                                 dayFormat == null
                                         ? Collections.emptyMap()
                                         : Collections.singletonMap(
-                                        ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
-                                        dayFormat))
+                                                ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
+                                                dayFormat))
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_NUM_PRECREATE,
                                 multiplePartitionKeys ? 0 : partitionPreCreateNum)
