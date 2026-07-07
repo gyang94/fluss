@@ -53,6 +53,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -1116,9 +1117,12 @@ class AutoPartitionManagerTest {
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_NUM_RETENTION,
                                 partitionRetentionNum)
-                        .property(
-                                ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT,
-                                dayFormat == null ? "yyyyMMdd" : dayFormat)
+                        .properties(
+                                dayFormat == null
+                                        ? Collections.emptyMap()
+                                        : Collections.singletonMap(
+                                        ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
+                                        dayFormat))
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_NUM_PRECREATE,
                                 multiplePartitionKeys ? 0 : partitionPreCreateNum)

@@ -1598,7 +1598,8 @@ public class ConfigOptions {
                     .withDescription(
                             "The format for DAY auto created partitions. "
                                     + "Supported values are `yyyyMMdd` and `yyyy-MM-dd`. "
-                                    + "This option only applies when `table.auto-partition.time-unit` is `DAY`.");
+                                    + "This option can only be set when `table.auto-partition.enabled` is `true` "
+                                    + "and `table.auto-partition.time-unit` is `DAY`.");
 
     public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIMEZONE =
             key("table.auto-partition.time-zone")
