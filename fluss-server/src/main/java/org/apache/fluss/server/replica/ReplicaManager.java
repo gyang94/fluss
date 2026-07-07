@@ -563,7 +563,6 @@ public class ReplicaManager implements ServerReconfigurable {
 
     private void updateReplicaTableConfig(ClusterMetadata clusterMetadata) {
         Map<Long, Boolean> tableIdToLakeFlag = new HashMap<>();
-        Map<Long, Long> tableIdToLogTTLMs = new HashMap<>();
         Map<Long, Integer> tableIdToTieredLogLocalSegments = new HashMap<>();
 
         for (TableMetadata tableMetadata : clusterMetadata.getTableMetadataList()) {
@@ -576,16 +575,12 @@ public class ReplicaManager implements ServerReconfigurable {
                 tableIdToLakeFlag.put(tableId, dataLakeEnabled);
             }
 
-            tableIdToLogTTLMs.put(tableId, tableInfo.getTableConfig().getLogTTLMs());
-
             // Collect tiered log local segments configuration
             int tieredLogLocalSegments = tableInfo.getTableConfig().getTieredLogLocalSegments();
             tableIdToTieredLogLocalSegments.put(tableId, tieredLogLocalSegments);
         }
 
-        if (tableIdToLakeFlag.isEmpty()
-                && tableIdToLogTTLMs.isEmpty()
-                && tableIdToTieredLogLocalSegments.isEmpty()) {
+        if (tableIdToLakeFlag.isEmpty() && tableIdToTieredLogLocalSegments.isEmpty()) {
             return;
         }
 
@@ -598,10 +593,6 @@ public class ReplicaManager implements ServerReconfigurable {
                 // Update datalake enabled configuration
                 if (tableIdToLakeFlag.containsKey(tableId)) {
                     replica.updateIsDataLakeEnabled(tableIdToLakeFlag.get(tableId));
-                }
-
-                if (tableIdToLogTTLMs.containsKey(tableId)) {
-                    replica.updateLogTTLMs(tableIdToLogTTLMs.get(tableId));
                 }
 
                 // Update tiered log local segments configuration

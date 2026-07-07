@@ -273,7 +273,6 @@ public final class LogManager extends TabletManagerBase {
             PhysicalTablePath tablePath,
             TableBucket tableBucket,
             LogFormat logFormat,
-            long logTTLMs,
             int tieredLogLocalSegments,
             boolean isChangelog)
             throws Exception {
@@ -296,7 +295,6 @@ public final class LogManager extends TabletManagerBase {
                                     0L,
                                     scheduler,
                                     logFormat,
-                                    logTTLMs,
                                     tieredLogLocalSegments,
                                     isChangelog,
                                     clock,
@@ -421,7 +419,6 @@ public final class LogManager extends TabletManagerBase {
                         logRecoveryPoint,
                         scheduler,
                         tableInfo.getTableConfig().getLogFormat(),
-                        tableInfo.getTableConfig().getLogTTLMs(),
                         tableInfo.getTableConfig().getTieredLogLocalSegments(),
                         tableInfo.hasPrimaryKey(),
                         clock,

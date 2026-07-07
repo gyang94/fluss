@@ -50,8 +50,6 @@ public class TestingRemoteLogStorage extends DefaultRemoteLogStorage {
 
     private final AtomicInteger copySegmentCount = new AtomicInteger(0);
 
-    public volatile Runnable copyLogSegmentHook = null;
-
     /**
      * When set to a positive value, each call to {@link #fetchLogData} will sleep for the given
      * number of milliseconds before delegating to the real implementation. Used by integration
@@ -109,10 +107,6 @@ public class TestingRemoteLogStorage extends DefaultRemoteLogStorage {
     public void copyLogSegmentFiles(
             RemoteLogSegment remoteLogSegment, LogSegmentFiles logSegmentFiles)
             throws RemoteStorageException {
-        Runnable hook = copyLogSegmentHook;
-        if (hook != null) {
-            hook.run();
-        }
         int failAfter = copySegmentFailAfterNCopies.get();
         if (failAfter >= 0 && copySegmentCount.get() >= failAfter) {
             throw new RemoteStorageException(

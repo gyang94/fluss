@@ -377,7 +377,7 @@ public final class Replica {
     }
 
     public long getLogTTLMs() {
-        return logTablet.getLogTTLMs();
+        return tableConfig.getLogTTLMs();
     }
 
     public int writerIdCount() {
@@ -661,19 +661,6 @@ public final class Replica {
                 tableBucket,
                 old,
                 isDataLakeEnabled);
-    }
-
-    public void updateLogTTLMs(long logTTLMs) {
-        long oldValue = logTablet.getLogTTLMs();
-        if (oldValue == logTTLMs) {
-            return;
-        }
-
-        logTablet.updateLogTTLMs(logTTLMs);
-        remoteLogManager.updateLogTTLMs(tableBucket, logTTLMs);
-        logTablet.deleteSegmentsAlreadyExistsInRemote(clock.milliseconds());
-
-        LOG.info("Replica for {} logTTLMs changed from {} to {}", tableBucket, oldValue, logTTLMs);
     }
 
     /**
@@ -2175,7 +2162,6 @@ public final class Replica {
                         physicalPath,
                         tableBucket,
                         tableConfig.getLogFormat(),
-                        tableConfig.getLogTTLMs(),
                         tableConfig.getTieredLogLocalSegments(),
                         isKvTable());
         // update high watermark.
