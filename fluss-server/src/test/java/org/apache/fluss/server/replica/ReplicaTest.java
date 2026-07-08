@@ -825,6 +825,28 @@ final class ReplicaTest extends ReplicaTestBase {
         assertThat(logReplica.getLogTablet().isDataLakeEnabled()).isFalse();
     }
 
+    @Test
+    void testUpdateActiveSegmentRollTimeMs() throws Exception {
+        Replica logReplica =
+                makeLogReplica(DATA1_PHYSICAL_TABLE_PATH, new TableBucket(DATA1_TABLE_ID, 1));
+        makeLogReplicaAsLeader(logReplica);
+
+        assertThat(logReplica.getLogTablet().getActiveSegmentRollTimeMs())
+                .isEqualTo(Duration.ofDays(7).toMillis());
+
+        logReplica.updateActiveSegmentRollTimeMs(Duration.ofHours(1).toMillis());
+        assertThat(logReplica.getLogTablet().getActiveSegmentRollTimeMs())
+                .isEqualTo(Duration.ofHours(1).toMillis());
+
+        logReplica.updateActiveSegmentRollTimeMs(Duration.ofHours(1).toMillis());
+        assertThat(logReplica.getLogTablet().getActiveSegmentRollTimeMs())
+                .isEqualTo(Duration.ofHours(1).toMillis());
+
+        logReplica.updateActiveSegmentRollTimeMs(Duration.ofMinutes(30).toMillis());
+        assertThat(logReplica.getLogTablet().getActiveSegmentRollTimeMs())
+                .isEqualTo(Duration.ofMinutes(30).toMillis());
+    }
+
     @SuppressWarnings("unchecked")
     private long getLakeTieringGaugeValue(Replica replica, String metricName) {
         MetricGroup lakeTieringMetricGroup = replica.bucketMetrics().addGroup("lakeTiering");
@@ -832,7 +854,6 @@ final class ReplicaTest extends ReplicaTestBase {
                 (Gauge<Long>)
                         ((AbstractMetricGroup) lakeTieringMetricGroup).getMetrics().get(metricName);
         return gauge.getValue();
-    }
 
     private void makeLogReplicaAsLeader(Replica replica) throws Exception {
         makeLeaderReplica(

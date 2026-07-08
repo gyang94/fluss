@@ -565,6 +565,7 @@ public class ReplicaManager implements ServerReconfigurable {
     private void updateReplicaTableConfig(ClusterMetadata clusterMetadata) {
         Map<Long, Boolean> tableIdToLakeFlag = new HashMap<>();
         Map<Long, Integer> tableIdToTieredLogLocalSegments = new HashMap<>();
+        Map<Long, Long> tableIdToActiveSegmentRollTimeMs = new HashMap<>();
 
         for (TableMetadata tableMetadata : clusterMetadata.getTableMetadataList()) {
             TableInfo tableInfo = tableMetadata.getTableInfo();
@@ -579,9 +580,15 @@ public class ReplicaManager implements ServerReconfigurable {
             // Collect tiered log local segments configuration
             int tieredLogLocalSegments = tableInfo.getTableConfig().getTieredLogLocalSegments();
             tableIdToTieredLogLocalSegments.put(tableId, tieredLogLocalSegments);
+
+            long activeSegmentRollTimeMs =
+                    tableInfo.getTableConfig().getEffectiveActiveSegmentRollTimeMs();
+            tableIdToActiveSegmentRollTimeMs.put(tableId, activeSegmentRollTimeMs);
         }
 
-        if (tableIdToLakeFlag.isEmpty() && tableIdToTieredLogLocalSegments.isEmpty()) {
+        if (tableIdToLakeFlag.isEmpty()
+                && tableIdToTieredLogLocalSegments.isEmpty()
+                && tableIdToActiveSegmentRollTimeMs.isEmpty()) {
             return;
         }
 
@@ -600,6 +607,11 @@ public class ReplicaManager implements ServerReconfigurable {
                 if (tableIdToTieredLogLocalSegments.containsKey(tableId)) {
                     replica.updateTieredLogLocalSegments(
                             tableIdToTieredLogLocalSegments.get(tableId));
+                }
+
+                if (tableIdToActiveSegmentRollTimeMs.containsKey(tableId)) {
+                    replica.updateActiveSegmentRollTimeMs(
+                            tableIdToActiveSegmentRollTimeMs.get(tableId));
                 }
             }
         }

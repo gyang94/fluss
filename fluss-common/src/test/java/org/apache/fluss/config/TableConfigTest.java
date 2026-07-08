@@ -21,6 +21,8 @@ import org.apache.fluss.metadata.DeleteBehavior;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests for {@link TableConfig}. */
@@ -43,5 +45,30 @@ class TableConfigTest {
         conf.set(ConfigOptions.TABLE_DELETE_BEHAVIOR, DeleteBehavior.IGNORE);
         TableConfig tableConfig3 = new TableConfig(conf);
         assertThat(tableConfig3.getDeleteBehavior()).hasValue(DeleteBehavior.IGNORE);
+    }
+
+    @Test
+    void testActiveSegmentRollTimeFallsBackToLogTtl() {
+        Configuration conf = new Configuration();
+        conf.set(ConfigOptions.TABLE_LOG_TTL, Duration.ofHours(6));
+
+        TableConfig tableConfig = new TableConfig(conf);
+
+        assertThat(tableConfig.getActiveSegmentRollTime()).isEmpty();
+        assertThat(tableConfig.getEffectiveActiveSegmentRollTimeMs())
+                .isEqualTo(Duration.ofHours(6).toMillis());
+    }
+
+    @Test
+    void testActiveSegmentRollTimeOverridesLogTtl() {
+        Configuration conf = new Configuration();
+        conf.set(ConfigOptions.TABLE_LOG_TTL, Duration.ofHours(6));
+        conf.set(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME, Duration.ofMinutes(30));
+
+        TableConfig tableConfig = new TableConfig(conf);
+
+        assertThat(tableConfig.getActiveSegmentRollTime()).hasValue(Duration.ofMinutes(30));
+        assertThat(tableConfig.getEffectiveActiveSegmentRollTimeMs())
+                .isEqualTo(Duration.ofMinutes(30).toMillis());
     }
 }

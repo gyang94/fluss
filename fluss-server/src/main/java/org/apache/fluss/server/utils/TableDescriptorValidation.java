@@ -126,6 +126,7 @@ public class TableDescriptorValidation {
         checkMergeEngine(tableConf, hasPrimaryKey, schema);
         checkDeleteBehavior(tableConf, hasPrimaryKey);
         checkTieredLog(tableConf);
+        checkActiveSegmentRollTime(tableConf);
         checkPartition(tableConf, tableDescriptor.getPartitionKeys(), schema.getRowType());
         checkSystemColumns(schema.getRowType());
         validateStatisticsConfig(tableDescriptor);
@@ -456,6 +457,31 @@ public class TableDescriptorValidation {
                     String.format(
                             "'%s' must be greater than 0.",
                             ConfigOptions.TABLE_TIERED_LOG_LOCAL_SEGMENTS.key()));
+        }
+    }
+
+    private static void checkActiveSegmentRollTime(Configuration tableConf) {
+        Optional<java.time.Duration> activeRollTime =
+                tableConf.getOptional(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME);
+        if (!activeRollTime.isPresent()) {
+            return;
+        }
+
+        long activeRollTimeMs = activeRollTime.get().toMillis();
+        if (activeRollTimeMs <= 0) {
+            throw new InvalidConfigException(
+                    String.format(
+                            "'%s' must be greater than 0.",
+                            ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key()));
+        }
+
+        long logTtlMs = tableConf.get(ConfigOptions.TABLE_LOG_TTL).toMillis();
+        if (logTtlMs > 0 && activeRollTimeMs > logTtlMs) {
+            throw new InvalidConfigException(
+                    String.format(
+                            "'%s' must be less than or equal to '%s'.",
+                            ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(),
+                            ConfigOptions.TABLE_LOG_TTL.key()));
         }
     }
 

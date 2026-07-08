@@ -17,12 +17,17 @@
 
 package org.apache.fluss.server.log.remote;
 
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.protocol.Errors;
 import org.apache.fluss.server.entity.FetchReqInfo;
+import org.apache.fluss.server.entity.NotifyLeaderAndIsrData;
 import org.apache.fluss.server.log.FetchParams;
 import org.apache.fluss.server.log.LogTablet;
+import org.apache.fluss.server.zk.data.LeaderAndIsr;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,11 +36,16 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.fluss.record.TestData.DATA1;
+import static org.apache.fluss.record.TestData.DATA1_SCHEMA;
 import static org.apache.fluss.record.TestData.DATA1_TABLE_ID;
+import static org.apache.fluss.server.coordinator.CoordinatorContext.INITIAL_COORDINATOR_EPOCH;
+import static org.apache.fluss.server.zk.data.LeaderAndIsr.INITIAL_BUCKET_EPOCH;
+import static org.apache.fluss.server.zk.data.LeaderAndIsr.INITIAL_LEADER_EPOCH;
 import static org.apache.fluss.testutils.DataTestUtils.genMemoryLogRecordsWithWriterId;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -133,6 +143,47 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
         FetchLogResultForBucket resultForBucket = result.get(tb);
         assertThat(resultForBucket.getErrorCode())
                 .isEqualTo(Errors.LOG_OFFSET_OUT_OF_RANGE_EXCEPTION.code());
+    }
+
+    @Test
+    void testActiveSegmentRollTimeOverride() throws Exception {
+        long tableId = 10001L;
+        TablePath tablePath = TablePath.of("fluss", "test_active_segment_roll_time_override");
+        Map<String, String> properties = new HashMap<>();
+        properties.put(ConfigOptions.TABLE_LOG_TTL.key(), "7d");
+        properties.put(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(), "1h");
+        registerTableInZkClient(
+                tablePath, DATA1_SCHEMA, tableId, Collections.emptyList(), properties);
+
+        TableBucket tb = new TableBucket(tableId, 0);
+        makeLeaderAndFollower(
+                Collections.singletonList(
+                        new NotifyLeaderAndIsrData(
+                                PhysicalTablePath.of(tablePath),
+                                tb,
+                                Collections.singletonList(TABLET_SERVER_ID),
+                                new LeaderAndIsr(
+                                        TABLET_SERVER_ID,
+                                        INITIAL_LEADER_EPOCH,
+                                        Collections.singletonList(TABLET_SERVER_ID),
+                                        Collections.emptyList(),
+                                        INITIAL_COORDINATOR_EPOCH,
+                                        INITIAL_BUCKET_EPOCH))));
+        LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 1);
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.activeLogSegment().getSizeInBytes()).isGreaterThan(0);
+
+        manualClock.advanceTime(Duration.ofHours(2));
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
+        assertThat(remoteLog.allRemoteLogSegments()).hasSize(1);
+        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(10L);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(10L);
+        assertThat(logTablet.activeLogSegment().getSizeInBytes()).isZero();
     }
 
     @Test

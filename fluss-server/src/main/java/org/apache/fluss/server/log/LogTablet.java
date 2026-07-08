@@ -109,6 +109,7 @@ public final class LogTablet {
     private final Clock clock;
     private final boolean isChangeLog;
     private final long logTtlMs;
+    private volatile long activeSegmentRollTimeMs;
 
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
@@ -148,6 +149,7 @@ public final class LogTablet {
             LogFormat logFormat,
             int tieredLogLocalSegments,
             long logTtlMs,
+            long activeSegmentRollTimeMs,
             boolean isChangelog,
             Clock clock) {
         this.dataDir = dataDir;
@@ -160,6 +162,7 @@ public final class LogTablet {
         this.writerStateManager = writerStateManager;
         this.highWatermarkMetadata = new LogOffsetMetadata(0L);
         this.logTtlMs = logTtlMs;
+        this.activeSegmentRollTimeMs = activeSegmentRollTimeMs;
 
         this.scheduler = scheduler;
         // scheduler the writer expiration interval check.
@@ -348,6 +351,7 @@ public final class LogTablet {
             LogFormat logFormat,
             int tieredLogLocalSegments,
             long logTtlMs,
+            long activeSegmentRollTimeMs,
             boolean isChangelog,
             Clock clock,
             boolean isCleanShutdown)
@@ -397,6 +401,7 @@ public final class LogTablet {
                 logFormat,
                 tieredLogLocalSegments,
                 logTtlMs,
+                activeSegmentRollTimeMs,
                 isChangelog,
                 clock);
     }
@@ -416,6 +421,7 @@ public final class LogTablet {
             Clock clock,
             boolean isCleanShutdown)
             throws Exception {
+        TableConfig tableConfig = new TableConfig(new Configuration());
         return create(
                 dataDir,
                 tablePath,
@@ -426,7 +432,8 @@ public final class LogTablet {
                 scheduler,
                 logFormat,
                 tieredLogLocalSegments,
-                new TableConfig(new Configuration()).getLogTTLMs(),
+                tableConfig.getLogTTLMs(),
+                tableConfig.getEffectiveActiveSegmentRollTimeMs(),
                 isChangelog,
                 clock,
                 isCleanShutdown);
@@ -651,6 +658,14 @@ public final class LogTablet {
 
     public int getTieredLogLocalSegments() {
         return tieredLogLocalSegments;
+    }
+
+    public void updateActiveSegmentRollTimeMs(long activeSegmentRollTimeMs) {
+        this.activeSegmentRollTimeMs = activeSegmentRollTimeMs;
+    }
+
+    public long getActiveSegmentRollTimeMs() {
+        return activeSegmentRollTimeMs;
     }
 
     public void updateLakeTableSnapshotId(long snapshotId) {
@@ -1056,14 +1071,15 @@ public final class LogTablet {
      * segment eligible for remote tiering and local cleanup.
      */
     public void rollActiveSegmentIfExpired() throws Exception {
-        if (logTtlMs <= 0L) {
+        if (activeSegmentRollTimeMs <= 0L) {
             return;
         }
 
         synchronized (lock) {
             LogSegment activeSegment = localLog.getSegments().activeSegment();
             if (activeSegment.getSizeInBytes() == 0
-                    || !isSegmentExpired(clock.milliseconds(), activeSegment)) {
+                    || !isSegmentExpired(
+                            clock.milliseconds(), activeSegment, activeSegmentRollTimeMs)) {
                 return;
             }
 
@@ -1348,18 +1364,20 @@ public final class LogTablet {
             if (logSegments.get(i + 1).getBaseOffset() > endOffset) {
                 break;
             }
-            if (i < tierProtectedStartIndex || isSegmentExpired(now, logSegments.get(i))) {
+            if (i < tierProtectedStartIndex
+                    || isSegmentExpired(now, logSegments.get(i), logTtlMs)) {
                 deletableSegments.add(logSegments.get(i));
             }
         }
         return deletableSegments;
     }
 
-    private boolean isSegmentExpired(long now, LogSegment segment) throws IOException {
-        if (logTtlMs <= 0L) {
+    private boolean isSegmentExpired(long now, LogSegment segment, long expirationTimeMs)
+            throws IOException {
+        if (expirationTimeMs <= 0L) {
             return false;
         }
-        return now - segment.maxTimestampSoFar() > logTtlMs;
+        return now - segment.maxTimestampSoFar() > expirationTimeMs;
     }
 
     private void deleteSegments(List<LogSegment> deletableSegments, SegmentDeletionReason reason)
