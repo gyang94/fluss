@@ -125,6 +125,7 @@ import static org.apache.fluss.testutils.DataTestUtils.row;
 import static org.apache.fluss.testutils.InternalRowAssert.assertThatRow;
 import static org.apache.fluss.testutils.common.CommonTestUtils.waitUntil;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link FlussAdmin}. */
@@ -872,12 +873,8 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .property(ConfigOptions.TABLE_LOG_TTL.key(), "1h")
                         .property(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(), "2h")
                         .build();
-        // should throw exception
-        assertThatThrownBy(() -> admin.createTable(tablePath, t4, false).get())
-                .cause()
-                .isInstanceOf(InvalidConfigException.class)
-                .hasMessage(
-                        "'table.log.segment.active-roll-time' must be less than or equal to 'table.log.ttl'.");
+        assertThatCode(() -> admin.createTable(tablePath, t4, false).get())
+                .doesNotThrowAnyException();
 
         TableDescriptor t5 =
                 TableDescriptor.builder()

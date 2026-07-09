@@ -474,15 +474,6 @@ public class TableDescriptorValidation {
                             "'%s' must be greater than 0.",
                             ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key()));
         }
-
-        long logTtlMs = tableConf.get(ConfigOptions.TABLE_LOG_TTL).toMillis();
-        if (logTtlMs > 0 && activeRollTimeMs > logTtlMs) {
-            throw new InvalidConfigException(
-                    String.format(
-                            "'%s' must be less than or equal to '%s'.",
-                            ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(),
-                            ConfigOptions.TABLE_LOG_TTL.key()));
-        }
     }
 
     private static void checkPartition(
