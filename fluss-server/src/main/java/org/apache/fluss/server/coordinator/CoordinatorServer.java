@@ -242,16 +242,6 @@ public class CoordinatorServer extends ServerBase {
             this.remoteDirDynamicLoader = new RemoteDirDynamicLoader(conf);
 
             this.dynamicConfigManager = new DynamicConfigManager(zkClient, conf, true);
-
-            // Register server reconfigurable components
-            dynamicConfigManager.register(lakeCatalogDynamicLoader);
-            dynamicConfigManager.register(remoteDirDynamicLoader);
-
-            // Register stateless validators for coordinator-side upfront validation
-            dynamicConfigManager.registerValidator(new DiskWriteLimitRatioValidator());
-
-            dynamicConfigManager.startup();
-
             this.metadataCache = new CoordinatorMetadataCache();
 
             this.authorizer = AuthorizerLoader.createAuthorizer(conf, zkClient, pluginManager);
@@ -305,6 +295,14 @@ public class CoordinatorServer extends ServerBase {
                             serverMetricGroup,
                             RequestsMetrics.createCoordinatorServerRequestMetrics(
                                     serverMetricGroup));
+            // Register server reconfigurable components
+            dynamicConfigManager.register(lakeCatalogDynamicLoader);
+            dynamicConfigManager.register(remoteDirDynamicLoader);
+            // Register stateless validators for coordinator-side upfront validation
+            dynamicConfigManager.registerValidator(new DiskWriteLimitRatioValidator());
+            rpcServer.getServerReconfigurables().forEach(dynamicConfigManager::register);
+            dynamicConfigManager.startup();
+
             rpcServer.start();
 
             registerCoordinatorServer();
