@@ -385,10 +385,23 @@ public class ConfigOptions {
                     .doubleType()
                     .defaultValue(0.85)
                     .withDescription(
-                            "Reject writes when the tablet server data disk usage exceeds this ratio. "
-                                    + "Writes resume after the usage drops below (ratio - 0.10). "
+                            "Reject writes when the tablet server data disk usage reaches this ratio. "
+                                    + "Writes resume when the usage reaches or drops below "
+                                    + "server.data-disk.write-recover-ratio. "
                                     + "Set to 1.0 to disable the disk-usage protection entirely. "
-                                    + "The valid range is (0.1, 1.0].");
+                                    + "The valid range is "
+                                    + "(server.data-disk.write-recover-ratio, 1.0]. When lowering "
+                                    + "both ratios dynamically, update them in the same request or "
+                                    + "lower server.data-disk.write-recover-ratio first.");
+
+    public static final ConfigOption<Double> SERVER_DATA_DISK_WRITE_RECOVER_RATIO =
+            key("server.data-disk.write-recover-ratio")
+                    .doubleType()
+                    .defaultValue(0.80)
+                    .withDescription(
+                            "Resume writes when the tablet server data disk usage reaches or "
+                                    + "drops below this ratio. The valid range is "
+                                    + "(0.0, server.data-disk.write-limit-ratio).");
 
     public static final ConfigOption<Duration> SERVER_DATA_DISK_CHECK_INTERVAL =
             key("server.data-disk.check-interval")

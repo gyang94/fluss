@@ -28,6 +28,7 @@ import org.apache.fluss.server.coordinator.LakeCatalogDynamicLoader;
 import org.apache.fluss.server.coordinator.remote.RemoteDirDynamicLoader;
 import org.apache.fluss.server.coordinator.remote.RoundRobinRemoteDirSelector;
 import org.apache.fluss.server.coordinator.remote.WeightedRoundRobinRemoteDirSelector;
+import org.apache.fluss.server.storage.DiskWriteLimitConfigValidator;
 import org.apache.fluss.server.storage.LocalDiskManager;
 import org.apache.fluss.server.zk.NOPErrorHandler;
 import org.apache.fluss.server.zk.ZooKeeperClient;
@@ -58,9 +59,7 @@ import static org.apache.fluss.metadata.DataLakeFormat.PAIMON;
 import static org.apache.fluss.record.TestData.DEFAULT_REMOTE_DATA_DIR;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.assertj.core.api.Assertions.within;
 
 /** Test for {@link DynamicConfigManager}. */
 public class DynamicConfigChangeTest {
@@ -207,15 +206,10 @@ public class DynamicConfigChangeTest {
 
             // Setting `datalake.paimon.*` without setting `datalake.format` should pass because
             // prefix validation is skipped.
-            assertThatCode(
-                            () ->
-                                    dynamicConfigManager.alterConfigs(
-                                            Collections.singletonList(
-                                                    new AlterConfig(
-                                                            "datalake.iceberg.type",
-                                                            "rest",
-                                                            AlterConfigOpType.SET))))
-                    .doesNotThrowAnyException();
+            dynamicConfigManager.alterConfigs(
+                    Collections.singletonList(
+                            new AlterConfig(
+                                    "datalake.iceberg.type", "rest", AlterConfigOpType.SET)));
 
             assertThat(lakeCatalogDynamicLoader.getLakeCatalogContainer().getDataLakeFormat())
                     .isNull();
@@ -351,17 +345,12 @@ public class DynamicConfigChangeTest {
         dynamicConfigManager.startup();
 
         // Adjust rate limiter value - should succeed
-        assertThatCode(
-                        () ->
-                                dynamicConfigManager.alterConfigs(
-                                        Collections.singletonList(
-                                                new AlterConfig(
-                                                        ConfigOptions
-                                                                .KV_SHARED_RATE_LIMITER_BYTES_PER_SEC
-                                                                .key(),
-                                                        "200MB",
-                                                        AlterConfigOpType.SET))))
-                .doesNotThrowAnyException();
+        dynamicConfigManager.alterConfigs(
+                Collections.singletonList(
+                        new AlterConfig(
+                                ConfigOptions.KV_SHARED_RATE_LIMITER_BYTES_PER_SEC.key(),
+                                "200MB",
+                                AlterConfigOpType.SET)));
 
         // Verify config was persisted to ZK
         Map<String, String> zkConfig = zookeeperClient.fetchEntityConfig();
@@ -448,15 +437,12 @@ public class DynamicConfigChangeTest {
         dynamicConfigManager.startup();
 
         // Change snapshot interval to 5 minutes - should succeed
-        assertThatCode(
-                        () ->
-                                dynamicConfigManager.alterConfigs(
-                                        Collections.singletonList(
-                                                new AlterConfig(
-                                                        ConfigOptions.KV_SNAPSHOT_INTERVAL.key(),
-                                                        "5min",
-                                                        AlterConfigOpType.SET))))
-                .doesNotThrowAnyException();
+        dynamicConfigManager.alterConfigs(
+                Collections.singletonList(
+                        new AlterConfig(
+                                ConfigOptions.KV_SNAPSHOT_INTERVAL.key(),
+                                "5min",
+                                AlterConfigOpType.SET)));
 
         // Verify config was persisted to ZK
         Map<String, String> zkConfig = zookeeperClient.fetchEntityConfig();
@@ -569,17 +555,12 @@ public class DynamicConfigChangeTest {
         dynamicConfigManager.startup();
 
         // Change min-in-sync-replicas to 2 - should succeed
-        assertThatCode(
-                        () ->
-                                dynamicConfigManager.alterConfigs(
-                                        Collections.singletonList(
-                                                new AlterConfig(
-                                                        ConfigOptions
-                                                                .LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER
-                                                                .key(),
-                                                        "2",
-                                                        AlterConfigOpType.SET))))
-                .doesNotThrowAnyException();
+        dynamicConfigManager.alterConfigs(
+                Collections.singletonList(
+                        new AlterConfig(
+                                ConfigOptions.LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER.key(),
+                                "2",
+                                AlterConfigOpType.SET)));
 
         // Verify config was persisted to ZK
         Map<String, String> zkConfig = zookeeperClient.fetchEntityConfig();
@@ -614,7 +595,50 @@ public class DynamicConfigChangeTest {
     }
 
     @Test
-    void testDynamicDiskWriteLimitRatioChange(@TempDir File tempDir) throws Exception {
+    void testCoordinatorValidatesDiskWriteLimitConfigAgainstDefaults() throws Exception {
+        DynamicConfigManager dynamicConfigManager = createDiskWriteLimitDynamicConfigManager();
+
+        alterDiskWriteRecoverRatio(dynamicConfigManager, "0.70");
+
+        assertThatThrownBy(() -> alterDiskWriteRecoverRatio(dynamicConfigManager, "0.0"))
+                .isInstanceOf(ConfigException.class);
+
+        assertThatThrownBy(() -> alterDiskWriteLimitRatio(dynamicConfigManager, "0.70"))
+                .isInstanceOf(ConfigException.class);
+
+        alterDiskWriteLimitRatio(dynamicConfigManager, "1.0");
+
+        assertThatThrownBy(() -> alterDiskWriteLimitRatio(dynamicConfigManager, "1.1"))
+                .isInstanceOf(ConfigException.class);
+
+        assertThat(zookeeperClient.fetchEntityConfig())
+                .containsEntry(ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO.key(), "1.0")
+                .containsEntry(ConfigOptions.SERVER_DATA_DISK_WRITE_RECOVER_RATIO.key(), "0.70");
+    }
+
+    @Test
+    void testCoordinatorValidatesRecoverRatioWhenLoweringDiskWriteLimitRatio() throws Exception {
+        DynamicConfigManager dynamicConfigManager = createDiskWriteLimitDynamicConfigManager();
+
+        assertThatThrownBy(() -> alterDiskWriteLimitRatio(dynamicConfigManager, "0.70"))
+                .isInstanceOf(ConfigException.class);
+
+        assertThat(zookeeperClient.fetchEntityConfig())
+                .doesNotContainKey(ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO.key());
+
+        alterDiskWriteRecoverRatio(dynamicConfigManager, "0.60");
+        alterDiskWriteLimitRatio(dynamicConfigManager, "0.70");
+
+        assertThatThrownBy(() -> alterDiskWriteRecoverRatio(dynamicConfigManager, "0.70"))
+                .isInstanceOf(ConfigException.class);
+
+        assertThat(zookeeperClient.fetchEntityConfig())
+                .containsEntry(ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO.key(), "0.70")
+                .containsEntry(ConfigOptions.SERVER_DATA_DISK_WRITE_RECOVER_RATIO.key(), "0.60");
+    }
+
+    @Test
+    void testDynamicDiskWriteLimitConfigChange(@TempDir File tempDir) throws Exception {
         File dataDir = new File(tempDir, "data-0");
         assertThat(dataDir.mkdirs()).isTrue();
 
@@ -633,70 +657,89 @@ public class DynamicConfigChangeTest {
 
             // Verify initial state
             assertThat(localDiskManager.getDiskWriteLimitRatio()).isEqualTo(0.85);
+            assertThat(localDiskManager.getDiskWriteRecoverRatio()).isEqualTo(0.80);
             assertThat(localDiskManager.getDiskUsageMonitor().getWriteLimitRatio()).isEqualTo(0.85);
-            assertThat(localDiskManager.getDiskUsageMonitor().getRecoverThreshold())
-                    .isEqualTo(0.75);
+            assertThat(localDiskManager.getDiskUsageMonitor().getWriteRecoverRatio())
+                    .isEqualTo(0.80);
 
-            // Lower the limit to 0.70 via dynamic config
-            assertThatCode(
-                            () ->
-                                    dynamicConfigManager.alterConfigs(
-                                            Collections.singletonList(
-                                                    new AlterConfig(
-                                                            ConfigOptions
-                                                                    .SERVER_DATA_DISK_WRITE_LIMIT_RATIO
-                                                                    .key(),
-                                                            "0.70",
-                                                            AlterConfigOpType.SET))))
-                    .doesNotThrowAnyException();
+            // Lower the recover ratio before lowering the limit.
+            alterDiskWriteRecoverRatio(dynamicConfigManager, "0.60");
+            alterDiskWriteLimitRatio(dynamicConfigManager, "0.70");
 
-            // Verify the new ratio took effect immediately (reconfigure triggers runOnce)
+            // Verify both ratios took effect immediately (reconfigure triggers runOnce).
             assertThat(localDiskManager.getDiskWriteLimitRatio()).isEqualTo(0.70);
+            assertThat(localDiskManager.getDiskWriteRecoverRatio()).isEqualTo(0.60);
             assertThat(localDiskManager.getDiskUsageMonitor().getWriteLimitRatio()).isEqualTo(0.70);
-            assertThat(localDiskManager.getDiskUsageMonitor().getRecoverThreshold())
-                    .isCloseTo(0.60, within(1e-9));
+            assertThat(localDiskManager.getDiskUsageMonitor().getWriteRecoverRatio())
+                    .isEqualTo(0.60);
+
+            alterDiskWriteRecoverRatio(dynamicConfigManager, "0.65");
+
+            assertThat(localDiskManager.getDiskWriteLimitRatio()).isEqualTo(0.70);
+            assertThat(localDiskManager.getDiskWriteRecoverRatio()).isEqualTo(0.65);
+            assertThat(localDiskManager.getDiskUsageMonitor().getWriteLimitRatio()).isEqualTo(0.70);
+            assertThat(localDiskManager.getDiskUsageMonitor().getWriteRecoverRatio())
+                    .isEqualTo(0.65);
 
             // Verify config was persisted to ZK
             Map<String, String> zkConfig = zookeeperClient.fetchEntityConfig();
             assertThat(zkConfig.get(ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO.key()))
                     .isEqualTo("0.70");
+            assertThat(zkConfig.get(ConfigOptions.SERVER_DATA_DISK_WRITE_RECOVER_RATIO.key()))
+                    .isEqualTo("0.65");
+
+            assertThatThrownBy(() -> alterDiskWriteLimitRatio(dynamicConfigManager, "0.0"))
+                    .isInstanceOf(ConfigException.class);
+
+            assertThatThrownBy(() -> alterDiskWriteRecoverRatio(dynamicConfigManager, "0.0"))
+                    .isInstanceOf(ConfigException.class);
+
+            assertThatThrownBy(() -> alterDiskWriteRecoverRatio(dynamicConfigManager, "0.70"))
+                    .isInstanceOf(ConfigException.class);
+
+            Configuration invalidReconfigure = new Configuration(configuration);
+            invalidReconfigure.set(ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO, 0.65);
+            invalidReconfigure.set(ConfigOptions.SERVER_DATA_DISK_WRITE_RECOVER_RATIO, 0.65);
+            assertThatThrownBy(() -> localDiskManager.reconfigure(invalidReconfigure))
+                    .isInstanceOf(ConfigException.class);
+
+            assertThat(localDiskManager.getDiskWriteLimitRatio()).isEqualTo(0.70);
+            assertThat(localDiskManager.getDiskWriteRecoverRatio()).isEqualTo(0.65);
+            assertThat(localDiskManager.getDiskUsageMonitor().getWriteLimitRatio()).isEqualTo(0.70);
+            assertThat(localDiskManager.getDiskUsageMonitor().getWriteRecoverRatio())
+                    .isEqualTo(0.65);
         }
     }
 
-    @Test
-    void testPreventInvalidDiskWriteLimitRatio(@TempDir File tempDir) throws Exception {
-        File dataDir = new File(tempDir, "data-0");
-        assertThat(dataDir.mkdirs()).isTrue();
-
-        Configuration configuration = new Configuration();
-        configuration.setInt(ConfigOptions.TABLET_SERVER_ID, 0);
-        configuration.setString(ConfigOptions.DATA_DIR, dataDir.getAbsolutePath());
-        configuration.set(ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO, 0.85);
-
+    private static DynamicConfigManager createDiskWriteLimitDynamicConfigManager()
+            throws Exception {
         DynamicConfigManager dynamicConfigManager =
-                new DynamicConfigManager(zookeeperClient, configuration, true);
+                new DynamicConfigManager(zookeeperClient, new Configuration(), true);
+        dynamicConfigManager.register(new DiskWriteLimitConfigValidator());
+        dynamicConfigManager.startup();
+        return dynamicConfigManager;
+    }
 
-        try (LocalDiskManager localDiskManager = LocalDiskManager.create(configuration)) {
-            dynamicConfigManager.register(localDiskManager);
-            dynamicConfigManager.startup();
+    private static void alterDiskWriteLimitRatio(
+            DynamicConfigManager dynamicConfigManager, String value) throws Exception {
+        alterConfig(
+                dynamicConfigManager,
+                ConfigOptions.SERVER_DATA_DISK_WRITE_LIMIT_RATIO.key(),
+                value);
+    }
 
-            // Try to set to invalid value 0.0 - should be rejected
-            assertThatThrownBy(
-                            () ->
-                                    dynamicConfigManager.alterConfigs(
-                                            Collections.singletonList(
-                                                    new AlterConfig(
-                                                            ConfigOptions
-                                                                    .SERVER_DATA_DISK_WRITE_LIMIT_RATIO
-                                                                    .key(),
-                                                            "0.0",
-                                                            AlterConfigOpType.SET))))
-                    .isInstanceOf(ConfigException.class)
-                    .hasMessageContaining("must be within (0.1, 1.0]");
+    private static void alterDiskWriteRecoverRatio(
+            DynamicConfigManager dynamicConfigManager, String value) throws Exception {
+        alterConfig(
+                dynamicConfigManager,
+                ConfigOptions.SERVER_DATA_DISK_WRITE_RECOVER_RATIO.key(),
+                value);
+    }
 
-            // Verify the ratio was NOT changed
-            assertThat(localDiskManager.getDiskWriteLimitRatio()).isEqualTo(0.85);
-        }
+    private static void alterConfig(
+            DynamicConfigManager dynamicConfigManager, String key, String value) throws Exception {
+        dynamicConfigManager.alterConfigs(
+                Collections.singletonList(new AlterConfig(key, value, AlterConfigOpType.SET)));
     }
 
     @Test
