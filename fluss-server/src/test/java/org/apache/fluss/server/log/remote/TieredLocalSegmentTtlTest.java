@@ -44,7 +44,7 @@ final class TieredLocalSegmentTtlTest extends RemoteLogTestBase {
                 DATA1_SCHEMA,
                 DATA1_TABLE_ID,
                 Collections.emptyList(),
-                Collections.singletonMap(ConfigOptions.TABLE_LOG_TTL.key(), "50ms"));
+                Collections.singletonMap(ConfigOptions.TABLE_LOG_TTL.key(), "1h"));
     }
 
     @ParameterizedTest
@@ -59,15 +59,21 @@ final class TieredLocalSegmentTtlTest extends RemoteLogTestBase {
 
         addMultiSegmentsToLogTablet(logTablet, 5);
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
 
         // The configured number of local segments is retained before their TTL expires.
         assertThat(logTablet.getSegments()).hasSize(2);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(30L);
+        assertThat(remoteLog.allRemoteLogSegments()).hasSize(4);
 
-        manualClock.advanceTime(Duration.ofMillis(200));
-        logTablet.deleteSegmentsAlreadyExistsInRemote();
+        manualClock.advanceTime(Duration.ofHours(2));
+        // Trigger a TTL-only retention pass without appending or uploading another segment.
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
 
         // The inactive segment is expired and deleted, while the active segment is retained.
+        assertThat(remoteLog.allRemoteLogSegments()).isEmpty();
         assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
         assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(40L);
     }
 }
