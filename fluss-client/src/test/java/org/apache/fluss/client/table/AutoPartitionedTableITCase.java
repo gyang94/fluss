@@ -538,7 +538,7 @@ class AutoPartitionedTableITCase extends ClientToServerITCaseBase {
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT,
                                 AutoPartitionTimeUnit.DAY)
-                        .property(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT, "yyyy-MM-dd")
+                        .property(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy-MM-dd")
                         .build();
         createTable(tablePath, partitionTableDescriptor, false);
         return schema;

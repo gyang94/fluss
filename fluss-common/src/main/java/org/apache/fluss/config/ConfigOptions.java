@@ -1589,17 +1589,21 @@ public class ConfigOptions {
                                     + "If the value is `QUARTER`, the partition format for "
                                     + "auto created is yyyyQ. "
                                     + "If the value is `YEAR`, the partition format for "
-                                    + "auto created is yyyy.");
+                                    + "auto created is yyyy. The default format can be overridden "
+                                    + "by `table.auto-partition.time-format`.");
 
-    public static final ConfigOption<String> TABLE_AUTO_PARTITION_DAY_FORMAT =
-            key("table.auto-partition.day-format")
+    public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIME_FORMAT =
+            key("table.auto-partition.time-format")
                     .stringType()
-                    .defaultValue("yyyyMMdd")
+                    .noDefaultValue()
                     .withDescription(
-                            "The format for DAY auto created partitions. "
-                                    + "Supported values are `yyyyMMdd` and `yyyy-MM-dd`. "
-                                    + "This option can only be set when `table.auto-partition.enabled` is `true` "
-                                    + "and `table.auto-partition.time-unit` is `DAY`.");
+                            "The DateTimeFormatter pattern for auto-created partitions. "
+                                    + "By default, the format is determined by `table.auto-partition.time-unit`: "
+                                    + "`yyyy` for YEAR, `yyyyQ` for QUARTER, `yyyyMM` for MONTH, "
+                                    + "`yyyyMMdd` for DAY, and `yyyyMMddHH` for HOUR. "
+                                    + "A custom format must list time fields from the largest to the smallest unit, "
+                                    + "include every field required by the configured time unit, and use fixed-width numeric fields. "
+                                    + "For example, `yyyy-MM-dd` is valid for DAY, while `MM-yyyy`, `yyyy-MM`, and `yyyy-M-dd` are invalid.");
 
     public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIMEZONE =
             key("table.auto-partition.time-zone")

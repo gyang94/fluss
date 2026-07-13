@@ -212,14 +212,22 @@ public class PartitionUtils {
         String autoPartitionFieldSpec;
         switch (timeUnit) {
             case YEAR:
-                autoPartitionFieldSpec = getFormattedTime(current.plusYears(offset), YEAR_FORMAT);
+                autoPartitionFieldSpec =
+                        getFormattedTime(
+                                current.plusYears(offset),
+                                getPartitionTimeFormat(timeUnit, autoPartitionStrategy));
                 break;
             case QUARTER:
                 autoPartitionFieldSpec =
-                        getFormattedTime(current.plusMonths(offset * 3L), QUARTER_FORMAT);
+                        getFormattedTime(
+                                current.plusMonths(offset * 3L),
+                                getPartitionTimeFormat(timeUnit, autoPartitionStrategy));
                 break;
             case MONTH:
-                autoPartitionFieldSpec = getFormattedTime(current.plusMonths(offset), MONTH_FORMAT);
+                autoPartitionFieldSpec =
+                        getFormattedTime(
+                                current.plusMonths(offset),
+                                getPartitionTimeFormat(timeUnit, autoPartitionStrategy));
                 break;
             case DAY:
                 autoPartitionFieldSpec =
@@ -228,7 +236,10 @@ public class PartitionUtils {
                                 getPartitionTimeFormat(timeUnit, autoPartitionStrategy));
                 break;
             case HOUR:
-                autoPartitionFieldSpec = getFormattedTime(current.plusHours(offset), HOUR_FORMAT);
+                autoPartitionFieldSpec =
+                        getFormattedTime(
+                                current.plusHours(offset),
+                                getPartitionTimeFormat(timeUnit, autoPartitionStrategy));
                 break;
             default:
                 throw new IllegalArgumentException("Unsupported time unit: " + timeUnit);
@@ -236,9 +247,156 @@ public class PartitionUtils {
         return autoPartitionFieldSpec;
     }
 
+    /**
+     * Validates that a custom time format preserves time order under string comparison.
+     *
+     * @param timeUnit the auto-partition time unit
+     * @param autoPartitionStrategy the auto-partition strategy containing the custom format
+     * @throws IllegalArgumentException if the pattern is invalid or does not preserve time order
+     */
+    public static void validateTimeFormat(
+            AutoPartitionTimeUnit timeUnit, AutoPartitionStrategy autoPartitionStrategy) {
+        String timeFormat = autoPartitionStrategy.timeFormat();
+        if (timeFormat == null) {
+            return;
+        }
+        try {
+            DateTimeFormatter.ofPattern(timeFormat);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                    String.format("Invalid date-time format pattern '%s'.", timeFormat), e);
+        }
+        validateTimeFields(timeFormat, timeUnit);
+    }
+
+    private static void validateTimeFields(String timeFormat, AutoPartitionTimeUnit timeUnit) {
+        List<TimeFormatField> expectedFields = getExpectedTimeFormatFields(timeUnit);
+        List<TimeFormatField> actualFields = new ArrayList<>();
+        boolean inLiteral = false;
+        for (int index = 0; index < timeFormat.length(); ) {
+            char patternChar = timeFormat.charAt(index);
+            if (patternChar == '\'') {
+                if (index + 1 < timeFormat.length() && timeFormat.charAt(index + 1) == '\'') {
+                    index += 2;
+                } else {
+                    inLiteral = !inLiteral;
+                    index++;
+                }
+                continue;
+            }
+            if (inLiteral || !isAsciiLetter(patternChar)) {
+                index++;
+                continue;
+            }
+
+            int end = index + 1;
+            while (end < timeFormat.length() && timeFormat.charAt(end) == patternChar) {
+                end++;
+            }
+            TimeFormatField field = TimeFormatField.fromPattern(patternChar);
+            if (field == null) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Time format '%s' contains unsupported time field '%s'.",
+                                timeFormat, patternChar));
+            }
+            field.validateWidth(timeFormat, end - index);
+            actualFields.add(field);
+            index = end;
+        }
+
+        if (!actualFields.equals(expectedFields)) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "Time format '%s' must contain fields %s in this order for time unit '%s', but found %s.",
+                            timeFormat, expectedFields, timeUnit, actualFields));
+        }
+    }
+
+    private static boolean isAsciiLetter(char character) {
+        return (character >= 'A' && character <= 'Z') || (character >= 'a' && character <= 'z');
+    }
+
+    private static List<TimeFormatField> getExpectedTimeFormatFields(
+            AutoPartitionTimeUnit timeUnit) {
+        switch (timeUnit) {
+            case YEAR:
+                return Arrays.asList(TimeFormatField.YEAR);
+            case QUARTER:
+                return Arrays.asList(TimeFormatField.YEAR, TimeFormatField.QUARTER);
+            case MONTH:
+                return Arrays.asList(TimeFormatField.YEAR, TimeFormatField.MONTH);
+            case DAY:
+                return Arrays.asList(
+                        TimeFormatField.YEAR, TimeFormatField.MONTH, TimeFormatField.DAY);
+            case HOUR:
+                return Arrays.asList(
+                        TimeFormatField.YEAR,
+                        TimeFormatField.MONTH,
+                        TimeFormatField.DAY,
+                        TimeFormatField.HOUR);
+            default:
+                throw new IllegalArgumentException("Unsupported time unit: " + timeUnit);
+        }
+    }
+
+    private enum TimeFormatField {
+        YEAR("year", 4),
+        QUARTER("quarter", 1),
+        MONTH("month", 2),
+        DAY("day", 2),
+        HOUR("hour", 2);
+
+        private final String name;
+        private final int width;
+
+        TimeFormatField(String name, int width) {
+            this.name = name;
+            this.width = width;
+        }
+
+        private static TimeFormatField fromPattern(char patternChar) {
+            switch (patternChar) {
+                case 'y':
+                case 'u':
+                    return YEAR;
+                case 'Q':
+                case 'q':
+                    return QUARTER;
+                case 'M':
+                case 'L':
+                    return MONTH;
+                case 'd':
+                    return DAY;
+                case 'H':
+                    return HOUR;
+                default:
+                    return null;
+            }
+        }
+
+        private void validateWidth(String timeFormat, int actualWidth) {
+            if (actualWidth != width) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Time field '%s' in format '%s' must have fixed width %d, but found %d.",
+                                name, timeFormat, width, actualWidth));
+            }
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
     /** Returns the time string format pattern for the given time unit. */
     private static String getPartitionTimeFormat(
             AutoPartitionTimeUnit timeUnit, AutoPartitionStrategy autoPartitionStrategy) {
+        String timeFormat = autoPartitionStrategy.timeFormat();
+        if (timeFormat != null) {
+            return timeFormat;
+        }
         switch (timeUnit) {
             case YEAR:
                 return YEAR_FORMAT;
@@ -247,7 +405,7 @@ public class PartitionUtils {
             case MONTH:
                 return MONTH_FORMAT;
             case DAY:
-                return autoPartitionStrategy.dayFormat().pattern();
+                return DAY_FORMAT;
             case HOUR:
                 return HOUR_FORMAT;
             default:

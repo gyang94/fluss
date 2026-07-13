@@ -1080,7 +1080,7 @@ class AutoPartitionManagerTest {
             int partitionPreCreateNum,
             AutoPartitionTimeUnit timeUnit,
             boolean multiplePartitionKeys,
-            String dayFormat)
+            String timeFormat)
             throws Exception {
         long tableId = 1;
         TablePath tablePath =
@@ -1118,11 +1118,12 @@ class AutoPartitionManagerTest {
                                 ConfigOptions.TABLE_AUTO_PARTITION_NUM_RETENTION,
                                 partitionRetentionNum)
                         .properties(
-                                dayFormat == null
+                                timeFormat == null
                                         ? Collections.emptyMap()
                                         : Collections.singletonMap(
-                                                ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key(),
-                                                dayFormat))
+                                                ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT
+                                                        .key(),
+                                                timeFormat))
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_NUM_PRECREATE,
                                 multiplePartitionKeys ? 0 : partitionPreCreateNum)

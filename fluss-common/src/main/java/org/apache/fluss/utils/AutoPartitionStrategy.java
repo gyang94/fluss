@@ -17,7 +17,6 @@
 
 package org.apache.fluss.utils;
 
-import org.apache.fluss.config.AutoPartitionDayFormat;
 import org.apache.fluss.config.AutoPartitionTimeUnit;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
@@ -32,7 +31,7 @@ public class AutoPartitionStrategy {
     private final boolean autoPartitionEnabled;
     private final String key;
     private final AutoPartitionTimeUnit timeUnit;
-    private final AutoPartitionDayFormat dayFormat;
+    private final String timeFormat;
     private final int numPreCreate;
     private final int numToRetain;
     private final TimeZone timeZone;
@@ -41,14 +40,14 @@ public class AutoPartitionStrategy {
             boolean autoPartitionEnabled,
             String key,
             AutoPartitionTimeUnit autoPartitionTimeUnit,
-            AutoPartitionDayFormat dayFormat,
+            String timeFormat,
             int numPreCreate,
             int numToRetain,
             TimeZone timeZone) {
         this.autoPartitionEnabled = autoPartitionEnabled;
         this.key = key;
         this.timeUnit = autoPartitionTimeUnit;
-        this.dayFormat = dayFormat;
+        this.timeFormat = timeFormat;
         this.numPreCreate = numPreCreate;
         this.numToRetain = numToRetain;
         this.timeZone = timeZone;
@@ -63,8 +62,7 @@ public class AutoPartitionStrategy {
                 conf.getBoolean(ConfigOptions.TABLE_AUTO_PARTITION_ENABLED),
                 conf.getString(ConfigOptions.TABLE_AUTO_PARTITION_KEY),
                 conf.get(ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT),
-                AutoPartitionDayFormat.fromPattern(
-                        conf.getString(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT)),
+                conf.getOptional(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT).orElse(null),
                 conf.getInt(ConfigOptions.TABLE_AUTO_PARTITION_NUM_PRECREATE),
                 conf.getInt(ConfigOptions.TABLE_AUTO_PARTITION_NUM_RETENTION),
                 TimeZone.getTimeZone(conf.getString(ConfigOptions.TABLE_AUTO_PARTITION_TIMEZONE)));
@@ -82,8 +80,8 @@ public class AutoPartitionStrategy {
         return timeUnit;
     }
 
-    public AutoPartitionDayFormat dayFormat() {
-        return dayFormat;
+    public String timeFormat() {
+        return timeFormat;
     }
 
     public int numPreCreate() {
@@ -108,8 +106,9 @@ public class AutoPartitionStrategy {
                 + '\''
                 + ", timeUnit="
                 + timeUnit
-                + ", dayFormat="
-                + dayFormat
+                + ", timeFormat='"
+                + timeFormat
+                + '\''
                 + ", numPreCreate="
                 + numPreCreate
                 + ", numToRetain="
@@ -133,7 +132,7 @@ public class AutoPartitionStrategy {
                 && numToRetain == that.numToRetain
                 && Objects.equals(key, that.key)
                 && timeUnit == that.timeUnit
-                && dayFormat == that.dayFormat
+                && Objects.equals(timeFormat, that.timeFormat)
                 && Objects.equals(timeZone, that.timeZone);
     }
 
@@ -143,7 +142,7 @@ public class AutoPartitionStrategy {
                 autoPartitionEnabled,
                 key,
                 timeUnit,
-                dayFormat,
+                timeFormat,
                 numPreCreate,
                 numToRetain,
                 timeZone);

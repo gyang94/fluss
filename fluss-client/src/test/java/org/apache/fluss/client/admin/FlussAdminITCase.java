@@ -1456,7 +1456,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
     }
 
     @Test
-    void testInvalidDayFormatOptionForAutoPartitionedTable() throws Exception {
+    void testTimeFormatOptionForAutoPartitionedTable() throws Exception {
         String dbName = DEFAULT_TABLE_PATH.getDatabaseName();
 
         TableDescriptor nonDayTable =
@@ -1472,7 +1472,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT,
                                 AutoPartitionTimeUnit.MONTH)
-                        .property(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT, "yyyy-MM-dd")
+                        .property(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "MM-yyyy")
                         .build();
         assertThatThrownBy(
                         () ->
@@ -1485,8 +1485,9 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                         .get())
                 .cause()
                 .isInstanceOf(InvalidTableException.class)
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key())
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key());
+                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key())
+                .hasMessageContaining("must contain fields [year, month] in this order")
+                .hasMessageContaining("MONTH");
 
         TableDescriptor disabledAutoPartitionTable =
                 TableDescriptor.builder()
@@ -1497,7 +1498,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                         .build())
                         .distributedBy(3, "id")
                         .partitionedBy("pt")
-                        .property(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT, "yyyy-MM-dd")
+                        .property(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy-MM-dd")
                         .build();
         assertThatThrownBy(
                         () ->
@@ -1510,7 +1511,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                         .get())
                 .cause()
                 .isInstanceOf(InvalidTableException.class)
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key())
+                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key())
                 .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_ENABLED.key());
 
         TableDescriptor datePartitionKeyWithCompactDayFormat =
@@ -1538,7 +1539,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                         .get())
                 .cause()
                 .isInstanceOf(InvalidTableException.class)
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key())
+                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key())
                 .hasMessageContaining("yyyy-MM-dd")
                 .hasMessageContaining("DATE");
 
@@ -1555,7 +1556,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .property(
                                 ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT,
                                 AutoPartitionTimeUnit.DAY)
-                        .property(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT, "yyyy-MM-dd")
+                        .property(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy-MM-dd")
                         .build();
         TablePath tablePath = TablePath.of(dbName, "test_invalid_auto_partition_day_format_alter");
         admin.createTable(tablePath, validDashedDayFormatTable, false).get();
@@ -1567,14 +1568,14 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                                 Collections.singletonList(
                                                         TableChange.set(
                                                                 ConfigOptions
-                                                                        .TABLE_AUTO_PARTITION_DAY_FORMAT
+                                                                        .TABLE_AUTO_PARTITION_TIME_FORMAT
                                                                         .key(),
                                                                 "yyyyMMdd")),
                                                 false)
                                         .get())
                 .cause()
                 .isInstanceOf(InvalidAlterTableException.class)
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key());
+                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key());
 
         TableDescriptor disabledDateDayTable =
                 TableDescriptor.builder()
@@ -1607,7 +1608,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                         .get())
                 .cause()
                 .isInstanceOf(InvalidTableException.class)
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_DAY_FORMAT.key())
+                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key())
                 .hasMessageContaining("yyyy-MM-dd")
                 .hasMessageContaining("DATE");
     }
