@@ -225,74 +225,6 @@ public class RemoteLogITCase {
     }
 
     @Test
-    void testActiveSegmentRollTimeWithAlterTable() throws Exception {
-        TablePath tablePath = TablePath.of("fluss", "test_active_segment_roll_time_with_alter");
-        TableDescriptor tableDescriptor =
-                TableDescriptor.builder()
-                        .schema(DATA1_SCHEMA)
-                        .distributedBy(1)
-                        .property(ConfigOptions.TABLE_LOG_TTL, Duration.ofDays(7))
-                        .build();
-
-        long tableId = createTable(FLUSS_CLUSTER_EXTENSION, tablePath, tableDescriptor);
-        TableBucket tb = new TableBucket(tableId, 0);
-        FLUSS_CLUSTER_EXTENSION.waitUntilAllReplicaReady(tb);
-
-        int leaderId = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tb);
-        TabletServerGateway leaderGateway =
-                FLUSS_CLUSTER_EXTENSION.newTabletServerClientForNode(leaderId);
-        assertProduceLogResponse(
-                leaderGateway
-                        .produceLog(
-                                newProduceLogRequest(
-                                        tb.getTableId(), 0, 1, genMemoryLogRecordsByObject(DATA1)))
-                        .get(),
-                0,
-                0L);
-
-        TabletServer tabletServer = FLUSS_CLUSTER_EXTENSION.getTabletServerById(leaderId);
-        RemoteLogManager remoteLogManager = tabletServer.getReplicaManager().getRemoteLogManager();
-        RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
-        Replica leaderReplica = FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tb);
-        LogTablet logTablet = leaderReplica.getLogTablet();
-
-        assertThat(remoteLogTablet.allRemoteLogSegments()).isEmpty();
-        assertThat(logTablet.activeLogSegment().getSizeInBytes()).isGreaterThan(0);
-        assertThat(logTablet.getActiveSegmentRollTimeMs()).isEqualTo(Duration.ofDays(7).toMillis());
-
-        MANUAL_CLOCK.advanceTime(Duration.ofHours(2));
-        retry(
-                Duration.ofSeconds(5),
-                () -> assertThat(remoteLogTablet.allRemoteLogSegments()).isEmpty());
-
-        CoordinatorGateway coordinatorGateway = FLUSS_CLUSTER_EXTENSION.newCoordinatorClient();
-        coordinatorGateway
-                .alterTable(
-                        newAlterTableRequest(
-                                tablePath,
-                                Collections.singletonMap(
-                                        ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(),
-                                        "1h"),
-                                Collections.emptyList(),
-                                Collections.emptyList(),
-                                false))
-                .get();
-
-        retry(
-                Duration.ofMinutes(1),
-                () ->
-                        assertThat(logTablet.getActiveSegmentRollTimeMs())
-                                .isEqualTo(Duration.ofHours(1).toMillis()));
-        retry(
-                Duration.ofMinutes(2),
-                () -> {
-                    assertThat(remoteLogTablet.allRemoteLogSegments()).hasSize(1);
-                    assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(10L);
-                    assertThat(logTablet.activeLogSegment().getSizeInBytes()).isZero();
-                });
-    }
-
-    @Test
     void testRemoteLogTTLWithDynamicLakeToggle() throws Exception {
         TablePath tablePath = TablePath.of("fluss", "test_remote_log_ttl_dynamic_lake");
         // ==================== Stage A: Lake Disabled (Initial) ====================
@@ -383,31 +315,31 @@ public class RemoteLogITCase {
         long partialLakeOffset = sortedSegments.get(midIndex).remoteLogEndOffset();
         logTablet.updateLakeLogEndOffset(partialLakeOffset);
 
+        final int expectedRemainingSegments = sortedSegments.size() - midIndex - 1;
+        // The new remoteLogStartOffset should be the start offset of the first remaining segment
+        final long expectedNewStartOffset = sortedSegments.get(midIndex + 1).remoteLogStartOffset();
+
         // Wait for partial cleanup - only segments that have been tiered should be deleted
         retry(
                 Duration.ofMinutes(2),
                 () -> {
                     // Some segments should be deleted (those with endOffset <= partialLakeOffset)
                     int currentSegmentCount = remoteLogTablet.allRemoteLogSegments().size();
-                    assertThat(currentSegmentCount)
-                            .isGreaterThan(0)
-                            .isLessThan(sortedSegments.size());
+                    assertThat(currentSegmentCount).isEqualTo(expectedRemainingSegments);
+                    // Remote log start offset should be updated to the first remaining segment's
+                    // start
+                    assertThat(remoteLogTablet.getRemoteLogStartOffset())
+                            .isEqualTo(expectedNewStartOffset);
                     // Remaining segments should have remoteLogEndOffset > partialLakeOffset
                     assertThat(remoteLogTablet.allRemoteLogSegments())
                             .allSatisfy(
                                     segment ->
                                             assertThat(segment.remoteLogEndOffset())
                                                     .isGreaterThan(partialLakeOffset));
-                    assertThat(remoteLogTablet.getRemoteLogStartOffset())
-                            .isEqualTo(
-                                    remoteLogTablet.allRemoteLogSegments().stream()
-                                            .mapToLong(RemoteLogSegment::remoteLogStartOffset)
-                                            .min()
-                                            .orElseThrow(IllegalStateException::new));
                 });
 
         // Step 2: Fully update lake log end offset to trigger complete cleanup
-        logTablet.updateLakeLogEndOffset(remoteLogTablet.getRemoteLogEndOffset().orElse(-1L));
+        logTablet.updateLakeLogEndOffset(stageBRemoteLogEndOffset);
 
         // Wait for complete cleanup - all segments should be deleted
         retry(

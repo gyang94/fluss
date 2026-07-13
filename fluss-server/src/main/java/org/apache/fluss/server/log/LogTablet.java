@@ -109,7 +109,6 @@ public final class LogTablet {
     private final Clock clock;
     private final boolean isChangeLog;
     private final long logTtlMs;
-    private volatile long activeSegmentRollTimeMs;
 
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
@@ -149,7 +148,6 @@ public final class LogTablet {
             LogFormat logFormat,
             int tieredLogLocalSegments,
             long logTtlMs,
-            long activeSegmentRollTimeMs,
             boolean isChangelog,
             Clock clock) {
         this.dataDir = dataDir;
@@ -162,7 +160,6 @@ public final class LogTablet {
         this.writerStateManager = writerStateManager;
         this.highWatermarkMetadata = new LogOffsetMetadata(0L);
         this.logTtlMs = logTtlMs;
-        this.activeSegmentRollTimeMs = activeSegmentRollTimeMs;
 
         this.scheduler = scheduler;
         // scheduler the writer expiration interval check.
@@ -351,7 +348,6 @@ public final class LogTablet {
             LogFormat logFormat,
             int tieredLogLocalSegments,
             long logTtlMs,
-            long activeSegmentRollTimeMs,
             boolean isChangelog,
             Clock clock,
             boolean isCleanShutdown)
@@ -401,7 +397,6 @@ public final class LogTablet {
                 logFormat,
                 tieredLogLocalSegments,
                 logTtlMs,
-                activeSegmentRollTimeMs,
                 isChangelog,
                 clock);
     }
@@ -433,7 +428,6 @@ public final class LogTablet {
                 logFormat,
                 tieredLogLocalSegments,
                 tableConfig.getLogTTLMs(),
-                tableConfig.getEffectiveActiveSegmentRollTimeMs(),
                 isChangelog,
                 clock,
                 isCleanShutdown);
@@ -631,15 +625,11 @@ public final class LogTablet {
     }
 
     public void updateRemoteLogEndOffset(long remoteLogEndOffset) {
-        updateRemoteLogEndOffset(remoteLogEndOffset, clock.milliseconds());
-    }
-
-    public void updateRemoteLogEndOffset(long remoteLogEndOffset, long currentTimeMs) {
         if (remoteLogEndOffset > this.remoteLogEndOffset) {
             this.remoteLogEndOffset = remoteLogEndOffset;
 
             // try to delete these segments already exist in remote storage.
-            deleteSegmentsAlreadyExistsInRemote(currentTimeMs);
+            deleteSegmentsAlreadyExistsInRemote();
         }
     }
 
@@ -662,14 +652,6 @@ public final class LogTablet {
 
     public int getTieredLogLocalSegments() {
         return tieredLogLocalSegments;
-    }
-
-    public void updateActiveSegmentRollTimeMs(long activeSegmentRollTimeMs) {
-        this.activeSegmentRollTimeMs = activeSegmentRollTimeMs;
-    }
-
-    public long getActiveSegmentRollTimeMs() {
-        return activeSegmentRollTimeMs;
     }
 
     public void updateLakeTableSnapshotId(long snapshotId) {
@@ -754,11 +736,7 @@ public final class LogTablet {
     }
 
     public void deleteSegmentsAlreadyExistsInRemote() {
-        deleteSegmentsAlreadyExistsInRemote(clock.milliseconds());
-    }
-
-    public void deleteSegmentsAlreadyExistsInRemote(long currentTimeMs) {
-        deleteSegments(remoteLogEndOffset, currentTimeMs);
+        deleteSegments(remoteLogEndOffset);
     }
 
     /**
@@ -775,7 +753,7 @@ public final class LogTablet {
                 highWatermark);
     }
 
-    private void deleteSegments(long cleanUpToOffset, long currentTimeMs) {
+    private void deleteSegments(long cleanUpToOffset) {
         // cache to local variables
         long localLogStartOffset = localLog.getLocalLogStartOffset();
         if (cleanUpToOffset < localLogStartOffset) {
@@ -801,8 +779,7 @@ public final class LogTablet {
         try {
             // shouldn't clean up segments that will be used by kv recovery.
             long cleanupToOffset = Math.min(minRetainOffset, cleanUpToOffset);
-            deleteOldSegments(
-                    cleanupToOffset, SegmentDeletionReason.LOG_MOVE_TO_REMOTE, currentTimeMs);
+            deleteOldSegments(cleanupToOffset, SegmentDeletionReason.LOG_MOVE_TO_REMOTE);
         } catch (IOException e) {
             LOG.error(
                     "Failed to delete the local log segments to cleanUpToOffset {} for table-bucket {}.",
@@ -1073,38 +1050,6 @@ public final class LogTablet {
         }
     }
 
-    /**
-     * Rolls the active segment if it is non-empty and all of its records have passed the configured
-     * segment rolling interval.
-     *
-     * <p>This keeps an empty active segment available for future appends while making the expired
-     * segment eligible for remote tiering and local cleanup.
-     */
-    public void rollActiveSegmentIfExpired() throws Exception {
-        rollActiveSegmentIfExpired(clock.milliseconds());
-    }
-
-    public void rollActiveSegmentIfExpired(long currentTimeMs) throws Exception {
-        if (activeSegmentRollTimeMs <= 0L) {
-            return;
-        }
-
-        synchronized (lock) {
-            LogSegment activeSegment = localLog.getSegments().activeSegment();
-            if (activeSegment.getSizeInBytes() == 0
-                    || !isSegmentExpired(
-                            currentTimeMs, activeSegment, activeSegmentRollTimeMs)) {
-                return;
-            }
-
-            LOG.info(
-                    "Rolling expired active log segment {} for bucket {}.",
-                    activeSegment,
-                    getTableBucket());
-            roll(Optional.empty());
-        }
-    }
-
     /** Truncate this log so that it ends with the greatest offset < targetOffset. */
     boolean truncateTo(long targetOffset) throws LogStorageException {
         if (targetOffset < 0) {
@@ -1353,13 +1298,8 @@ public final class LogTablet {
 
     private void deleteOldSegments(long endOffset, SegmentDeletionReason reason)
             throws IOException {
-        deleteOldSegments(endOffset, reason, clock.milliseconds());
-    }
-
-    private void deleteOldSegments(long endOffset, SegmentDeletionReason reason, long currentTimeMs)
-            throws IOException {
         synchronized (lock) {
-            List<LogSegment> deletableSegments = deletableSegments(endOffset, currentTimeMs);
+            List<LogSegment> deletableSegments = deletableSegments(endOffset);
             if (!deletableSegments.isEmpty()) {
                 deleteSegments(deletableSegments, reason);
             }
@@ -1367,8 +1307,7 @@ public final class LogTablet {
     }
 
     /** Returns the segments that can be deleted by checking log end offset. */
-    private List<LogSegment> deletableSegments(long endOffset, long currentTimeMs)
-            throws IOException {
+    private List<LogSegment> deletableSegments(long endOffset) throws IOException {
         if (localLog.getSegments().isEmpty()) {
             return Collections.emptyList();
         }
@@ -1378,13 +1317,14 @@ public final class LogTablet {
         List<LogSegment> deletableSegments = new ArrayList<>();
         List<LogSegment> logSegments = localLog.getSegments().values();
         int tierProtectedStartIndex = logSegments.size() - tieredLogLocalSegments;
+        long now = clock.milliseconds();
 
         for (int i = 0; i < logSegments.size() - 1; i++) {
             if (logSegments.get(i + 1).getBaseOffset() > endOffset) {
                 break;
             }
             if (i < tierProtectedStartIndex
-                    || isSegmentExpired(currentTimeMs, logSegments.get(i), logTtlMs)) {
+                    || isSegmentExpired(now, logSegments.get(i), logTtlMs)) {
                 deletableSegments.add(logSegments.get(i));
             }
         }

@@ -44,7 +44,6 @@ import org.apache.flink.table.expressions.utils.ResolvedExpressionMock;
 import org.apache.flink.table.refresh.RefreshHandler;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -56,7 +55,6 @@ import static org.apache.flink.table.api.DataTypes.VARBINARY;
 import static org.apache.flink.table.api.DataTypes.VARCHAR;
 import static org.apache.fluss.flink.FlinkConnectorOptions.BUCKET_KEY;
 import static org.apache.fluss.flink.FlinkConnectorOptions.BUCKET_NUMBER;
-import static org.apache.fluss.flink.FlinkConnectorOptions.TABLE_OPTIONS;
 import static org.apache.fluss.flink.utils.CatalogTableTestUtils.addOptions;
 import static org.apache.fluss.flink.utils.CatalogTableTestUtils.checkEqualsIgnoreSchema;
 import static org.apache.fluss.record.TestData.DEFAULT_REMOTE_DATA_DIR;
@@ -384,37 +382,6 @@ public class FlinkConversionsTest {
                                 .defaultValue("64 mb")
                                 .withDescription(
                                         ConfigOptions.CLIENT_WRITER_BUFFER_MEMORY_SIZE
-                                                .description()));
-    }
-
-    @Test
-    void testOptionConversionForDurationWithoutDefaultValue() {
-        org.apache.fluss.config.ConfigOption<Duration> noDefaultDurationOption =
-                org.apache.fluss.config.ConfigBuilder.key("test.duration")
-                        .durationType()
-                        .noDefaultValue()
-                        .withDescription("test duration");
-
-        ConfigOption<?> flinkOption = FlinkConversions.toFlinkOption(noDefaultDurationOption);
-
-        assertThat(flinkOption)
-                .isEqualTo(
-                        org.apache.flink.configuration.ConfigOptions.key("test.duration")
-                                .stringType()
-                                .noDefaultValue()
-                                .withDescription("test duration"));
-    }
-
-    @Test
-    void testTableOptionsContainsDurationOptionWithoutDefaultValue() {
-        assertThat(TABLE_OPTIONS)
-                .contains(
-                        org.apache.flink.configuration.ConfigOptions.key(
-                                        ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key())
-                                .stringType()
-                                .noDefaultValue()
-                                .withDescription(
-                                        ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME
                                                 .description()));
     }
 

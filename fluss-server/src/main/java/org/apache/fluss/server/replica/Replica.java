@@ -683,21 +683,6 @@ public final class Replica {
                 tieredLogLocalSegments);
     }
 
-    public void updateActiveSegmentRollTimeMs(long activeSegmentRollTimeMs) {
-        long oldValue = logTablet.getActiveSegmentRollTimeMs();
-        if (oldValue == activeSegmentRollTimeMs) {
-            return;
-        }
-
-        logTablet.updateActiveSegmentRollTimeMs(activeSegmentRollTimeMs);
-
-        LOG.info(
-                "Replica for {} activeSegmentRollTimeMs changed from {} to {}",
-                tableBucket,
-                oldValue,
-                activeSegmentRollTimeMs);
-    }
-
     private void createKv() {
         try {
             // create a closeable registry for the closable related to kv
@@ -2178,7 +2163,6 @@ public final class Replica {
                         tableConfig.getLogFormat(),
                         tableConfig.getTieredLogLocalSegments(),
                         tableConfig.getLogTTLMs(),
-                        tableConfig.getEffectiveActiveSegmentRollTimeMs(),
                         isKvTable());
         // update high watermark.
         Optional<Long> watermarkOpt = lazyHighWatermarkCheckpoint.fetch(tableBucket);

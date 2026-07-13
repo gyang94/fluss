@@ -282,8 +282,6 @@ public final class LogManager extends TabletManagerBase {
      * @param logFormat the log format
      * @param tieredLogLocalSegments the number of segments to retain in local for tiered log
      * @param logTtlMs the log TTL in milliseconds from table configuration
-     * @param activeSegmentRollTimeMs the active segment roll time in milliseconds from table
-     *     configuration
      * @param isChangelog whether the log is a changelog of primary key table
      */
     public LogTablet getOrCreateLog(
@@ -293,7 +291,6 @@ public final class LogManager extends TabletManagerBase {
             LogFormat logFormat,
             int tieredLogLocalSegments,
             long logTtlMs,
-            long activeSegmentRollTimeMs,
             boolean isChangelog)
             throws Exception {
         return inLock(
@@ -317,7 +314,6 @@ public final class LogManager extends TabletManagerBase {
                                     logFormat,
                                     tieredLogLocalSegments,
                                     logTtlMs,
-                                    activeSegmentRollTimeMs,
                                     isChangelog,
                                     clock,
                                     true);
@@ -349,7 +345,6 @@ public final class LogManager extends TabletManagerBase {
                 logFormat,
                 tieredLogLocalSegments,
                 tableConfig.getLogTTLMs(),
-                tableConfig.getEffectiveActiveSegmentRollTimeMs(),
                 isChangelog);
     }
 
@@ -464,7 +459,6 @@ public final class LogManager extends TabletManagerBase {
                         tableInfo.getTableConfig().getLogFormat(),
                         tableInfo.getTableConfig().getTieredLogLocalSegments(),
                         tableInfo.getTableConfig().getLogTTLMs(),
-                        tableInfo.getTableConfig().getEffectiveActiveSegmentRollTimeMs(),
                         tableInfo.hasPrimaryKey(),
                         clock,
                         isCleanShutdown);

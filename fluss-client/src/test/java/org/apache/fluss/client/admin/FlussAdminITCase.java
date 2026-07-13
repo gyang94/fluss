@@ -125,7 +125,6 @@ import static org.apache.fluss.testutils.DataTestUtils.row;
 import static org.apache.fluss.testutils.InternalRowAssert.assertThatRow;
 import static org.apache.fluss.testutils.common.CommonTestUtils.waitUntil;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link FlussAdmin}. */
@@ -858,51 +857,29 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                 TableDescriptor.builder()
                         .schema(DEFAULT_SCHEMA)
                         .comment("test table")
-                        .property(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(), "0s")
+                        .property(ConfigOptions.TABLE_TIERED_LOG_LOCAL_SEGMENTS.key(), "0")
                         .build();
         // should throw exception
         assertThatThrownBy(() -> admin.createTable(tablePath, t3, false).get())
                 .cause()
                 .isInstanceOf(InvalidConfigException.class)
-                .hasMessage("'table.log.segment.active-roll-time' must be greater than 0.");
-
-        TableDescriptor t4 =
-                TableDescriptor.builder()
-                        .schema(DEFAULT_SCHEMA)
-                        .comment("test table")
-                        .property(ConfigOptions.TABLE_LOG_TTL.key(), "1h")
-                        .property(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME.key(), "2h")
-                        .build();
-        assertThatCode(() -> admin.createTable(tablePath, t4, false).get())
-                .doesNotThrowAnyException();
-
-        TableDescriptor t5 =
-                TableDescriptor.builder()
-                        .schema(DEFAULT_SCHEMA)
-                        .comment("test table")
-                        .property(ConfigOptions.TABLE_TIERED_LOG_LOCAL_SEGMENTS.key(), "0")
-                        .build();
-        // should throw exception
-        assertThatThrownBy(() -> admin.createTable(tablePath, t5, false).get())
-                .cause()
-                .isInstanceOf(InvalidConfigException.class)
                 .hasMessage("'table.log.tiered.local-segments' must be greater than 0.");
 
-        TableDescriptor t6 =
+        TableDescriptor t4 =
                 TableDescriptor.builder()
                         .schema(DEFAULT_SCHEMA) // no pk
                         .comment("test table")
                         .property(ConfigOptions.TABLE_MERGE_ENGINE.key(), "versioned")
                         .build();
         // should throw exception
-        assertThatThrownBy(() -> admin.createTable(tablePath, t6, false).get())
+        assertThatThrownBy(() -> admin.createTable(tablePath, t4, false).get())
                 .cause()
                 .isInstanceOf(InvalidConfigException.class)
                 .hasMessage(
                         "'%s' must be set for versioned merge engine.",
                         ConfigOptions.TABLE_MERGE_ENGINE_VERSION_COLUMN.key());
 
-        TableDescriptor t7 =
+        TableDescriptor t5 =
                 TableDescriptor.builder()
                         .schema(DEFAULT_SCHEMA) // no pk
                         .comment("test table")
@@ -912,13 +889,13 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                                 "non-existed")
                         .build();
         // should throw exception
-        assertThatThrownBy(() -> admin.createTable(tablePath, t7, false).get())
+        assertThatThrownBy(() -> admin.createTable(tablePath, t5, false).get())
                 .cause()
                 .isInstanceOf(InvalidConfigException.class)
                 .hasMessage(
                         "The version column 'non-existed' for versioned merge engine doesn't exist in schema.");
 
-        TableDescriptor t8 =
+        TableDescriptor t6 =
                 TableDescriptor.builder()
                         .schema(DEFAULT_SCHEMA) // no pk
                         .comment("test table")
@@ -926,14 +903,14 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .property(ConfigOptions.TABLE_MERGE_ENGINE_VERSION_COLUMN.key(), "name")
                         .build();
         // should throw exception
-        assertThatThrownBy(() -> admin.createTable(tablePath, t8, false).get())
+        assertThatThrownBy(() -> admin.createTable(tablePath, t6, false).get())
                 .cause()
                 .isInstanceOf(InvalidConfigException.class)
                 .hasMessage(
                         "The version column 'name' for versioned merge engine must be one type of "
                                 + "[INT, BIGINT, TIMESTAMP, TIMESTAMP_LTZ], but got STRING.");
 
-        TableDescriptor t9 =
+        TableDescriptor t7 =
                 TableDescriptor.builder()
                         .schema(
                                 Schema.newBuilder()
@@ -944,7 +921,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .kvFormat(KvFormat.COMPACTED)
                         .logFormat(LogFormat.INDEXED)
                         .build();
-        assertThatThrownBy(() -> admin.createTable(tablePath, t9, false).get())
+        assertThatThrownBy(() -> admin.createTable(tablePath, t7, false).get())
                 .cause()
                 .isInstanceOf(InvalidConfigException.class)
                 .hasMessageContaining(

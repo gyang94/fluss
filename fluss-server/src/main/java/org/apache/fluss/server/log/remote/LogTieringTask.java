@@ -93,7 +93,7 @@ public class LogTieringTask implements Runnable {
         try {
             // Try to copy these candidate copy log segments to remote storage and try to clean
             // up these expired remote log segments from remote.
-            runOnce(clock.milliseconds());
+            runOnce();
         } catch (InterruptedException ex) {
             if (!isCancelled()) {
                 LOG.warn(
@@ -117,7 +117,7 @@ public class LogTieringTask implements Runnable {
         }
     }
 
-    private void runOnce(long currentTimeMs) throws InterruptedException {
+    private void runOnce() throws InterruptedException {
         if (isCancelled()) {
             LOG.info("Returning from LogTieringTask runOnes as the task state is changed");
             return;
@@ -128,7 +128,6 @@ public class LogTieringTask implements Runnable {
             TableMetricGroup metricGroup = replica.tableMetrics();
             maybeUpdateCopiedOffset(logTablet);
 
-            logTablet.rollActiveSegmentIfExpired(currentTimeMs);
             // Get these candidate log segments to copy and these expired remote log segments to
             // clean up.
             List<EnrichedLogSegment> candidateToCopySegments =
@@ -136,7 +135,7 @@ public class LogTieringTask implements Runnable {
             // Only delete segments that have been tiered to lake to ensure data safety
             List<RemoteLogSegment> expiredRemoteLogSegments =
                     remoteLog.expiredRemoteLogSegments(
-                            currentTimeMs,
+                            clock.milliseconds(),
                             logTablet.isDataLakeEnabled() ? logTablet.getLakeLogEndOffset() : null);
 
             // 1. For these candidateToCopySegments, we will first copy segment files to
@@ -151,7 +150,7 @@ public class LogTieringTask implements Runnable {
             if (!copiedSegments.isEmpty() || !expiredRemoteLogSegments.isEmpty()) {
                 boolean success =
                         tryToCommitRemoteLogManifest(
-                                remoteLog, expiredRemoteLogSegments, copiedSegments, currentTimeMs);
+                                remoteLog, expiredRemoteLogSegments, copiedSegments);
 
                 if (success) {
                     if (!expiredRemoteLogSegments.isEmpty()) {
@@ -328,15 +327,6 @@ public class LogTieringTask implements Runnable {
             RemoteLogTablet remoteLogTablet,
             List<RemoteLogSegment> expiredSegments,
             List<RemoteLogSegment> newAddedSegments) {
-        return tryToCommitRemoteLogManifest(
-                remoteLogTablet, expiredSegments, newAddedSegments, clock.milliseconds());
-    }
-
-    public boolean tryToCommitRemoteLogManifest(
-            RemoteLogTablet remoteLogTablet,
-            List<RemoteLogSegment> expiredSegments,
-            List<RemoteLogSegment> newAddedSegments,
-            long currentTimeMs) {
 
         // 1. apply the build snapshot method.
         RemoteLogManifest newRemoteLogManifest =
@@ -393,7 +383,7 @@ public class LogTieringTask implements Runnable {
                     LogTablet logTablet = replica.getLogTablet();
                     logTablet.updateRemoteLogStartOffset(newRemoteLogStartOffset);
                     // make the local log cleaner clean log segments that are committed to remote.
-                    logTablet.updateRemoteLogEndOffset(newRemoteLogEndOffset, currentTimeMs);
+                    logTablet.updateRemoteLogEndOffset(newRemoteLogEndOffset);
                     logTablet.updateRemoteLogSize(newRemoteLogSize);
                     return true;
                 }

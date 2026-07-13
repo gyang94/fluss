@@ -350,15 +350,11 @@ public class FlinkConversions {
             option = builder.doubleType().defaultValue((Double) flussOption.defaultValue());
         } else if (clazz.equals(Duration.class)) {
             // use string type in Flink option instead to make convert back easier
-            if (flussOption.hasDefaultValue()) {
-                option =
-                        builder.stringType()
-                                .defaultValue(
-                                        TimeUtils.formatWithHighestUnit(
-                                                (Duration) flussOption.defaultValue()));
-            } else {
-                option = builder.stringType().noDefaultValue();
-            }
+            option =
+                    builder.stringType()
+                            .defaultValue(
+                                    TimeUtils.formatWithHighestUnit(
+                                            (Duration) flussOption.defaultValue()));
         } else if (clazz.equals(Password.class)) {
             String defaultValue = ((Password) flussOption.defaultValue()).value();
             option = builder.stringType().defaultValue(defaultValue);

@@ -90,18 +90,6 @@ public class TableConfig {
         return config.get(ConfigOptions.TABLE_LOG_TTL).toMillis();
     }
 
-    /** Gets the optional active segment roll time of the table. */
-    public Optional<Duration> getActiveSegmentRollTime() {
-        return config.getOptional(ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME);
-    }
-
-    /** Gets the effective active segment roll time of the table in milliseconds. */
-    public long getEffectiveActiveSegmentRollTimeMs() {
-        return getActiveSegmentRollTime()
-                .orElse(config.get(ConfigOptions.TABLE_LOG_TTL))
-                .toMillis();
-    }
-
     /** Gets the local segments to retain for tiered log of the table. */
     public int getTieredLogLocalSegments() {
         return config.get(ConfigOptions.TABLE_TIERED_LOG_LOCAL_SEGMENTS);

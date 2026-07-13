@@ -33,7 +33,6 @@ import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.SchemaGetter;
 import org.apache.fluss.metadata.TableBucket;
-import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.ChangeType;
@@ -100,7 +99,6 @@ import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -2170,63 +2168,6 @@ class ReplicaManagerTest extends ReplicaTestBase {
                 .hasMessageContaining(
                         "invalid coordinator epoch 1 in updateMetadataCache request, "
                                 + "The latest known coordinator epoch is 2");
-    }
-
-    @Test
-    void testUpdateActiveSegmentRollTimeFromMetadataCache() throws Exception {
-        TableBucket tb = new TableBucket(DATA1_TABLE_ID, 1);
-        makeLogTableAsLeader(tb.getBucket());
-        Replica replica = replicaManager.getReplicaOrException(tb);
-        assertThat(replica.getLogTablet().getActiveSegmentRollTimeMs())
-                .isEqualTo(Duration.ofDays(7).toMillis());
-
-        TableDescriptor updatedTableDescriptor =
-                TableDescriptor.builder()
-                        .schema(DATA1_SCHEMA)
-                        .distributedBy(3)
-                        .property(
-                                ConfigOptions.TABLE_LOG_SEGMENT_ACTIVE_ROLL_TIME,
-                                Duration.ofHours(1))
-                        .build();
-        TableInfo tableInfo =
-                TableInfo.of(
-                        DATA1_TABLE_PATH,
-                        DATA1_TABLE_ID,
-                        1,
-                        updatedTableDescriptor,
-                        DEFAULT_REMOTE_DATA_DIR,
-                        System.currentTimeMillis(),
-                        System.currentTimeMillis());
-        TableMetadata tableMetadata = new TableMetadata(tableInfo, Collections.emptyList());
-        Set<ServerInfo> tsServerInfoList =
-                new HashSet<>(
-                        Arrays.asList(
-                                new ServerInfo(
-                                        TABLET_SERVER_ID,
-                                        "rack1",
-                                        Endpoint.fromListenersString("CLIENT://localhost:90"),
-                                        ServerType.TABLET_SERVER),
-                                new ServerInfo(
-                                        2,
-                                        "rack2",
-                                        Endpoint.fromListenersString("CLIENT://localhost:91"),
-                                        ServerType.TABLET_SERVER),
-                                new ServerInfo(
-                                        3,
-                                        "rack3",
-                                        Endpoint.fromListenersString("CLIENT://localhost:92"),
-                                        ServerType.TABLET_SERVER)));
-
-        replicaManager.maybeUpdateMetadataCache(
-                0,
-                buildClusterMetadata(
-                        null,
-                        tsServerInfoList,
-                        Collections.singletonList(tableMetadata),
-                        Collections.emptyList()));
-
-        assertThat(replica.getLogTablet().getActiveSegmentRollTimeMs())
-                .isEqualTo(Duration.ofHours(1).toMillis());
     }
 
     @Test
