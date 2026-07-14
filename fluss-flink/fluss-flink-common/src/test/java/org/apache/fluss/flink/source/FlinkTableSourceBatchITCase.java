@@ -61,9 +61,12 @@ abstract class FlinkTableSourceBatchITCase extends FlinkTestBase {
     static final String CATALOG_NAME = "testcatalog";
     protected StreamTableEnvironment tEnv;
     private String databaseName;
+    private boolean databaseCreated;
 
     @BeforeEach
     void before() {
+        databaseName = null;
+        databaseCreated = false;
         StreamExecutionEnvironment execEnv = StreamExecutionEnvironment.getExecutionEnvironment();
         // create table environment
         tEnv = StreamTableEnvironment.create(execEnv, EnvironmentSettings.inBatchMode());
@@ -77,13 +80,18 @@ abstract class FlinkTableSourceBatchITCase extends FlinkTestBase {
         tEnv.getConfig().set(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 4);
         databaseName = "defaultdb_" + RandomUtils.nextInt();
         tEnv.executeSql("create database " + databaseName);
+        databaseCreated = true;
         tEnv.useDatabase(databaseName);
     }
 
     @AfterEach
     void after() {
+        if (tEnv == null || !databaseCreated) {
+            return;
+        }
         tEnv.useDatabase(BUILTIN_DATABASE);
         tEnv.executeSql(String.format("drop database %s cascade", databaseName));
+        databaseCreated = false;
     }
 
     @Test

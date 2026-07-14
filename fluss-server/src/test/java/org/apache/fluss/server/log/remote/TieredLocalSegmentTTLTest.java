@@ -34,7 +34,7 @@ import static org.apache.fluss.record.TestData.DATA1_TABLE_PATH;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests TTL-based cleanup of inactive local segments retained by tiered storage. */
-final class TieredLocalSegmentTtlTest extends RemoteLogTestBase {
+final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
 
     @BeforeEach
     public void setup() throws Exception {
