@@ -628,11 +628,6 @@ public final class LogTablet {
         if (remoteLogEndOffset > this.remoteLogEndOffset) {
             this.remoteLogEndOffset = remoteLogEndOffset;
         }
-
-        // Try to delete segments that have already existed in remote storage on every retention
-        // pass. A remote TTL cleanup may leave the manifest end offset unchanged or decrease it,
-        // but locally retained inactive segments may have expired in the meantime.
-        deleteSegmentsAlreadyExistsInRemote();
     }
 
     public void updateMinRetainOffset(long minRetainOffset) {

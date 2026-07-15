@@ -386,7 +386,7 @@ final class LogManagerTest extends LogTestBase {
     }
 
     @Test
-    void testPeriodicRecoveryPointCheckpoint() throws Exception {
+    void testPeriodicLogManagerTasks() throws Exception {
         logManager.shutdown();
         logManager = null;
         localDiskManager.close();
@@ -409,6 +409,12 @@ final class LogManagerTest extends LogTestBase {
         assertThat(checkpointTask.getDelayMs()).isEqualTo(60_000L);
         assertThat(checkpointTask.getPeriodMs()).isEqualTo(60_000L);
 
+        RecordingScheduledTask retentionTask =
+                scheduler.getTask("fluss-tiered-local-log-retention");
+        assertThat((Object) retentionTask).isNotNull();
+        assertThat(retentionTask.getDelayMs()).isEqualTo(300_000L);
+        assertThat(retentionTask.getPeriodMs()).isEqualTo(300_000L);
+
         initTableBuckets(null);
         LogTablet log1 = getOrCreateLog(tablePath1, null, tableBucket1);
         log1.appendAsLeader(genMemoryLogRecordsByObject(DATA1));
@@ -421,6 +427,11 @@ final class LogManagerTest extends LogTestBase {
                                 new File(tempDir, LogManager.RECOVERY_POINT_CHECKPOINT_FILE))
                         .read();
         assertThat(checkpoints).containsEntry(tableBucket1, log1.getRecoveryPoint());
+
+        logManager.shutdown();
+        logManager = null;
+        assertThat(checkpointTask.isCancelled()).isTrue();
+        assertThat(retentionTask.isCancelled()).isTrue();
     }
 
     @Test

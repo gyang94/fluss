@@ -855,7 +855,7 @@ final class ReplicaTest extends ReplicaTestBase {
                         ((AbstractMetricGroup) lakeTieringMetricGroup).getMetrics().get(metricName);
         return gauge.getValue();
     }
-    
+
     private void makeLogReplicaAsLeader(Replica replica) throws Exception {
         makeLeaderReplica(
                 replica,
