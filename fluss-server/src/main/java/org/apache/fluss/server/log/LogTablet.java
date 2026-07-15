@@ -618,9 +618,6 @@ public final class LogTablet {
         if (prev == Long.MAX_VALUE || remoteLogStartOffset > prev) {
             this.remoteLogStartOffset = remoteLogStartOffset;
         }
-
-        // try to delete these segments already exist in remote storage.
-        deleteSegmentsAlreadyExistsInRemote();
     }
 
     public void updateRemoteLogSize(long remoteLogSize) {
@@ -631,6 +628,9 @@ public final class LogTablet {
         if (remoteLogEndOffset > this.remoteLogEndOffset) {
             this.remoteLogEndOffset = remoteLogEndOffset;
         }
+
+        // try to delete these segments already exist in remote storage.
+        deleteSegmentsAlreadyExistsInRemote();
     }
 
     public void updateMinRetainOffset(long minRetainOffset) {
@@ -1326,6 +1326,8 @@ public final class LogTablet {
             if (i < tierProtectedStartIndex
                     || isSegmentExpired(now, logSegments.get(i), logTtlMs)) {
                 deletableSegments.add(logSegments.get(i));
+            } else {
+                break;
             }
         }
         return deletableSegments;
