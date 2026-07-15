@@ -618,6 +618,9 @@ public final class LogTablet {
         if (prev == Long.MAX_VALUE || remoteLogStartOffset > prev) {
             this.remoteLogStartOffset = remoteLogStartOffset;
         }
+
+        // try to delete these segments already exist in remote storage.
+        deleteSegmentsAlreadyExistsInRemote();
     }
 
     public void updateRemoteLogSize(long remoteLogSize) {
