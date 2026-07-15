@@ -292,6 +292,31 @@ class PartitionUtilsTest {
     }
 
     @Test
+    void testValidateConfiguredTimeFormatWhenAutoPartitionIsDisabled() {
+        Configuration conf = new Configuration();
+        conf.setString(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy-MM-dd");
+        AutoPartitionStrategy strategy = AutoPartitionStrategy.from(conf);
+
+        assertThatNoException()
+                .isThrownBy(
+                        () ->
+                                validateAutoPartitionTime(
+                                        new PartitionSpec(
+                                                Collections.singletonMap("dt", "2000-01-01")),
+                                        Collections.singletonList("dt"),
+                                        strategy));
+        assertThatThrownBy(
+                        () ->
+                                validateAutoPartitionTime(
+                                        new PartitionSpec(
+                                                Collections.singletonMap("dt", "20000101")),
+                                        Collections.singletonList("dt"),
+                                        strategy))
+                .isInstanceOf(InvalidPartitionException.class)
+                .hasMessageContaining("yyyy-MM-dd");
+    }
+
+    @Test
     void testValidateAutoPartitionTimeRetentionBoundaryWithConfiguredDayFormat() {
         Configuration dashedDayConf = new Configuration();
         dashedDayConf.setBoolean(ConfigOptions.TABLE_AUTO_PARTITION_ENABLED, true);

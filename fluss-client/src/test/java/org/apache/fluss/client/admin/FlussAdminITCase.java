@@ -1500,19 +1500,11 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         .partitionedBy("pt")
                         .property(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy-MM-dd")
                         .build();
-        assertThatThrownBy(
-                        () ->
-                                admin.createTable(
-                                                TablePath.of(
-                                                        dbName,
-                                                        "test_invalid_auto_partition_day_format_disabled"),
-                                                disabledAutoPartitionTable,
-                                                false)
-                                        .get())
-                .cause()
-                .isInstanceOf(InvalidTableException.class)
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key())
-                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_ENABLED.key());
+        admin.createTable(
+                        TablePath.of(dbName, "test_auto_partition_time_format_disabled"),
+                        disabledAutoPartitionTable,
+                        false)
+                .get();
 
         TableDescriptor datePartitionKeyWithCompactDayFormat =
                 TableDescriptor.builder()
@@ -1541,6 +1533,35 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                 .isInstanceOf(InvalidTableException.class)
                 .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key())
                 .hasMessageContaining("yyyy-MM-dd")
+                .hasMessageContaining("DATE");
+
+        TableDescriptor datePartitionKeyWithMonthUnit =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.STRING())
+                                        .column("pt", DataTypes.DATE())
+                                        .build())
+                        .distributedBy(3, "id")
+                        .partitionedBy("pt")
+                        .property(ConfigOptions.TABLE_AUTO_PARTITION_ENABLED, true)
+                        .property(
+                                ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT,
+                                AutoPartitionTimeUnit.MONTH)
+                        .build();
+        assertThatThrownBy(
+                        () ->
+                                admin.createTable(
+                                                TablePath.of(
+                                                        dbName,
+                                                        "test_invalid_auto_partition_month_unit_date_key"),
+                                                datePartitionKeyWithMonthUnit,
+                                                false)
+                                        .get())
+                .cause()
+                .isInstanceOf(InvalidTableException.class)
+                .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key())
+                .hasMessageContaining(AutoPartitionTimeUnit.DAY.name())
                 .hasMessageContaining("DATE");
 
         TableDescriptor validDashedDayFormatTable =
@@ -1576,6 +1597,25 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                 .cause()
                 .isInstanceOf(InvalidAlterTableException.class)
                 .hasMessageContaining(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key());
+
+        admin.alterTable(
+                        tablePath,
+                        Collections.singletonList(
+                                TableChange.set(
+                                        ConfigOptions.TABLE_AUTO_PARTITION_ENABLED.key(), "false")),
+                        false)
+                .get();
+        assertThatThrownBy(
+                        () ->
+                                admin.createPartition(
+                                                tablePath,
+                                                newPartitionSpec("pt", "20000101"),
+                                                false)
+                                        .get())
+                .cause()
+                .isInstanceOf(InvalidPartitionException.class)
+                .hasMessageContaining("yyyy-MM-dd");
+        admin.createPartition(tablePath, newPartitionSpec("pt", "2000-01-01"), false).get();
 
         TableDescriptor disabledDateDayTable =
                 TableDescriptor.builder()

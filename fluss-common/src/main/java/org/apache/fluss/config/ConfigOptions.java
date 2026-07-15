@@ -1603,7 +1603,8 @@ public class ConfigOptions {
                                     + "`yyyyMMdd` for DAY, and `yyyyMMddHH` for HOUR. "
                                     + "A custom format must list time fields from the largest to the smallest unit, "
                                     + "include every field required by the configured time unit, and use fixed-width numeric fields. "
-                                    + "For example, `yyyy-MM-dd` is valid for DAY, while `MM-yyyy`, `yyyy-MM`, and `yyyy-M-dd` are invalid.");
+                                    + "For example, `yyyy-MM-dd` is valid for DAY, while `MM-yyyy`, `yyyy-MM`, and `yyyy-M-dd` are invalid. "
+                                    + "The format is retained when auto partitioning is disabled and continues to validate manually created partitions.");
 
     public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIMEZONE =
             key("table.auto-partition.time-zone")

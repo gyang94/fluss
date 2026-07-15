@@ -116,15 +116,17 @@ public class PartitionUtils {
     }
 
     /**
-     * Validates that the partition time value in the given {@link PartitionSpec} is valid and not
-     * out-of-date when auto-partition is enabled. Throws {@link InvalidPartitionException} if the
-     * format doesn't match or the partition is older than the earliest retained one.
+     * Validates that the partition time value in the given {@link PartitionSpec} matches the
+     * configured time format. When auto-partition is enabled, this also validates that the
+     * partition is not out-of-date. Throws {@link InvalidPartitionException} if either validation
+     * fails.
      */
     public static void validateAutoPartitionTime(
             PartitionSpec partitionSpec,
             List<String> partitionKeys,
             AutoPartitionStrategy autoPartitionStrategy) {
-        if (!autoPartitionStrategy.isAutoPartitionEnabled()) {
+        if (!autoPartitionStrategy.isAutoPartitionEnabled()
+                && autoPartitionStrategy.timeFormat() == null) {
             return;
         }
         String autoPartitionKey =
@@ -142,6 +144,9 @@ public class PartitionUtils {
                             partitionTime,
                             getPartitionTimeFormat(timeUnit, autoPartitionStrategy),
                             timeUnit));
+        }
+        if (!autoPartitionStrategy.isAutoPartitionEnabled()) {
+            return;
         }
         ZonedDateTime currentZonedDateTime =
                 ZonedDateTime.ofInstant(Instant.now(), autoPartitionStrategy.timeZone().toZoneId());

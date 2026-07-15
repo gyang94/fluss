@@ -466,14 +466,6 @@ public class TableDescriptorValidation {
         boolean hasExplicitTimeFormat =
                 tableConf.contains(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT);
 
-        if (hasExplicitTimeFormat && !autoPartition.isAutoPartitionEnabled()) {
-            throw new InvalidTableException(
-                    String.format(
-                            "Table property '%s' can only be set when '%s' is enabled.",
-                            ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key(),
-                            ConfigOptions.TABLE_AUTO_PARTITION_ENABLED.key()));
-        }
-
         if (!isPartitioned && autoPartition.isAutoPartitionEnabled()) {
             throw new InvalidConfigException(
                     String.format(
@@ -493,6 +485,18 @@ public class TableDescriptorValidation {
                                     PARTITION_KEY_SUPPORTED_TYPES,
                                     partitionKey,
                                     partitionDataType));
+                }
+            }
+
+            if (hasExplicitTimeFormat) {
+                try {
+                    validateTimeFormat(autoPartition.timeUnit(), autoPartition);
+                } catch (IllegalArgumentException e) {
+                    throw new InvalidTableException(
+                            String.format(
+                                    "Invalid table property '%s': %s",
+                                    ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key(),
+                                    e.getMessage()));
                 }
             }
 
@@ -531,36 +535,40 @@ public class TableDescriptorValidation {
                                     ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key()));
                 }
 
-                if (hasExplicitTimeFormat) {
-                    try {
-                        validateTimeFormat(autoPartition.timeUnit(), autoPartition);
-                    } catch (IllegalArgumentException e) {
-                        throw new InvalidTableException(
-                                String.format(
-                                        "Invalid table property '%s': %s",
-                                        ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key(),
-                                        e.getMessage()));
-                    }
-                }
-
-                if (autoPartition.timeUnit() == AutoPartitionTimeUnit.DAY) {
-                    String autoPartitionKey =
-                            StringUtils.isNullOrWhitespaceOnly(autoPartition.key())
-                                    ? partitionKeys.get(0)
-                                    : autoPartition.key();
-                    DataType autoPartitionDataType =
-                            rowType.getTypeAt(rowType.getFieldIndex(autoPartitionKey));
-                    if (autoPartitionDataType.getTypeRoot() == DataTypeRoot.DATE
-                            && !"yyyy-MM-dd".equals(autoPartition.timeFormat())) {
-                        throw new InvalidTableException(
-                                String.format(
-                                        "Table property '%s' must be '%s' when auto partition key '%s' has DATE type.",
-                                        ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key(),
-                                        "yyyy-MM-dd",
-                                        autoPartitionKey));
-                    }
-                }
+                String autoPartitionKey =
+                        StringUtils.isNullOrWhitespaceOnly(autoPartition.key())
+                                ? partitionKeys.get(0)
+                                : autoPartition.key();
+                DataType autoPartitionDataType =
+                        rowType.getTypeAt(rowType.getFieldIndex(autoPartitionKey));
+                checkDateAutoPartitionCompatibility(
+                        autoPartition, autoPartitionKey, autoPartitionDataType);
             }
+        }
+    }
+
+    private static void checkDateAutoPartitionCompatibility(
+            AutoPartitionStrategy autoPartition,
+            String autoPartitionKey,
+            DataType autoPartitionDataType) {
+        if (autoPartitionDataType.getTypeRoot() != DataTypeRoot.DATE) {
+            return;
+        }
+        if (autoPartition.timeUnit() != AutoPartitionTimeUnit.DAY) {
+            throw new InvalidTableException(
+                    String.format(
+                            "Table property '%s' must be '%s' when auto partition key '%s' has DATE type.",
+                            ConfigOptions.TABLE_AUTO_PARTITION_TIME_UNIT.key(),
+                            AutoPartitionTimeUnit.DAY,
+                            autoPartitionKey));
+        }
+        if (!"yyyy-MM-dd".equals(autoPartition.timeFormat())) {
+            throw new InvalidTableException(
+                    String.format(
+                            "Table property '%s' must be '%s' when auto partition key '%s' has DATE type.",
+                            ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT.key(),
+                            "yyyy-MM-dd",
+                            autoPartitionKey));
         }
     }
 
