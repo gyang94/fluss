@@ -1604,6 +1604,9 @@ public class ConfigOptions {
                                     + "A custom format must list time fields from the largest to the smallest unit, "
                                     + "include every field required by the configured time unit, and use fixed-width numeric fields. "
                                     + "For example, `yyyy-MM-dd` is valid for DAY, while `MM-yyyy`, `yyyy-MM`, and `yyyy-M-dd` are invalid. "
+                                    + "The generated partition value must also satisfy Fluss partition-name restrictions: "
+                                    + "at most 200 ASCII alphanumeric, underscore, or hyphen characters, without the reserved `__` prefix. "
+                                    + "Optional pattern sections using `[` and `]` are not supported. "
                                     + "The format is retained when auto partitioning is disabled and continues to validate manually created partitions.");
 
     public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIMEZONE =

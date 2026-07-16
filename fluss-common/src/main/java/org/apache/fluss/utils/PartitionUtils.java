@@ -102,17 +102,19 @@ public class PartitionUtils {
     @VisibleForTesting
     static void validatePartitionValues(List<String> partitionValues, boolean isCreate) {
         for (String value : partitionValues) {
-            String invalidNameError = detectInvalidName(value);
-            if (invalidNameError != null || (isCreate && validatePrefix(value) != null)) {
+            String invalidReason = getInvalidPartitionValueReason(value, isCreate);
+            if (invalidReason != null) {
                 throw new InvalidPartitionException(
-                        "The partition value "
-                                + value
-                                + " is invalid: "
-                                + (invalidNameError != null
-                                        ? invalidNameError
-                                        : validatePrefix(value)));
+                        "The partition value " + value + " is invalid: " + invalidReason);
             }
         }
+    }
+
+    private static String getInvalidPartitionValueReason(String value, boolean isCreate) {
+        String invalidNameError = detectInvalidName(value);
+        return invalidNameError != null
+                ? invalidNameError
+                : isCreate ? validatePrefix(value) : null;
     }
 
     /**
@@ -272,6 +274,22 @@ public class PartitionUtils {
                     String.format("Invalid date-time format pattern '%s'.", timeFormat), e);
         }
         validateTimeFields(timeFormat, timeUnit);
+        validateTimeFormatPartitionValue(timeFormat, autoPartitionStrategy);
+    }
+
+    private static void validateTimeFormatPartitionValue(
+            String timeFormat, AutoPartitionStrategy autoPartitionStrategy) {
+        ZonedDateTime representativeTime =
+                ZonedDateTime.of(
+                        2024, 11, 11, 11, 0, 0, 0, autoPartitionStrategy.timeZone().toZoneId());
+        String partitionValue = getFormattedTime(representativeTime, timeFormat);
+        String invalidReason = getInvalidPartitionValueReason(partitionValue, true);
+        if (invalidReason != null) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "Time format '%s' generates invalid partition value '%s': %s.",
+                            timeFormat, partitionValue, invalidReason));
+        }
     }
 
     private static void validateTimeFields(String timeFormat, AutoPartitionTimeUnit timeUnit) {
@@ -288,6 +306,12 @@ public class PartitionUtils {
                     index++;
                 }
                 continue;
+            }
+            if (!inLiteral && (patternChar == '[' || patternChar == ']')) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Time format '%s' must not contain optional sections ('[' or ']').",
+                                timeFormat));
             }
             if (inLiteral || !isAsciiLetter(patternChar)) {
                 index++;

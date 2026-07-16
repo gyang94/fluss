@@ -81,8 +81,9 @@ The default format can be overridden with `table.auto-partition.time-format`. Cu
 - Time fields are ordered from the largest to the smallest unit.
 - Every field that affects the configured partition granularity is present.
 - Numeric fields use a fixed width: four digits for year, two for month, day, and hour, and one for quarter.
+- Optional pattern sections using `[` and `]` are not supported because every partition value must contain all required fields.
 
-For example, `yyyy-MM-dd` and `yyyy/MM/dd` are valid DAY formats. `MM-yyyy` has the wrong field order, `yyyy-MM` omits the day, and `yyyy-M-dd` uses a variable-width month, so they are rejected. Literal text can be quoted, as in `yyyy-'Q'Q` for QUARTER. When the auto-partition key has DATE type, the time unit must be DAY and the format must be `yyyy-MM-dd`.
+For example, `yyyy-MM-dd` is a valid DAY format. `MM-yyyy` has the wrong field order, `yyyy-MM` omits the day, and `yyyy-M-dd` uses a variable-width month, so they are rejected. The generated value must also be a valid Fluss partition value: no more than 200 ASCII alphanumeric, underscore, or hyphen characters, and without the reserved `__` prefix. Consequently, `yyyy/MM/dd` is invalid because `/` is not allowed. Literal text can be quoted, as in `yyyy-'Q'Q` for QUARTER. When the auto-partition key has DATE type, the time unit must be DAY and the format must be `yyyy-MM-dd`.
 
 The configured time format is retained when auto partitioning is disabled. It continues to validate partition names created manually, while retention checks are skipped.
 

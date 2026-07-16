@@ -153,6 +153,46 @@ class PartitionUtilsTest {
                                         AutoPartitionTimeUnit.DAY, variableWidthStrategy))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must have fixed width 2");
+
+        conf.setString(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy[-MM[-dd]]");
+        AutoPartitionStrategy optionalSectionsStrategy = AutoPartitionStrategy.from(conf);
+        assertThatThrownBy(
+                        () ->
+                                PartitionUtils.validateTimeFormat(
+                                        AutoPartitionTimeUnit.DAY, optionalSectionsStrategy))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not contain optional sections");
+
+        conf.setString(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "yyyy/MM/dd");
+        AutoPartitionStrategy invalidCharacterStrategy = AutoPartitionStrategy.from(conf);
+        assertThatThrownBy(
+                        () ->
+                                PartitionUtils.validateTimeFormat(
+                                        AutoPartitionTimeUnit.DAY, invalidCharacterStrategy))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("generates invalid partition value '2024/11/11'")
+                .hasMessageContaining("ASCII alphanumerics, '_' and '-'");
+
+        conf.setString(ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT, "__yyyy");
+        AutoPartitionStrategy reservedPrefixStrategy = AutoPartitionStrategy.from(conf);
+        assertThatThrownBy(
+                        () ->
+                                PartitionUtils.validateTimeFormat(
+                                        AutoPartitionTimeUnit.YEAR, reservedPrefixStrategy))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("generates invalid partition value '__2024'")
+                .hasMessageContaining("reserved");
+
+        conf.setString(
+                ConfigOptions.TABLE_AUTO_PARTITION_TIME_FORMAT,
+                "yyyy" + org.apache.commons.lang3.StringUtils.repeat("_", 197));
+        AutoPartitionStrategy overlongValueStrategy = AutoPartitionStrategy.from(conf);
+        assertThatThrownBy(
+                        () ->
+                                PartitionUtils.validateTimeFormat(
+                                        AutoPartitionTimeUnit.YEAR, overlongValueStrategy))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("longer than the max allowed length 200");
     }
 
     @Test
