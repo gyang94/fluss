@@ -1647,13 +1647,31 @@ public class ConfigOptions {
                                     + "If the value is `HOUR`, the partition format for "
                                     + "auto created is yyyyMMddHH. "
                                     + "If the value is `DAY`, the partition format for "
-                                    + "auto created is yyyyMMdd. "
+                                    + "auto created is yyyyMMdd by default. "
                                     + "If the value is `MONTH`, the partition format for "
                                     + "auto created is yyyyMM. "
                                     + "If the value is `QUARTER`, the partition format for "
                                     + "auto created is yyyyQ. "
                                     + "If the value is `YEAR`, the partition format for "
-                                    + "auto created is yyyy.");
+                                    + "auto created is yyyy. The default format can be overridden "
+                                    + "by `table.auto-partition.time-format`.");
+
+    public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIME_FORMAT =
+            key("table.auto-partition.time-format")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The DateTimeFormatter pattern for auto-created partitions. "
+                                    + "By default, the format is determined by `table.auto-partition.time-unit`: "
+                                    + "`yyyy` for YEAR, `yyyyQ` for QUARTER, `yyyyMM` for MONTH, "
+                                    + "`yyyyMMdd` for DAY, and `yyyyMMddHH` for HOUR. "
+                                    + "A custom format must list time fields from the largest to the smallest unit, "
+                                    + "include every field required by the configured time unit, and use fixed-width numeric fields. "
+                                    + "For example, `yyyy-MM-dd` is valid for DAY, while `MM-yyyy`, `yyyy-MM`, and `yyyy-M-dd` are invalid. "
+                                    + "The generated partition value must also satisfy Fluss partition-name restrictions: "
+                                    + "at most 200 ASCII alphanumeric, underscore, or hyphen characters, without the reserved `__` prefix. "
+                                    + "Optional pattern sections using `[` and `]` are not supported. "
+                                    + "The format is retained when auto partitioning is disabled and continues to validate manually created partitions.");
 
     public static final ConfigOption<String> TABLE_AUTO_PARTITION_TIMEZONE =
             key("table.auto-partition.time-zone")
