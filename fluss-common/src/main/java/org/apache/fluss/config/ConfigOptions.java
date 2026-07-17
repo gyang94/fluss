@@ -319,6 +319,18 @@ public class ConfigOptions {
                                     + "This default is capped to reduce the risk that an assignment znode exceeds "
                                     + "ZooKeeper's packet size limit.");
 
+    public static final ConfigOption<MemorySize> KV_LEADER_REPLICA_MEMORY_RESERVED =
+            key("kv.leader-replica.memory-reserved")
+                    .memoryType()
+                    .defaultValue(MemorySize.ZERO)
+                    .withDescription(
+                            "The estimated memory consumption of each KV leader replica, "
+                                    + "used by the CoordinatorServer to calculate the cluster-level "
+                                    + "KV leader replica capacity. This value does not reserve or "
+                                    + "enforce memory on the tablet server. The default value of 0 "
+                                    + "disables memory-based KV leader replica capacity control. "
+                                    + "Set a positive value to enable it.");
+
     /**
      * The network address and port the server binds to for accepting connections.
      *
@@ -589,6 +601,28 @@ public class ConfigOptions {
                     .withDescription(
                             "The rack for the tabletServer. This will be used in rack aware bucket assignment "
                                     + "for fault tolerance. Examples: `RACK1`, `cn-hangzhou-server10`");
+
+    public static final ConfigOption<Double> TABLET_SERVER_ADVERTISED_RESOURCE_CPU_CORES =
+            key("tablet-server.advertised-resource.cpu-cores")
+                    .doubleType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The CPU capacity, in cores, that this tablet server advertises to the "
+                                    + "CoordinatorServer for resource reporting. This option does not limit "
+                                    + "CPU usage or configure a cgroup CPU quota. If not configured, the tablet "
+                                    + "server detects the value from cgroup CPU quota or the JVM runtime.");
+
+    public static final ConfigOption<MemorySize> TABLET_SERVER_ADVERTISED_RESOURCE_MEMORY_SIZE =
+            key("tablet-server.advertised-resource.memory-size")
+                    .memoryType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "The memory capacity that this tablet server advertises to the CoordinatorServer "
+                                    + "for resource reporting and cluster-level KV leader replica capacity "
+                                    + "estimation. This option does not configure JVM heap size, reserve memory, "
+                                    + "or enforce a process or container memory limit. It represents total usable "
+                                    + "capacity, not current memory usage or free memory. If not configured, the "
+                                    + "tablet server detects the value from cgroup or operating system information.");
 
     public static final ConfigOption<String> DATA_DIR =
             key("data.dir")

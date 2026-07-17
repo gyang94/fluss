@@ -22,6 +22,7 @@ import org.apache.fluss.cluster.TabletServerInfo;
 import org.apache.fluss.config.AutoPartitionTimeUnit;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.InsufficientKvLeaderReplicaCapacityException;
 import org.apache.fluss.exception.PartitionAlreadyExistsException;
 import org.apache.fluss.exception.PartitionNotExistException;
 import org.apache.fluss.exception.TooManyBucketsException;
@@ -91,6 +92,7 @@ public class AutoPartitionManager implements AutoCloseable {
     private final ServerMetadataCache metadataCache;
     private final MetadataManager metadataManager;
     private final RemoteDirDynamicLoader remoteDirDynamicLoader;
+    private final ReplicaCapacityController replicaCapacityController;
     private final Clock clock;
 
     private final long periodicInterval;
@@ -115,12 +117,14 @@ public class AutoPartitionManager implements AutoCloseable {
             ServerMetadataCache metadataCache,
             MetadataManager metadataManager,
             RemoteDirDynamicLoader remoteDirDynamicLoader,
-            Configuration conf) {
+            Configuration conf,
+            ReplicaCapacityController replicaCapacityController) {
         this(
                 metadataCache,
                 metadataManager,
                 remoteDirDynamicLoader,
                 conf,
+                replicaCapacityController,
                 SystemClock.getInstance(),
                 // TODO: Reuse the CoordinatorServer shared scheduler for this lightweight
                 // coordinator periodic task instead of creating a component-owned scheduler.
@@ -134,11 +138,13 @@ public class AutoPartitionManager implements AutoCloseable {
             MetadataManager metadataManager,
             RemoteDirDynamicLoader remoteDirDynamicLoader,
             Configuration conf,
+            ReplicaCapacityController replicaCapacityController,
             Clock clock,
             ScheduledExecutorService periodicExecutor) {
         this.metadataCache = metadataCache;
         this.metadataManager = metadataManager;
         this.remoteDirDynamicLoader = remoteDirDynamicLoader;
+        this.replicaCapacityController = replicaCapacityController;
         this.clock = clock;
         this.periodicExecutor = periodicExecutor;
         this.periodicInterval = conf.get(ConfigOptions.AUTO_PARTITION_CHECK_INTERVAL).toMillis();
@@ -412,7 +418,11 @@ public class AutoPartitionManager implements AutoCloseable {
             long tableId = tableInfo.getTableId();
             int replicaFactor = tableInfo.getTableConfig().getReplicationFactor();
             TabletServerInfo[] servers = metadataCache.getLiveServers();
+            long newKvLeaderReplicaCount =
+                    tableInfo.hasPrimaryKey() ? tableInfo.getNumBuckets() : 0;
             try {
+                replicaCapacityController.checkCanCreateKvLeaderReplicas(newKvLeaderReplicaCount);
+
                 Map<Integer, BucketAssignment> bucketAssignments =
                         generateAssignment(tableInfo.getNumBuckets(), replicaFactor, servers)
                                 .getBucketAssignments();
@@ -446,6 +456,13 @@ public class AutoPartitionManager implements AutoCloseable {
                                 + "because exceed the maximum number of buckets per partition.",
                         partition,
                         tablePath);
+            } catch (InsufficientKvLeaderReplicaCapacityException t) {
+                LOG.warn(
+                        "Auto partitioning skip to create partition {} for table [{}], "
+                                + "because {}",
+                        partition,
+                        tablePath,
+                        t.getMessage());
             } catch (Exception e) {
                 LOG.error(
                         "Auto partitioning failed to create partition {} for table [{}].",

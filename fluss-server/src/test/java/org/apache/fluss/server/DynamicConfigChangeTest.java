@@ -19,6 +19,7 @@ package org.apache.fluss.server;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.MemorySize;
 import org.apache.fluss.config.cluster.AlterConfig;
 import org.apache.fluss.config.cluster.AlterConfigOpType;
 import org.apache.fluss.config.cluster.ConfigEntry;
@@ -62,6 +63,7 @@ import static org.apache.fluss.metadata.DataLakeFormat.PAIMON;
 import static org.apache.fluss.record.TestData.DEFAULT_REMOTE_DATA_DIR;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link DynamicConfigManager}. */
@@ -565,6 +567,62 @@ public class DynamicConfigChangeTest {
 
         // Verify the reconfigurable was notified with the new value
         assertThat(reconfiguredInterval.get()).isEqualTo(Duration.ofMinutes(5));
+    }
+
+    @Test
+    void testDynamicKvLeaderReplicaMemoryReservedChange() throws Exception {
+        Configuration configuration = new Configuration();
+        configuration.set(ConfigOptions.KV_LEADER_REPLICA_MEMORY_RESERVED, MemorySize.parse("8mb"));
+
+        DynamicConfigManager dynamicConfigManager = createManager(configuration);
+
+        AtomicReference<MemorySize> reconfiguredMemoryReserved = new AtomicReference<>();
+        dynamicConfigManager.register(
+                new ServerReconfigurable() {
+                    @Override
+                    public void validate(Configuration newConfig) throws ConfigException {}
+
+                    @Override
+                    public void reconfigure(Configuration newConfig) {
+                        reconfiguredMemoryReserved.set(
+                                newConfig.get(ConfigOptions.KV_LEADER_REPLICA_MEMORY_RESERVED));
+                    }
+                });
+        dynamicConfigManager.startup();
+
+        assertThatCode(
+                        () ->
+                                dynamicConfigManager.alterConfigs(
+                                        Collections.singletonList(
+                                                new AlterConfig(
+                                                        ConfigOptions
+                                                                .KV_LEADER_REPLICA_MEMORY_RESERVED
+                                                                .key(),
+                                                        "16mb",
+                                                        AlterConfigOpType.SET))))
+                .doesNotThrowAnyException();
+
+        Map<String, String> zkConfig = zookeeperClient.fetchEntityConfig();
+        assertThat(zkConfig.get(ConfigOptions.KV_LEADER_REPLICA_MEMORY_RESERVED.key()))
+                .isEqualTo("16mb");
+        assertThat(reconfiguredMemoryReserved.get()).isEqualTo(MemorySize.parse("16mb"));
+
+        assertThatCode(
+                        () ->
+                                dynamicConfigManager.alterConfigs(
+                                        Collections.singletonList(
+                                                new AlterConfig(
+                                                        ConfigOptions
+                                                                .KV_LEADER_REPLICA_MEMORY_RESERVED
+                                                                .key(),
+                                                        "0b",
+                                                        AlterConfigOpType.SET))))
+                .doesNotThrowAnyException();
+
+        zkConfig = zookeeperClient.fetchEntityConfig();
+        assertThat(zkConfig.get(ConfigOptions.KV_LEADER_REPLICA_MEMORY_RESERVED.key()))
+                .isEqualTo("0b");
+        assertThat(reconfiguredMemoryReserved.get()).isEqualTo(MemorySize.ZERO);
     }
 
     @Test

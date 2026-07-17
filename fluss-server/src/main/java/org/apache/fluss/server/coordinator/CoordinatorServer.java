@@ -165,6 +165,9 @@ public class CoordinatorServer extends ServerBase {
     @GuardedBy("lock")
     private KvSnapshotLeaseManager kvSnapshotLeaseManager;
 
+    @GuardedBy("lock")
+    private ReplicaCapacityController replicaCapacityController;
+
     public CoordinatorServer(Configuration conf) {
         this(conf, SystemClock.getInstance());
     }
@@ -240,9 +243,11 @@ public class CoordinatorServer extends ServerBase {
 
             this.lakeCatalogDynamicLoader = new LakeCatalogDynamicLoader(conf, pluginManager, true);
             this.remoteDirDynamicLoader = new RemoteDirDynamicLoader(conf);
+            this.metadataCache = new CoordinatorMetadataCache();
+            this.replicaCapacityController =
+                    new ReplicaCapacityController(conf, metadataCache, serverMetricGroup);
 
             this.dynamicConfigManager = new DynamicConfigManager(zkClient, conf);
-            this.metadataCache = new CoordinatorMetadataCache();
 
             this.authorizer = AuthorizerLoader.createAuthorizer(conf, zkClient, pluginManager);
             if (authorizer != null) {
@@ -285,7 +290,8 @@ public class CoordinatorServer extends ServerBase {
                             dynamicConfigManager,
                             ioExecutor,
                             kvSnapshotLeaseManager,
-                            coordinatorLeaderElection);
+                            coordinatorLeaderElection,
+                            replicaCapacityController);
 
             this.rpcServer =
                     RpcServer.create(
@@ -298,6 +304,7 @@ public class CoordinatorServer extends ServerBase {
             // Register server reconfigurable components
             dynamicConfigManager.register(lakeCatalogDynamicLoader);
             dynamicConfigManager.register(remoteDirDynamicLoader);
+            dynamicConfigManager.register(replicaCapacityController);
             // Register stateless validators for coordinator-side upfront validation
             dynamicConfigManager.register(new DiskWriteLimitConfigValidator());
             rpcServer.getServerReconfigurables().forEach(dynamicConfigManager::register);
@@ -324,7 +331,11 @@ public class CoordinatorServer extends ServerBase {
 
             this.autoPartitionManager =
                     new AutoPartitionManager(
-                            metadataCache, metadataManager, remoteDirDynamicLoader, conf);
+                            metadataCache,
+                            metadataManager,
+                            remoteDirDynamicLoader,
+                            conf,
+                            replicaCapacityController);
             autoPartitionManager.start();
 
             // start coordinator event processor after we register coordinator leader to zk
@@ -338,6 +349,7 @@ public class CoordinatorServer extends ServerBase {
                             metadataCache,
                             coordinatorChannelManager,
                             coordinatorContext,
+                            replicaCapacityController,
                             autoPartitionManager,
                             lakeTableTieringManager,
                             serverMetricGroup,
@@ -554,6 +566,11 @@ public class CoordinatorServer extends ServerBase {
         } else {
             throw new IllegalStateException("CoordinatorEventProcessor is not initialized yet.");
         }
+    }
+
+    @VisibleForTesting
+    ReplicaCapacityController getReplicaCapacityController() {
+        return replicaCapacityController;
     }
 
     CompletableFuture<Void> stopServices() {
