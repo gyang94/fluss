@@ -165,17 +165,14 @@ public final class LogManager extends TabletManagerBase {
                         checkpointIntervalMs);
 
         long retentionIntervalMs = conf.get(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL).toMillis();
-        if (retentionIntervalMs > 0L) {
-            LOG.info(
-                    "Starting tiered local log retention with a period of {} ms.",
-                    retentionIntervalMs);
-            localLogRetentionTask =
-                    scheduler.schedule(
-                            "fluss-tiered-local-log-retention",
-                            this::cleanupTieredLocalLogSegments,
-                            retentionIntervalMs,
-                            retentionIntervalMs);
-        }
+        LOG.info(
+                "Starting tiered local log retention with a period of {} ms.", retentionIntervalMs);
+        localLogRetentionTask =
+                scheduler.schedule(
+                        "fluss-tiered-local-log-retention",
+                        this::cleanupExpiredLocalLogSegments,
+                        retentionIntervalMs,
+                        retentionIntervalMs);
     }
 
     private void initializeCheckpointMaps() throws IOException {
@@ -553,37 +550,17 @@ public final class LogManager extends TabletManagerBase {
         }
     }
 
-    /** Runs one retention pass for tiered local log segments of all loaded tablets. */
-    public void cleanupTieredLocalLogSegments() {
+    /** Runs one TTL retention pass for local log segments of all loaded tablets. */
+    public void cleanupExpiredLocalLogSegments() {
         for (LogTablet logTablet : currentLogs.values()) {
             try {
-                logTablet.deleteSegmentsAlreadyExistsInRemote();
+                logTablet.deleteExpiredSegments();
             } catch (Exception e) {
                 LOG.error(
-                        "Failed to clean up tiered local log segments for table bucket {}.",
+                        "Failed to clean up expired local log segments for table bucket {}.",
                         logTablet.getTableBucket(),
                         e);
             }
-        }
-    }
-
-    private LogShutdownTask shutdownLogsInDir(File dataDir, List<LogTablet> logs) {
-        String dataDirAbsolutePath = dataDir.getAbsolutePath();
-        LOG.info("Shutting down {} logs in dir {}", logs.size(), dataDirAbsolutePath);
-
-        List<Future<?>> jobsForTabletDir = new ArrayList<>();
-        ExecutorService pool = createThreadPool("log-tablet-closing-" + dataDirAbsolutePath);
-        for (LogTablet logTablet : logs) {
-            Runnable runnable =
-                    () -> {
-                        try {
-                            logTablet.flush(true);
-                            logTablet.close();
-                        } catch (IOException e) {
-                            throw new FlussRuntimeException(e);
-                        }
-                    };
-            jobsForTabletDir.add(pool.submit(runnable));
         }
     }
 

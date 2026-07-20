@@ -60,7 +60,7 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
         addMultiSegmentsToLogTablet(logTablet, 5);
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
         RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
-        logManager.cleanupTieredLocalLogSegments();
+        logManager.cleanupExpiredLocalLogSegments();
 
         // The configured number of local segments is retained before their TTL expires.
         assertThat(logTablet.getSegments()).hasSize(2);
@@ -69,12 +69,56 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
 
         manualClock.advanceTime(Duration.ofHours(2));
         // Run local retention without updating the remote manifest or uploading another segment.
-        logManager.cleanupTieredLocalLogSegments();
+        logManager.cleanupExpiredLocalLogSegments();
 
         // The inactive segment is expired and deleted, while the active segment is retained.
         assertThat(remoteLog.allRemoteLogSegments()).hasSize(4);
         assertThat(logTablet.getSegments()).hasSize(1);
         assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(40L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testExpiredLocalSegmentsRemovedWithoutRemoteLogEndOffset(boolean partitionTable)
+            throws Exception {
+        TableBucket tb =
+                partitionTable
+                        ? new TableBucket(DATA1_TABLE_ID, 0L, 0)
+                        : new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tb, partitionTable);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 5);
+        assertThat(remoteLogManager.remoteLogTablet(tb).getRemoteLogEndOffset()).isEmpty();
+
+        manualClock.advanceTime(Duration.ofHours(2));
+        logManager.cleanupExpiredLocalLogSegments();
+
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(40L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testTtlCleanupBoundedByRemoteLogEndOffset(boolean partitionTable) throws Exception {
+        TableBucket tb =
+                partitionTable
+                        ? new TableBucket(DATA1_TABLE_ID, 0L, 0)
+                        : new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tb, partitionTable);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 5);
+        logTablet.updateTieredLogLocalSegments(5);
+        logTablet.updateRemoteLogEndOffset(20L);
+
+        manualClock.advanceTime(Duration.ofHours(2));
+        logManager.cleanupExpiredLocalLogSegments();
+
+        assertThat(logTablet.getSegments()).hasSize(3);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(20L);
         assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(40L);
     }
 }

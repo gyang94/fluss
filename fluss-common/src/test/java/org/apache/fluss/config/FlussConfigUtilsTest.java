@@ -192,6 +192,30 @@ class FlussConfigUtilsTest {
     }
 
     @Test
+    void testValidateLogRetentionCheckInterval() {
+        assertThat(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL.key())
+                .isEqualTo("log.retention.check-interval");
+
+        Configuration conf = new Configuration();
+        conf.set(ConfigOptions.REMOTE_DATA_DIR, "s3://bucket/path");
+
+        conf.set(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL, Duration.ZERO);
+        assertThatThrownBy(() -> validateCoordinatorConfigs(conf))
+                .isInstanceOf(IllegalConfigurationException.class)
+                .hasMessageContaining(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL.key())
+                .hasMessageContaining("must be greater than or equal 1 ms");
+
+        conf.set(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL, Duration.ofMillis(-1));
+        assertThatThrownBy(() -> validateCoordinatorConfigs(conf))
+                .isInstanceOf(IllegalConfigurationException.class)
+                .hasMessageContaining(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL.key())
+                .hasMessageContaining("must be greater than or equal 1 ms");
+
+        conf.set(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL, Duration.ofMillis(1));
+        validateCoordinatorConfigs(conf);
+    }
+
+    @Test
     void testValidateClientConfigs() {
         // valid defaults should pass
         Configuration validConf = new Configuration();
