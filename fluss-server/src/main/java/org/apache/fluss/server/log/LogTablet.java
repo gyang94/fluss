@@ -1338,16 +1338,14 @@ public final class LogTablet {
         // readers is in progress.
         List<LogSegment> deletableSegments = new ArrayList<>();
         List<LogSegment> logSegments = localLog.getSegments().values();
-        int tierProtectedStartIndex = logSegments.size() - tieredLogLocalSegments;
 
-        for (int i = 0; i < logSegments.size() - 1; i++) {
-            if (logSegments.get(i + 1).getBaseOffset() > endOffset) {
+        // ignore the segments configured to be retained
+        for (int i = 0; i < logSegments.size() - tieredLogLocalSegments; i++) {
+            if (logSegments.get(i + 1).getBaseOffset() <= endOffset) {
+                deletableSegments.add(logSegments.get(i));
+            } else {
                 break;
             }
-            if (i >= tierProtectedStartIndex) {
-                break;
-            }
-            deletableSegments.add(logSegments.get(i));
         }
         return deletableSegments;
     }
