@@ -257,14 +257,24 @@ class KvReplicaRestoreITCase {
         // simulate failure and force failover
         int currentLeader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tableBucket);
         FLUSS_CLUSTER_EXTENSION.stopTabletServer(currentLeader);
-        FLUSS_CLUSTER_EXTENSION.startTabletServer(currentLeader);
+        try {
+            AtomicInteger newLeader = new AtomicInteger(-1);
+            waitUntil(
+                    () -> {
+                        int leader = FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(tableBucket);
+                        newLeader.set(leader);
+                        return leader != currentLeader;
+                    },
+                    Duration.ofMinutes(2),
+                    "Fail to elect a new leader after stopping tablet server " + currentLeader);
 
-        // Get the new leader replica
-        Replica newLeaderReplica = FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tableBucket);
-        assertThat(newLeaderReplica.getLeaderId()).isNotEqualTo(currentLeader);
-
-        // Verify the row count is restored correctly after failover and applied changelogs
-        assertThat(newLeaderReplica.getRowCount()).isEqualTo(recordCount);
+            // Verify the row count is restored correctly after failover and applied changelogs
+            Replica newLeaderReplica = FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tableBucket);
+            assertThat(newLeaderReplica.getLeaderId()).isEqualTo(newLeader.get());
+            assertThat(newLeaderReplica.getRowCount()).isEqualTo(recordCount);
+        } finally {
+            FLUSS_CLUSTER_EXTENSION.startTabletServer(currentLeader);
+        }
     }
 
     private static Configuration initConfig() {
