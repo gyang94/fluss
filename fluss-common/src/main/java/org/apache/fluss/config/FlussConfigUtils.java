@@ -220,6 +220,7 @@ public class FlussConfigUtils {
         validMinValue(conf, ConfigOptions.KV_MAX_RETAINED_SNAPSHOTS, 1);
         validMinValue(conf, ConfigOptions.SERVER_IO_POOL_SIZE, 1);
         validMinValue(conf, ConfigOptions.BACKGROUND_THREADS, 1);
+        validMinDuration(conf, ConfigOptions.LOG_RETENTION_CHECK_INTERVAL, 1);
 
         if (conf.get(ConfigOptions.LOG_SEGMENT_FILE_SIZE).getBytes() > Integer.MAX_VALUE) {
             throw new IllegalConfigurationException(

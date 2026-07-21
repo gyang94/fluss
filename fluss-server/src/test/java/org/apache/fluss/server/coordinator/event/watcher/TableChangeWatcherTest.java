@@ -187,6 +187,7 @@ class TableChangeWatcherTest {
         // as it appears so the next pending drop is admitted.
         for (CoordinatorEvent event : expectedTableEvents) {
             DropTableEvent drop = (DropTableEvent) event;
+            retry(Duration.ofMinutes(1), () -> assertThat(eventManager.getEvents()).contains(drop));
             lifecycleThrottler.onTableDropCompleted(drop.getTableId());
         }
 

@@ -146,6 +146,7 @@ public class FlussAuthorizationITCase {
         guestPrincipal = new FlussPrincipal("guest", "User");
 
         // prepare default database and table
+        FLUSS_CLUSTER_EXTENSION.assertHasTabletServerNumber(3);
         rootAdmin
                 .createDatabase(
                         DATA1_TABLE_PATH_PK.getDatabaseName(), DatabaseDescriptor.EMPTY, true)

@@ -312,7 +312,8 @@ class RemoteLogDownloaderTest {
             protected long downloadFile(Path targetFilePath, FsPath remoteFilePath)
                     throws IOException {
                 int count = enteredCount.incrementAndGet();
-                if (count > 1) {
+                boolean shouldBlock = count > 1;
+                if (shouldBlock) {
                     // Block the 2nd and 3rd downloads to simulate in-flight state.
                     inFlightStarted.countDown();
                     try {
@@ -321,9 +322,13 @@ class RemoteLogDownloaderTest {
                         throw new IOException("Interrupted while blocking", e);
                     }
                 }
-                long downloadBytes = super.downloadFile(targetFilePath, remoteFilePath);
-                inFlightFinished.countDown();
-                return downloadBytes;
+                try {
+                    return super.downloadFile(targetFilePath, remoteFilePath);
+                } finally {
+                    if (shouldBlock) {
+                        inFlightFinished.countDown();
+                    }
+                }
             }
         }
 
@@ -347,8 +352,10 @@ class RemoteLogDownloaderTest {
             // Wait for the first download to complete (already-downloaded file on disk) and 2
             // in-flight downloads to enter the blocked state.
             // At this point: 1 file downloaded, 2 blocked in-flight, 2 pending.
-            retry(Duration.ofMinutes(1), () -> assertThat(futures.get(0).isDone()).isTrue());
             assertThat(inFlightStarted.await(30, TimeUnit.SECONDS)).isTrue();
+            retry(
+                    Duration.ofMinutes(1),
+                    () -> assertThat(futures.subList(0, 3)).anyMatch(future -> future.isDone()));
             Path localLogDir = downloader.getLocalLogDir();
             assertThat(localLogDir.toFile().exists()).isTrue();
 
@@ -362,7 +369,9 @@ class RemoteLogDownloaderTest {
             // Wait for 2 in-flight downloads finished.
             blockLatch.countDown();
             assertThat(inFlightFinished.await(30, TimeUnit.SECONDS)).isTrue();
-            retry(Duration.ofMinutes(1), () -> assertThat(futures.get(1).isDone()).isTrue());
+            retry(
+                    Duration.ofMinutes(1),
+                    () -> assertThat(futures.subList(0, 3)).allMatch(future -> future.isDone()));
 
             // Verify that ultimately the local directory does not exist.
             retry(Duration.ofMinutes(1), () -> assertThat(localLogDir.toFile().exists()).isFalse());

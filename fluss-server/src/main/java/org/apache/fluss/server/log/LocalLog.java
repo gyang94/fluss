@@ -683,6 +683,7 @@ public final class LocalLog {
         SegmentDeletionReason LOG_ROLL = new LogRoll();
         SegmentDeletionReason LOG_DELETION = new LogDeletion();
         SegmentDeletionReason LOG_MOVE_TO_REMOTE = new LogMoveToRemote();
+        SegmentDeletionReason LOG_RETENTION = new LogRetention();
 
         void logReason(List<LogSegment> toDelete);
     }
@@ -716,6 +717,14 @@ public final class LocalLog {
         @Override
         public void logReason(List<LogSegment> toDelete) {
             LOG.info("Deleting segments as the log has been moved to remote: " + toDelete);
+        }
+    }
+
+    /** Delete due to log retention. */
+    private static class LogRetention implements SegmentDeletionReason {
+        @Override
+        public void logReason(List<LogSegment> toDelete) {
+            LOG.info("Deleting segments due to log retention: " + toDelete);
         }
     }
 }

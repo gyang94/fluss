@@ -20,6 +20,7 @@ package org.apache.fluss.server.log;
 import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.TableConfig;
 import org.apache.fluss.exception.CorruptRecordException;
 import org.apache.fluss.exception.DuplicateSequenceException;
 import org.apache.fluss.exception.FlussRuntimeException;
@@ -107,6 +108,7 @@ public final class LogTablet {
     private volatile int tieredLogLocalSegments;
     private final Clock clock;
     private final boolean isChangeLog;
+    private final long logTtlMs;
 
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
@@ -145,6 +147,7 @@ public final class LogTablet {
             WriterStateManager writerStateManager,
             LogFormat logFormat,
             int tieredLogLocalSegments,
+            long logTtlMs,
             boolean isChangelog,
             Clock clock) {
         this.dataDir = dataDir;
@@ -156,6 +159,7 @@ public final class LogTablet {
                 (int) conf.get(ConfigOptions.WRITER_ID_EXPIRATION_CHECK_INTERVAL).toMillis();
         this.writerStateManager = writerStateManager;
         this.highWatermarkMetadata = new LogOffsetMetadata(0L);
+        this.logTtlMs = logTtlMs;
 
         this.scheduler = scheduler;
         // scheduler the writer expiration interval check.
@@ -343,6 +347,7 @@ public final class LogTablet {
             Scheduler scheduler,
             LogFormat logFormat,
             int tieredLogLocalSegments,
+            long logTtlMs,
             boolean isChangelog,
             Clock clock,
             boolean isCleanShutdown)
@@ -391,8 +396,41 @@ public final class LogTablet {
                 writerStateManager,
                 logFormat,
                 tieredLogLocalSegments,
+                logTtlMs,
                 isChangelog,
                 clock);
+    }
+
+    @VisibleForTesting
+    public static LogTablet create(
+            File dataDir,
+            PhysicalTablePath tablePath,
+            File tabletDir,
+            Configuration conf,
+            TabletServerMetricGroup serverMetricGroup,
+            long recoveryPoint,
+            Scheduler scheduler,
+            LogFormat logFormat,
+            int tieredLogLocalSegments,
+            boolean isChangelog,
+            Clock clock,
+            boolean isCleanShutdown)
+            throws Exception {
+        TableConfig tableConfig = new TableConfig(new Configuration());
+        return create(
+                dataDir,
+                tablePath,
+                tabletDir,
+                conf,
+                serverMetricGroup,
+                recoveryPoint,
+                scheduler,
+                logFormat,
+                tieredLogLocalSegments,
+                tableConfig.getLogTTLMs(),
+                isChangelog,
+                clock,
+                isCleanShutdown);
     }
 
     /** Register metrics for this log tablet in the metric group. */
@@ -698,7 +736,23 @@ public final class LogTablet {
     }
 
     public void deleteSegmentsAlreadyExistsInRemote() {
-        deleteSegments(remoteLogEndOffset);
+        deleteSegments(
+                remoteLogEndOffset,
+                SegmentDeletionReason.LOG_MOVE_TO_REMOTE,
+                this::deletableRemoteSegments);
+    }
+
+    /** Deletes inactive local segments that have expired according to the table log TTL. */
+    public void deleteExpiredSegments() {
+        // A missing remote end offset can mean either that no segment has been uploaded or that
+        // all remote segments have expired. In both cases, table.log.ttl remains authoritative for
+        // local retention, while the high watermark and minRetainOffset still protect data that
+        // cannot be deleted yet.
+        long cleanupToOffset = remoteLogEndOffset == -1L ? getHighWatermark() : remoteLogEndOffset;
+        deleteSegments(
+                cleanupToOffset,
+                SegmentDeletionReason.LOG_RETENTION,
+                this::deletableExpiredSegments);
     }
 
     /**
@@ -715,7 +769,10 @@ public final class LogTablet {
                 highWatermark);
     }
 
-    private void deleteSegments(long cleanUpToOffset) {
+    private void deleteSegments(
+            long cleanUpToOffset,
+            SegmentDeletionReason reason,
+            DeletableSegmentsFinder deletableSegmentsFinder) {
         // cache to local variables
         long localLogStartOffset = localLog.getLocalLogStartOffset();
         if (cleanUpToOffset < localLogStartOffset) {
@@ -741,7 +798,7 @@ public final class LogTablet {
         try {
             // shouldn't clean up segments that will be used by kv recovery.
             long cleanupToOffset = Math.min(minRetainOffset, cleanUpToOffset);
-            deleteOldSegments(cleanupToOffset, SegmentDeletionReason.LOG_MOVE_TO_REMOTE);
+            deleteOldSegments(cleanupToOffset, reason, deletableSegmentsFinder);
         } catch (IOException e) {
             LOG.error(
                     "Failed to delete the local log segments to cleanUpToOffset {} for table-bucket {}.",
@@ -1258,18 +1315,21 @@ public final class LogTablet {
         }
     }
 
-    private void deleteOldSegments(long endOffset, SegmentDeletionReason reason)
+    private void deleteOldSegments(
+            long endOffset,
+            SegmentDeletionReason reason,
+            DeletableSegmentsFinder deletableSegmentsFinder)
             throws IOException {
         synchronized (lock) {
-            List<LogSegment> deletableSegments = deletableSegments(endOffset);
+            List<LogSegment> deletableSegments = deletableSegmentsFinder.find(endOffset);
             if (!deletableSegments.isEmpty()) {
                 deleteSegments(deletableSegments, reason);
             }
         }
     }
 
-    /** Returns the segments that can be deleted by checking log end offset. */
-    private List<LogSegment> deletableSegments(long endOffset) {
+    /** Returns uploaded segments that exceed the configured local segment retention count. */
+    private List<LogSegment> deletableRemoteSegments(long endOffset) {
         if (localLog.getSegments().isEmpty()) {
             return Collections.emptyList();
         }
@@ -1278,6 +1338,7 @@ public final class LogTablet {
         // readers is in progress.
         List<LogSegment> deletableSegments = new ArrayList<>();
         List<LogSegment> logSegments = localLog.getSegments().values();
+
         // ignore the segments configured to be retained
         for (int i = 0; i < logSegments.size() - tieredLogLocalSegments; i++) {
             if (logSegments.get(i + 1).getBaseOffset() <= endOffset) {
@@ -1287,6 +1348,39 @@ public final class LogTablet {
             }
         }
         return deletableSegments;
+    }
+
+    /** Returns the contiguous prefix of inactive segments that has expired. */
+    private List<LogSegment> deletableExpiredSegments(long endOffset) throws IOException {
+        if (localLog.getSegments().isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<LogSegment> deletableSegments = new ArrayList<>();
+        List<LogSegment> logSegments = localLog.getSegments().values();
+        long now = clock.milliseconds();
+
+        for (int i = 0; i < logSegments.size() - 1; i++) {
+            if (logSegments.get(i + 1).getBaseOffset() > endOffset
+                    || !isSegmentExpired(now, logSegments.get(i), logTtlMs)) {
+                break;
+            }
+            deletableSegments.add(logSegments.get(i));
+        }
+        return deletableSegments;
+    }
+
+    @FunctionalInterface
+    private interface DeletableSegmentsFinder {
+        List<LogSegment> find(long endOffset) throws IOException;
+    }
+
+    private boolean isSegmentExpired(long now, LogSegment segment, long expirationTimeMs)
+            throws IOException {
+        if (expirationTimeMs <= 0L) {
+            return false;
+        }
+        return now - segment.maxTimestampSoFar() > expirationTimeMs;
     }
 
     private void deleteSegments(List<LogSegment> deletableSegments, SegmentDeletionReason reason)

@@ -20,6 +20,7 @@ package org.apache.fluss.server.log;
 import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.TableConfig;
 import org.apache.fluss.exception.FlussException;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.exception.LogStorageException;
@@ -108,6 +109,7 @@ public final class LogManager extends TabletManagerBase {
 
     private volatile Map<File, OffsetCheckpointFile> recoveryPointCheckpoints;
     private volatile ScheduledFuture<?> recoveryPointCheckpointTask;
+    private volatile ScheduledFuture<?> localLogRetentionTask;
     private boolean loadLogsCompletedFlag = false;
 
     private LogManager(
@@ -161,6 +163,16 @@ public final class LogManager extends TabletManagerBase {
                         this::checkpointRecoveryOffsets,
                         checkpointIntervalMs,
                         checkpointIntervalMs);
+
+        long retentionIntervalMs = conf.get(ConfigOptions.LOG_RETENTION_CHECK_INTERVAL).toMillis();
+        LOG.info(
+                "Starting tiered local log retention with a period of {} ms.", retentionIntervalMs);
+        localLogRetentionTask =
+                scheduler.schedule(
+                        "fluss-tiered-local-log-retention",
+                        this::cleanupExpiredLocalLogSegments,
+                        retentionIntervalMs,
+                        retentionIntervalMs);
     }
 
     private void initializeCheckpointMaps() throws IOException {
@@ -280,6 +292,7 @@ public final class LogManager extends TabletManagerBase {
      * @param tableBucket the table bucket
      * @param logFormat the log format
      * @param tieredLogLocalSegments the number of segments to retain in local for tiered log
+     * @param logTtlMs the log TTL in milliseconds from table configuration
      * @param isChangelog whether the log is a changelog of primary key table
      */
     public LogTablet getOrCreateLog(
@@ -288,6 +301,7 @@ public final class LogManager extends TabletManagerBase {
             TableBucket tableBucket,
             LogFormat logFormat,
             int tieredLogLocalSegments,
+            long logTtlMs,
             boolean isChangelog)
             throws Exception {
         return inLock(
@@ -310,6 +324,7 @@ public final class LogManager extends TabletManagerBase {
                                     scheduler,
                                     logFormat,
                                     tieredLogLocalSegments,
+                                    logTtlMs,
                                     isChangelog,
                                     clock,
                                     true);
@@ -322,6 +337,26 @@ public final class LogManager extends TabletManagerBase {
 
                     return logTablet;
                 });
+    }
+
+    @VisibleForTesting
+    public LogTablet getOrCreateLog(
+            File dataDir,
+            PhysicalTablePath tablePath,
+            TableBucket tableBucket,
+            LogFormat logFormat,
+            int tieredLogLocalSegments,
+            boolean isChangelog)
+            throws Exception {
+        TableConfig tableConfig = new TableConfig(new Configuration());
+        return getOrCreateLog(
+                dataDir,
+                tablePath,
+                tableBucket,
+                logFormat,
+                tieredLogLocalSegments,
+                tableConfig.getLogTTLMs(),
+                isChangelog);
     }
 
     public Optional<LogTablet> getLog(TableBucket tableBucket) {
@@ -434,6 +469,7 @@ public final class LogManager extends TabletManagerBase {
                         scheduler,
                         tableInfo.getTableConfig().getLogFormat(),
                         tableInfo.getTableConfig().getTieredLogLocalSegments(),
+                        tableInfo.getTableConfig().getLogTTLMs(),
                         tableInfo.hasPrimaryKey(),
                         clock,
                         isCleanShutdown);
@@ -461,6 +497,10 @@ public final class LogManager extends TabletManagerBase {
     /** Close all the logs. */
     public void shutdown() {
         LOG.info("Shutting down LogManager.");
+        if (localLogRetentionTask != null) {
+            localLogRetentionTask.cancel(false);
+            localLogRetentionTask = null;
+        }
         if (recoveryPointCheckpointTask != null) {
             recoveryPointCheckpointTask.cancel(false);
             recoveryPointCheckpointTask = null;
@@ -507,6 +547,20 @@ public final class LogManager extends TabletManagerBase {
         } catch (RuntimeException | Error e) {
             LOG.warn("Exception while closing log tablet {}.", logTablet.getTableBucket(), e);
             throw e;
+        }
+    }
+
+    /** Runs one TTL retention pass for local log segments of all loaded tablets. */
+    public void cleanupExpiredLocalLogSegments() {
+        for (LogTablet logTablet : currentLogs.values()) {
+            try {
+                logTablet.deleteExpiredSegments();
+            } catch (Exception e) {
+                LOG.error(
+                        "Failed to clean up expired local log segments for table bucket {}.",
+                        logTablet.getTableBucket(),
+                        e);
+            }
         }
     }
 

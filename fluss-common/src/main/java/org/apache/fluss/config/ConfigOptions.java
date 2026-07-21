@@ -947,6 +947,15 @@ public class ConfigOptions {
                                     + "flush which acts as the log recovery point. The default "
                                     + "setting is 60 seconds.");
 
+    public static final ConfigOption<Duration> LOG_RETENTION_CHECK_INTERVAL =
+            key("log.retention.check-interval")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(5))
+                    .withDescription(
+                            "The frequency with which the log manager checks whether local log "
+                                    + "segments are eligible for TTL cleanup. The value must be "
+                                    + "greater than 0.");
+
     public static final ConfigOption<Duration> LOG_REPLICA_HIGH_WATERMARK_CHECKPOINT_INTERVAL =
             key("log.replica.high-watermark.checkpoint-interval")
                     .durationType()
