@@ -25,6 +25,11 @@ import org.apache.fluss.server.zk.data.ZkData;
 import org.apache.fluss.testutils.common.AllCallbackWrapper;
 import org.apache.fluss.utils.clock.ManualClock;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -32,12 +37,16 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.spy;
 
 /** Test for {@link ZkNodeChangeNotificationWatcher }. */
 public class ZkNodeChangeNotificationWatcherTest {
@@ -119,6 +128,55 @@ public class ZkNodeChangeNotificationWatcherTest {
                 () -> assertThat(zookeeperClient.getChildren(seqNodeRoot)).hasSize(2));
     }
 
+    @Test
+    void testNotificationDeletedByAnotherWatcherDuringPurge() throws Exception {
+        String seqNodeRoot = ZkData.AclChangesNode.path();
+        String seqNodePrefix = ZkData.AclChangeNotificationNode.prefix();
+        ZooKeeperClient zooKeeperClient =
+                ZOO_KEEPER_EXTENSION_WRAPPER
+                        .getCustomExtension()
+                        .getZooKeeperClient(NOPErrorHandler.INSTANCE);
+        Resource resource = Resource.cluster();
+        zooKeeperClient.insertAclChangeNotification(resource);
+
+        ZooKeeperClient spyingZooKeeperClient = spy(zooKeeperClient);
+        doAnswer(
+                        invocation -> {
+                            zooKeeperClient.deletePath(invocation.getArgument(0));
+                            return Optional.empty();
+                        })
+                .when(spyingZooKeeperClient)
+                .getStat(anyString());
+
+        TestingNotificationHandler handler = new TestingNotificationHandler();
+        ZkNodeChangeNotificationWatcher watcher =
+                new ZkNodeChangeNotificationWatcher(
+                        spyingZooKeeperClient,
+                        seqNodeRoot,
+                        seqNodePrefix,
+                        Duration.ofMinutes(5).toMillis(),
+                        handler,
+                        new ManualClock());
+
+        Logger logger = (Logger) LogManager.getLogger(ZkNodeChangeNotificationWatcher.class);
+        TestingAppender appender = new TestingAppender();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            watcher.start();
+            assertThat(handler.resourceNotifications).containsExactly(resource);
+            assertThat(appender.messages)
+                    .noneMatch(
+                            message ->
+                                    message.contains(
+                                            "Error while purging obsolete notification change"));
+        } finally {
+            watcher.stop();
+            logger.removeAppender(appender);
+            appender.stop();
+        }
+    }
+
     private static class TestingNotificationHandler
             implements ZkNodeChangeNotificationWatcher.NotificationHandler {
         public BlockingQueue<Resource> resourceNotifications = new LinkedBlockingQueue<>();
@@ -127,6 +185,19 @@ public class ZkNodeChangeNotificationWatcherTest {
         public void processNotification(byte[] notification) {
             Resource resource = ZkData.AclChangeNotificationNode.decode(notification);
             resourceNotifications.add(resource);
+        }
+    }
+
+    private static class TestingAppender extends AbstractAppender {
+        private final List<String> messages = new ArrayList<>();
+
+        private TestingAppender() {
+            super("testing", null, null, true, Property.EMPTY_ARRAY);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            messages.add(event.getMessage().getFormattedMessage());
         }
     }
 }
