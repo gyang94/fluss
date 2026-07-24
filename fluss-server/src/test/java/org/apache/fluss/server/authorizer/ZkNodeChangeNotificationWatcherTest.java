@@ -25,10 +25,13 @@ import org.apache.fluss.server.zk.data.ZkData;
 import org.apache.fluss.testutils.common.AllCallbackWrapper;
 import org.apache.fluss.utils.clock.ManualClock;
 
+import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
-import org.apache.logging.log4j.core.Logger;
+import org.apache.logging.log4j.core.LoggerContext;
 import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configuration;
+import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.apache.logging.log4j.core.config.Property;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -37,16 +40,12 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.spy;
 
 /** Test for {@link ZkNodeChangeNotificationWatcher }. */
 public class ZkNodeChangeNotificationWatcherTest {
@@ -139,40 +138,56 @@ public class ZkNodeChangeNotificationWatcherTest {
         Resource resource = Resource.cluster();
         zooKeeperClient.insertAclChangeNotification(resource);
 
-        ZooKeeperClient spyingZooKeeperClient = spy(zooKeeperClient);
-        doAnswer(
-                        invocation -> {
-                            zooKeeperClient.deletePath(invocation.getArgument(0));
-                            return Optional.empty();
-                        })
-                .when(spyingZooKeeperClient)
-                .getStat(anyString());
-
-        TestingNotificationHandler handler = new TestingNotificationHandler();
+        TestingNotificationHandler handler =
+                new TestingNotificationHandler() {
+                    @Override
+                    public void processNotification(byte[] notification) {
+                        super.processNotification(notification);
+                        try {
+                            for (String child : zooKeeperClient.getChildren(seqNodeRoot)) {
+                                zooKeeperClient.deletePath(seqNodeRoot + "/" + child);
+                            }
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                };
         ZkNodeChangeNotificationWatcher watcher =
                 new ZkNodeChangeNotificationWatcher(
-                        spyingZooKeeperClient,
+                        zooKeeperClient,
                         seqNodeRoot,
                         seqNodePrefix,
                         Duration.ofMinutes(5).toMillis(),
                         handler,
                         new ManualClock());
 
-        Logger logger = (Logger) LogManager.getLogger(ZkNodeChangeNotificationWatcher.class);
         TestingAppender appender = new TestingAppender();
         appender.start();
-        logger.addAppender(appender);
+        LoggerContext loggerContext = (LoggerContext) LogManager.getContext(false);
+        Configuration configuration = loggerContext.getConfiguration();
+        LoggerConfig loggerConfig =
+                new LoggerConfig(
+                        ZkNodeChangeNotificationWatcher.class.getName(), Level.DEBUG, false);
+        loggerConfig.addAppender(appender, Level.DEBUG, null);
+        configuration.addLogger(loggerConfig.getName(), loggerConfig);
+        loggerContext.updateLoggers();
         try {
             watcher.start();
             assertThat(handler.resourceNotifications).containsExactly(resource);
             assertThat(appender.messages)
-                    .noneMatch(
+                    .anyMatch(
                             message ->
-                                    message.contains(
-                                            "Error while purging obsolete notification change"));
+                                    message.startsWith(
+                                                    "Notification "
+                                                            + seqNodeRoot
+                                                            + "/"
+                                                            + seqNodePrefix)
+                                            && message.endsWith(
+                                                    " has already been purged by another watcher"));
         } finally {
             watcher.stop();
-            logger.removeAppender(appender);
+            configuration.removeLogger(loggerConfig.getName());
+            loggerContext.updateLoggers();
             appender.stop();
         }
     }
