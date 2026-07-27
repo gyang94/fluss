@@ -298,7 +298,7 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
      * @param tableBucket the table bucket
      * @param logFormat the log format
      * @param tieredLogLocalSegments the number of segments to retain in local for tiered log
-     * @param logTtlMs the log TTL in milliseconds from table configuration
+     * @param localLogTtlMs the local log TTL in milliseconds from table configuration
      * @param isChangelog whether the log is a changelog of primary key table
      */
     public LogTablet getOrCreateLog(
@@ -307,7 +307,7 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
             TableBucket tableBucket,
             LogFormat logFormat,
             int tieredLogLocalSegments,
-            long logTtlMs,
+            long localLogTtlMs,
             boolean isChangelog)
             throws Exception {
         return inLock(
@@ -331,7 +331,7 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
                                     scheduler,
                                     logFormat,
                                     tieredLogLocalSegments,
-                                    logTtlMs,
+                                    localLogTtlMs,
                                     isChangelog,
                                     clock,
                                     true);
@@ -362,7 +362,7 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
                 tableBucket,
                 logFormat,
                 tieredLogLocalSegments,
-                tableConfig.getLogTTLMs(),
+                tableConfig.getLocalLogTTLMs(),
                 isChangelog);
     }
 
@@ -477,7 +477,7 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
                         scheduler,
                         tableInfo.getTableConfig().getLogFormat(),
                         tableInfo.getTableConfig().getTieredLogLocalSegments(),
-                        tableInfo.getTableConfig().getLogTTLMs(),
+                        tableInfo.getTableConfig().getLocalLogTTLMs(),
                         tableInfo.hasPrimaryKey(),
                         clock,
                         isCleanShutdown);
