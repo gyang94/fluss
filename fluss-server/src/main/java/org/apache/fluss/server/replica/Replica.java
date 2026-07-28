@@ -2297,6 +2297,7 @@ public final class Replica {
                         tableBucket,
                         tableConfig.getLogFormat(),
                         tableConfig.getTieredLogLocalSegments(),
+                        tableConfig.getLogTTLMs(),
                         tableConfig.getLocalLogTTLMs(),
                         isKvTable());
         // update high watermark.
