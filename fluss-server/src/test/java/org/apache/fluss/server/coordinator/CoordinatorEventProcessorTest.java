@@ -1279,6 +1279,7 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
         Map<TableBucket, LeaderAndIsr> bucketLeaderAndIsrMap =
                 createAdjustIsrTestTable("process_adjust_isr");
 
+        // The normal batch path should commit every proposed change.
         AdjustIsrResponse adjustIsrResponse = adjustIsr(bucketLeaderAndIsrMap);
         Map<TableBucket, AdjustIsrResultForBucket> resultForBucketMap =
                 getAdjustIsrResponseData(adjustIsrResponse);
@@ -1294,11 +1295,13 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
     void testProcessAdjustIsrFallsBackToSuccessfulIndividualUpdates() throws Exception {
         Map<TableBucket, LeaderAndIsr> originalLeaderAndIsrs =
                 createAdjustIsrTestTable("adjust_isr_individual_success");
+        // Force the batch write to fail, but allow every per-bucket retry to reach ZooKeeper.
         useTestingAdjustIsrZooKeeperClient(true, Collections.emptySet());
 
         AdjustIsrResponse response = adjustIsr(originalLeaderAndIsrs);
         Map<TableBucket, AdjustIsrResultForBucket> results = getAdjustIsrResponseData(response);
 
+        // Every fallback write is committed, so each bucket succeeds and is installed.
         assertAdjustIsrResponseCount(response, originalLeaderAndIsrs.size());
         assertThat(results.values()).allMatch(AdjustIsrResultForBucket::succeeded);
         assertThat(testingAdjustIsrZooKeeperClient.getIndividualUpdates().keySet())
@@ -1315,16 +1318,19 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
         TableBucket failedBucket = buckets.get(1);
         Set<TableBucket> committedBuckets = new HashSet<>(originalLeaderAndIsrs.keySet());
         committedBuckets.remove(failedBucket);
+        // Simulate a mixed fallback result: this bucket fails while all other retries succeed.
         useTestingAdjustIsrZooKeeperClient(true, Collections.singleton(failedBucket));
 
         AdjustIsrResponse response = adjustIsr(originalLeaderAndIsrs);
         Map<TableBucket, AdjustIsrResultForBucket> results = getAdjustIsrResponseData(response);
 
+        // The failed bucket must have one error, not an error followed by a success.
         assertAdjustIsrResponseCount(response, originalLeaderAndIsrs.size());
         assertThat(results.get(failedBucket).failed()).isTrue();
         assertThat(results.entrySet())
                 .filteredOn(entry -> !entry.getKey().equals(failedBucket))
                 .allMatch(entry -> entry.getValue().succeeded());
+        // Only successful ZooKeeper writes may cross the committed-state boundary.
         assertAdjustedIsrInstalled(originalLeaderAndIsrs, committedBuckets);
     }
 
@@ -1332,11 +1338,13 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
     void testProcessAdjustIsrInstallsNothingWhenAllIndividualUpdatesFail() throws Exception {
         Map<TableBucket, LeaderAndIsr> originalLeaderAndIsrs =
                 createAdjustIsrTestTable("adjust_isr_individual_failure");
+        // Fail the batch write and every per-bucket fallback write.
         useTestingAdjustIsrZooKeeperClient(true, originalLeaderAndIsrs.keySet());
 
         AdjustIsrResponse response = adjustIsr(originalLeaderAndIsrs);
         Map<TableBucket, AdjustIsrResultForBucket> results = getAdjustIsrResponseData(response);
 
+        // No proposed change was committed, so CoordinatorContext must retain all old states.
         assertAdjustIsrResponseCount(response, originalLeaderAndIsrs.size());
         assertThat(results.values()).allMatch(AdjustIsrResultForBucket::failed);
         assertAdjustedIsrInstalled(originalLeaderAndIsrs, Collections.emptySet());
@@ -1353,6 +1361,7 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
         LeaderAndIsr original = originalLeaderAndIsrs.get(invalidBucket);
         Map<TableBucket, LeaderAndIsr> requestedLeaderAndIsrs =
                 new HashMap<>(originalLeaderAndIsrs);
+        // A lower leader epoch makes this request fail validation before any ZooKeeper write.
         requestedLeaderAndIsrs.put(
                 invalidBucket,
                 new LeaderAndIsr(
@@ -1362,14 +1371,17 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
                         original.standbyReplicas(),
                         original.coordinatorEpoch(),
                         original.bucketEpoch()));
+        // A different valid bucket reaches the fallback path but fails its individual write.
         useTestingAdjustIsrZooKeeperClient(true, Collections.singleton(persistenceFailureBucket));
 
         AdjustIsrResponse response = adjustIsr(requestedLeaderAndIsrs);
         Map<TableBucket, AdjustIsrResultForBucket> results = getAdjustIsrResponseData(response);
 
+        // Validation and persistence failures are each reported exactly once.
         assertAdjustIsrResponseCount(response, requestedLeaderAndIsrs.size());
         assertThat(results.get(invalidBucket).failed()).isTrue();
         assertThat(results.get(persistenceFailureBucket).failed()).isTrue();
+        // Validation failures must never enter either persistence attempt.
         assertThat(testingAdjustIsrZooKeeperClient.getBatchUpdates())
                 .doesNotContainKey(invalidBucket);
         assertThat(testingAdjustIsrZooKeeperClient.getIndividualUpdates())
@@ -2462,6 +2474,8 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
         CoordinatorEventProcessor previousEventProcessor = eventProcessor;
         CoordinatorEventProcessor testingEventProcessor =
                 buildCoordinatorEventProcessor(testingAdjustIsrZooKeeperClient);
+        // Start the replacement first so it can load the existing table state before the original
+        // processor is shut down. Failure injection is enabled only after startup initialization.
         testingEventProcessor.startup();
         previousEventProcessor.shutdown();
         eventProcessor = testingEventProcessor;
@@ -2479,6 +2493,8 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
     }
 
     private void assertAdjustIsrResponseCount(AdjustIsrResponse response, int expectedCount) {
+        // Inspect the raw protobuf response: converting it to a map would hide duplicate results
+        // for the same bucket, such as an error followed by an unconditional success.
         assertThat(
                         response.getTablesRespsList().stream()
                                 .mapToInt(tableResponse -> tableResponse.getBucketsRespsCount())
@@ -2494,6 +2510,8 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
             LeaderAndIsr originalLeaderAndIsr = entry.getValue();
             Optional<LeaderAndIsr> installedLeaderAndIsr =
                     fromCtx(ctx -> ctx.getBucketLeaderAndIsr(tableBucket));
+            // A committed bucket advances its bucket epoch; an uncommitted bucket must remain
+            // equal to the state observed before the request.
             assertThat(installedLeaderAndIsr)
                     .contains(
                             committedBuckets.contains(tableBucket)
@@ -2542,6 +2560,8 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
                 boolean failBatchUpdate, Set<TableBucket> failedIndividualUpdates) {
             this.failBatchUpdate = failBatchUpdate;
             this.failedIndividualUpdates = new HashSet<>(failedIndividualUpdates);
+            // Startup uses the real ZooKeeper behavior; only the AdjustIsr call under test should
+            // observe the configured failures.
             failureInjectionEnabled = true;
         }
 
@@ -2553,6 +2573,8 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
                 super.batchUpdateLeaderAndIsr(leaderAndIsrs, expectedZkVersion);
                 return;
             }
+            // Record every proposed change before throwing so tests can verify validation
+            // filtering.
             batchUpdates.putAll(leaderAndIsrs);
             if (failBatchUpdate) {
                 throw new RuntimeException("Expected batch update failure");
@@ -2564,6 +2586,7 @@ class CoordinatorEventProcessorTest extends CoordinatorEventProcessorTestBase {
         public void updateLeaderAndIsr(
                 TableBucket tableBucket, LeaderAndIsr leaderAndIsr, int expectedZkVersion)
                 throws Exception {
+            // Record all fallback attempts, but persist only the buckets not selected to fail.
             individualUpdates.put(tableBucket, leaderAndIsr);
             if (failedIndividualUpdates.contains(tableBucket)) {
                 throw new RuntimeException("Expected individual update failure");
