@@ -22,6 +22,7 @@ import org.apache.fluss.exception.NotLeaderOrFollowerException;
 import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.remote.RemoteLogFetchInfo;
+import org.apache.fluss.remote.RemoteLogFetchInfoV2;
 import org.apache.fluss.remote.RemoteLogManifest;
 import org.apache.fluss.remote.RemoteLogManifestV2Migration;
 import org.apache.fluss.remote.RemoteLogSegment;
@@ -404,6 +405,28 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         assertThat(remoteLogFetchInfo).isNotNull();
         assertThat(remoteLogFetchInfo.remoteLogSegmentList().size()).isEqualTo(4);
 
+        // A v1 reader receives logical references even while the persisted manifest is V1.
+        future = new CompletableFuture<>();
+        replicaManager.fetchLogRecords(
+                new FetchParams(
+                        -1,
+                        true,
+                        Integer.MAX_VALUE,
+                        -1,
+                        -1,
+                        null,
+                        FetchLogReadPreference.LOCAL_FIRST,
+                        (short) 1),
+                Collections.singletonMap(tb, new FetchReqInfo(tb.getTableId(), 0L, 1024 * 1024)),
+                null,
+                future::complete);
+        RemoteLogFetchInfoV2 remoteLogFetchInfoV2 = future.get().get(tb).remoteLogFetchInfoV2();
+        assertThat(remoteLogFetchInfoV2).isNotNull();
+        assertThat(remoteLogFetchInfoV2.activeReferences()).hasSize(4);
+        assertThat(remoteLogFetchInfoV2.activeReferences().get(0).logicalStartOffset()).isZero();
+        assertThat(remoteLogFetchInfoV2.activeReferences().get(0).logicalEndOffset())
+                .isEqualTo(10L);
+
         // A V2 manifest with physically adjacent segments preserves the legacy v0 batching
         // behavior and returns the complete contiguous, non-overlapping tail.
         RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
@@ -421,6 +444,25 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         assertThat(legacyV2FetchInfo.remoteLogSegmentList()).hasSize(4);
         assertThat(legacyV2FetchInfo.remoteLogSegmentList().get(0).remoteLogStartOffset())
                 .isEqualTo(0L);
+
+        // FetchLog v1 exposes the authoritative logical bounds from the V2 manifest.
+        future = new CompletableFuture<>();
+        replicaManager.fetchLogRecords(
+                new FetchParams(
+                        -1,
+                        true,
+                        Integer.MAX_VALUE,
+                        -1,
+                        -1,
+                        null,
+                        FetchLogReadPreference.LOCAL_FIRST,
+                        (short) 1),
+                Collections.singletonMap(tb, new FetchReqInfo(tb.getTableId(), 0L, 1024 * 1024)),
+                null,
+                future::complete);
+        remoteLogFetchInfoV2 = future.get().get(tb).remoteLogFetchInfoV2();
+        assertThat(remoteLogFetchInfoV2).isNotNull();
+        assertThat(remoteLogFetchInfoV2.activeReferences()).hasSize(4);
 
         // A request starting at a later segment returns the remaining contiguous tail.
         future = new CompletableFuture<>();

@@ -54,7 +54,9 @@ import org.apache.fluss.record.KvRecordBatch;
 import org.apache.fluss.record.LogRecords;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.remote.RemoteLogFetchInfo;
+import org.apache.fluss.remote.RemoteLogFetchInfoV2;
 import org.apache.fluss.remote.RemoteLogSegment;
+import org.apache.fluss.remote.RemoteLogSegmentReference;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.entity.LimitScanResultForBucket;
 import org.apache.fluss.rpc.entity.ListOffsetsResultForBucket;
@@ -148,6 +150,7 @@ import org.apache.fluss.rpc.messages.PbRebalancePlanForBucket;
 import org.apache.fluss.rpc.messages.PbRebalanceProgressForBucket;
 import org.apache.fluss.rpc.messages.PbRemoteLogManifestEntry;
 import org.apache.fluss.rpc.messages.PbRemoteLogSegment;
+import org.apache.fluss.rpc.messages.PbRemoteLogSegmentReference;
 import org.apache.fluss.rpc.messages.PbRemotePathAndLocalFile;
 import org.apache.fluss.rpc.messages.PbRenameColumn;
 import org.apache.fluss.rpc.messages.PbServerNode;
@@ -1025,21 +1028,44 @@ public class ServerRpcMessageUtils {
                         .setLogStartOffset(0L);
 
                 if (bucketResult.fetchFromRemote()) {
-                    RemoteLogFetchInfo rlfInfo = bucketResult.remoteLogFetchInfo();
-                    checkNotNull(rlfInfo, "Remote log fetch info is null.");
-                    List<PbRemoteLogSegment> remoteLogSegmentList = new ArrayList<>();
-                    for (RemoteLogSegment logSegment : rlfInfo.remoteLogSegmentList()) {
-                        remoteLogSegmentList.add(toPbRemoteLogSegment(logSegment));
-                    }
-                    fetchLogRespForBucket
-                            .setRemoteLogFetchInfo()
-                            .setRemoteLogTabletDir(rlfInfo.remoteLogTabletDir())
-                            .addAllRemoteLogSegments(remoteLogSegmentList)
-                            .setFirstStartPos(rlfInfo.firstStartPos());
-                    if (rlfInfo.partitionName() != null) {
+                    RemoteLogFetchInfoV2 rlfInfoV2 = bucketResult.remoteLogFetchInfoV2();
+                    if (rlfInfoV2 != null) {
+                        List<PbRemoteLogSegmentReference> references = new ArrayList<>();
+                        for (RemoteLogSegmentReference reference : rlfInfoV2.activeReferences()) {
+                            references.add(
+                                    new PbRemoteLogSegmentReference()
+                                            .setSegment(
+                                                    toPbRemoteLogSegment(
+                                                            reference.remoteLogSegment()))
+                                            .setLogicalStartOffset(reference.logicalStartOffset())
+                                            .setLogicalEndOffset(reference.logicalEndOffset()));
+                        }
+                        fetchLogRespForBucket
+                                .setRemoteLogFetchInfoV2()
+                                .setRemoteLogTabletDir(rlfInfoV2.remoteLogTabletDir())
+                                .addAllActiveReferences(references);
+                        if (rlfInfoV2.partitionName() != null) {
+                            fetchLogRespForBucket
+                                    .setRemoteLogFetchInfoV2()
+                                    .setPartitionName(rlfInfoV2.partitionName());
+                        }
+                    } else {
+                        RemoteLogFetchInfo rlfInfo = bucketResult.remoteLogFetchInfo();
+                        checkNotNull(rlfInfo, "Remote log fetch info is null.");
+                        List<PbRemoteLogSegment> remoteLogSegmentList = new ArrayList<>();
+                        for (RemoteLogSegment logSegment : rlfInfo.remoteLogSegmentList()) {
+                            remoteLogSegmentList.add(toPbRemoteLogSegment(logSegment));
+                        }
                         fetchLogRespForBucket
                                 .setRemoteLogFetchInfo()
-                                .setPartitionName(rlfInfo.partitionName());
+                                .setRemoteLogTabletDir(rlfInfo.remoteLogTabletDir())
+                                .addAllRemoteLogSegments(remoteLogSegmentList)
+                                .setFirstStartPos(rlfInfo.firstStartPos());
+                        if (rlfInfo.partitionName() != null) {
+                            fetchLogRespForBucket
+                                    .setRemoteLogFetchInfo()
+                                    .setPartitionName(rlfInfo.partitionName());
+                        }
                     }
                 } else {
                     // set records

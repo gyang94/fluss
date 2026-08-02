@@ -18,14 +18,28 @@
 package org.apache.fluss.server.utils;
 
 import org.apache.fluss.fs.FsPath;
+import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TablePath;
+import org.apache.fluss.remote.RemoteLogFetchInfoV2;
+import org.apache.fluss.remote.RemoteLogSegment;
+import org.apache.fluss.remote.RemoteLogSegmentReference;
+import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.messages.CommitRemoteLogManifestRequest;
+import org.apache.fluss.rpc.messages.FetchLogResponse;
+import org.apache.fluss.rpc.messages.PbFetchLogRespForBucket;
+import org.apache.fluss.rpc.messages.PbRemoteLogFetchInfo;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
+import java.util.UUID;
+
+import static org.apache.fluss.rpc.util.CommonRpcMessageUtils.getFetchLogResultForBucket;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getCommitRemoteLogManifestData;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeCommitRemoteLogManifestRequest;
+import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeFetchLogResponse;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -63,5 +77,51 @@ class ServerRpcMessageUtilsTest {
                         () -> getCommitRemoteLogManifestData(absentRequest.setExpectedZkVersion(1)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("ABSENT");
+    }
+
+    @Test
+    void testRemoteLogFetchInfoV2RoundTrip() {
+        TablePath tablePath = TablePath.of("db", "table");
+        PhysicalTablePath physicalTablePath = PhysicalTablePath.of(tablePath);
+        TableBucket tableBucket = new TableBucket(1L, 0);
+        RemoteLogSegment segment =
+                RemoteLogSegment.Builder.builder()
+                        .physicalTablePath(physicalTablePath)
+                        .tableBucket(tableBucket)
+                        .remoteLogSegmentId(UUID.randomUUID())
+                        .remoteLogStartOffset(0L)
+                        .remoteLogEndOffset(20L)
+                        .maxTimestamp(1L)
+                        .segmentSizeInBytes(100)
+                        .build();
+        RemoteLogSegmentReference reference = new RemoteLogSegmentReference(segment, 5L, 20L);
+        FetchLogResultForBucket result =
+                new FetchLogResultForBucket(
+                        tableBucket,
+                        new RemoteLogFetchInfoV2(
+                                "file:///remote/tablet",
+                                null,
+                                Collections.singletonList(reference)),
+                        20L);
+
+        FetchLogResponse response =
+                makeFetchLogResponse(Collections.singletonMap(tableBucket, result));
+        PbFetchLogRespForBucket pbBucket = response.getTablesRespAt(0).getBucketsRespAt(0);
+
+        assertThat(pbBucket.hasRemoteLogFetchInfo()).isFalse();
+        assertThat(pbBucket.hasRemoteLogFetchInfoV2()).isTrue();
+
+        FetchLogResultForBucket decoded =
+                getFetchLogResultForBucket(tableBucket, tablePath, pbBucket);
+        assertThat(decoded.remoteLogFetchInfo()).isNull();
+        assertThat(decoded.remoteLogFetchInfoV2().activeReferences()).containsExactly(reference);
+
+        PbFetchLogRespForBucket ambiguousBucket =
+                pbBucket.setRemoteLogFetchInfo(
+                        new PbRemoteLogFetchInfo().setRemoteLogTabletDir("file:///legacy"));
+        assertThatThrownBy(
+                        () -> getFetchLogResultForBucket(tableBucket, tablePath, ambiguousBucket))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("both v0 and v1");
     }
 }
