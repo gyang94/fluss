@@ -1774,7 +1774,8 @@ public class ReplicaManager implements ServerReconfigurable {
 
     private @Nullable RemoteLogFetchInfo fetchLogFromRemote(Replica replica, long fetchOffset) {
         List<RemoteLogSegment> remoteLogSegmentList =
-                remoteLogManager.relevantRemoteLogSegments(replica.getTableBucket(), fetchOffset);
+                remoteLogManager.relevantRemoteLogSegmentsForFetchV0(
+                        replica.getTableBucket(), fetchOffset);
         if (!remoteLogSegmentList.isEmpty()) {
             int firstStartPos =
                     remoteLogManager.lookupPositionForOffset(
