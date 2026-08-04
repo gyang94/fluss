@@ -17,20 +17,32 @@
 
 package org.apache.fluss.server.coordinator;
 
+import org.apache.fluss.cluster.Endpoint;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.cluster.AlterConfigOpType;
+import org.apache.fluss.exception.InvalidConfigException;
+import org.apache.fluss.rpc.messages.AlterClusterConfigsRequest;
+import org.apache.fluss.rpc.messages.PbAlterConfig;
 import org.apache.fluss.server.ServerBase;
 import org.apache.fluss.server.ServerTestBase;
+import org.apache.fluss.server.metadata.TabletServerResource;
 import org.apache.fluss.server.zk.data.CoordinatorAddress;
+import org.apache.fluss.server.zk.data.TabletServerRegistration;
+import org.apache.fluss.server.zk.data.ZkData;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.fluss.testutils.common.CommonTestUtils.waitUntil;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link CoordinatorServer} . */
 class CoordinatorServerTest extends ServerTestBase {
@@ -83,5 +95,42 @@ class CoordinatorServerTest extends ServerTestBase {
                 () -> zookeeperClient.getCoordinatorLeaderAddress().isPresent(),
                 Duration.ofSeconds(5),
                 "Fail to wait coordinator server elected");
+    }
+
+    @Test
+    void testRejectManifestV2ActivationWhenLegacyTabletServerIsLive() throws Exception {
+        int legacyServerId = 100;
+        try {
+            zookeeperClient.registerTabletServer(
+                    legacyServerId,
+                    new TabletServerRegistration(
+                            null,
+                            Collections.singletonList(new Endpoint("localhost", 10000, "FLUSS")),
+                            System.currentTimeMillis(),
+                            TabletServerResource.unknown()));
+            PbAlterConfig config =
+                    new PbAlterConfig()
+                            .setConfigKey(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED.key())
+                            .setConfigValue("true")
+                            .setOpType(AlterConfigOpType.SET.value());
+            AlterClusterConfigsRequest request =
+                    new AlterClusterConfigsRequest()
+                            .addAllAlterConfigs(Collections.singletonList(config));
+
+            assertThatThrownBy(
+                            () ->
+                                    coordinatorServer
+                                            .getCoordinatorService()
+                                            .alterClusterConfigs(request)
+                                            .get(10, TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(InvalidConfigException.class)
+                    .hasMessageContaining("live tablet servers [100]");
+            assertThat(zookeeperClient.fetchEntityConfig())
+                    .doesNotContainKey(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED.key());
+        } finally {
+            ZOO_KEEPER_EXTENSION_WRAPPER
+                    .getCustomExtension()
+                    .cleanupPath(ZkData.ServerIdZNode.path(legacyServerId));
+        }
     }
 }

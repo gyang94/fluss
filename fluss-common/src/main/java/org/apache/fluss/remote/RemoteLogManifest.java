@@ -271,6 +271,9 @@ public final class RemoteLogManifest {
 
     public RemoteLogManifest trimAndMerge(
             List<RemoteLogSegment> deletedSegments, List<RemoteLogSegment> addedSegments) {
+        if (version != VERSION_1) {
+            throw new IllegalStateException("trimAndMerge only supports V1 manifests");
+        }
         Set<UUID> deletedIds =
                 deletedSegments.stream()
                         .map(RemoteLogSegment::remoteLogSegmentId)

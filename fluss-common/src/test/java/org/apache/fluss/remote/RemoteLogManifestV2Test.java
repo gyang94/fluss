@@ -63,6 +63,18 @@ class RemoteLogManifestV2Test {
     }
 
     @Test
+    void testV1TrimAndMergeRejectsV2Manifest() {
+        RemoteLogManifest manifest = v2(1L, 0L, segment(0L, 10L));
+
+        assertThatThrownBy(
+                        () ->
+                                manifest.trimAndMerge(
+                                        Collections.emptyList(), Collections.emptyList()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("only supports V1");
+    }
+
+    @Test
     void testCachedLogicalViewUsesDefensiveSegmentCopy() {
         RemoteLogSegment segment = segment(0, 10);
         List<RemoteLogSegment> inputSegments = new ArrayList<>();

@@ -37,6 +37,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import static org.apache.fluss.record.TestData.DATA1_PHYSICAL_TABLE_PATH;
@@ -45,6 +47,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Integration tests for the feature-gated Manifest V2 writer. */
 class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
+
+    private final AtomicBoolean manifestV2WriterEnabled = new AtomicBoolean(true);
+
+    @Override
+    protected BooleanSupplier manifestV2WriterEnabledSupplier() {
+        return manifestV2WriterEnabled::get;
+    }
 
     @Override
     public Configuration getServerConf() {
@@ -80,6 +89,51 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
         assertThat(remoteLogTablet.currentHandle()).isNotNull();
         assertThat(remoteLogTablet.currentHandle().handle().getVersion())
                 .isEqualTo(RemoteLogManifestHandle.VERSION_2);
+    }
+
+    @Test
+    void testExistingTieringTaskSwitchesToV2AfterDynamicActivation() throws Exception {
+        manifestV2WriterEnabled.set(false);
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tableBucket, false);
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
+
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        assertThat(remoteLogManager.remoteLogTablet(tableBucket).currentManifest().getVersion())
+                .isEqualTo(RemoteLogManifest.VERSION_1);
+
+        manifestV2WriterEnabled.set(true);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        assertThat(remoteLogManager.remoteLogTablet(tableBucket).currentManifest().getVersion())
+                .isEqualTo(RemoteLogManifest.VERSION_2);
+    }
+
+    @Test
+    void testV1PathDoesNotCopyWhenAuthoritativeManifestIsV2() throws Exception {
+        manifestV2WriterEnabled.set(false);
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        RemoteLogManifest emptyV2 =
+                RemoteLogManifest.createV2(
+                        1L,
+                        DATA1_PHYSICAL_TABLE_PATH,
+                        tableBucket,
+                        Collections.emptyList(),
+                        null,
+                        Collections.emptyList());
+        FsPath manifestPath = remoteLogStorage.writeRemoteLogManifestSnapshot(emptyV2);
+        zkClient.createRemoteLogManifestHandleIfAbsent(
+                tableBucket, RemoteLogManifestHandle.v2Empty(manifestPath, 1L));
+        makeLogTableAsLeader(tableBucket, false);
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
+
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        assertThat(remoteLogStorage.getCopySegmentCount()).isZero();
+        assertThat(remoteLogManager.remoteLogTablet(tableBucket).currentManifest())
+                .isEqualTo(emptyV2);
     }
 
     @Test

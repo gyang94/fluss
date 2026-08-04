@@ -183,6 +183,7 @@ import org.apache.fluss.server.zk.data.LeaderAndIsr;
 import org.apache.fluss.server.zk.data.PartitionAssignment;
 import org.apache.fluss.server.zk.data.TableAssignment;
 import org.apache.fluss.server.zk.data.TableRegistration;
+import org.apache.fluss.server.zk.data.TabletServerRegistration;
 import org.apache.fluss.server.zk.data.lake.LakeTable;
 import org.apache.fluss.server.zk.data.lake.LakeTableHelper;
 import org.apache.fluss.server.zk.data.producer.ProducerOffsets;
@@ -1482,6 +1483,7 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                 new AccessContextEvent<>(
                         (context) -> {
                             try {
+                                validateManifestV2Activation(serverConfigChanges);
                                 dynamicConfigManager.alterConfigs(serverConfigChanges);
                                 future.complete(new AlterClusterConfigsResponse());
                             } catch (ApiException e) {
@@ -1495,6 +1497,43 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                         });
         eventManagerSupplier.get().put(accessContextEvent);
         return future;
+    }
+
+    private void validateManifestV2Activation(List<AlterConfig> serverConfigChanges)
+            throws Exception {
+        boolean activatesManifestV2 = false;
+        for (AlterConfig change : serverConfigChanges) {
+            if (ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED.key().equals(change.key())
+                    && change.opType() == AlterConfigOpType.SET
+                    && Boolean.parseBoolean(change.value())) {
+                activatesManifestV2 = true;
+                break;
+            }
+        }
+        if (!activatesManifestV2) {
+            return;
+        }
+
+        int[] liveServerIds = zkClient.getSortedTabletServerList();
+        Map<Integer, TabletServerRegistration> registrations =
+                zkClient.getTabletServers(liveServerIds);
+        List<Integer> incompatibleServers = new ArrayList<>();
+        for (int serverId : liveServerIds) {
+            TabletServerRegistration registration = registrations.get(serverId);
+            if (registration == null
+                    || !registration.supportsCapability(
+                            TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
+                incompatibleServers.add(serverId);
+            }
+        }
+        if (!incompatibleServers.isEmpty()) {
+            throw new InvalidConfigException(
+                    String.format(
+                            "Cannot activate Manifest V2 writer because live tablet servers %s "
+                                    + "do not advertise remote manifest version-dispatch "
+                                    + "capability.",
+                            incompatibleServers));
+        }
     }
 
     @Override

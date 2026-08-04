@@ -61,6 +61,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 /**
@@ -77,7 +78,7 @@ public class RemoteLogManager implements Closeable {
 
     private final long taskInterval;
     private final int maxUploadSegmentsPerTask;
-    private final boolean manifestV2WriterEnabled;
+    private final BooleanSupplier manifestV2WriterEnabledSupplier;
     private final long manifestV2GcGracePeriodMs;
     private final Map<File, RemoteLogIndexCache> remoteLogIndexCachesByDir;
     private final RemoteLogStorage remoteLogStorage;
@@ -105,11 +106,33 @@ public class RemoteLogManager implements Closeable {
                 coordinatorGateway,
                 localDiskManager,
                 logManager,
+                clock,
+                ioExecutor,
+                () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
+    }
+
+    public RemoteLogManager(
+            Configuration conf,
+            ZooKeeperClient zkClient,
+            CoordinatorGateway coordinatorGateway,
+            LocalDiskManager localDiskManager,
+            LogManager logManager,
+            Clock clock,
+            ExecutorService ioExecutor,
+            BooleanSupplier manifestV2WriterEnabled)
+            throws IOException {
+        this(
+                conf,
+                zkClient,
+                coordinatorGateway,
+                localDiskManager,
+                logManager,
                 new DefaultRemoteLogStorage(conf, ioExecutor),
                 Executors.newScheduledThreadPool(
                         conf.getInt(ConfigOptions.REMOTE_LOG_MANAGER_THREAD_POOL_SIZE),
                         new ExecutorThreadFactory(RLM_SCHEDULED_THREAD_PREFIX)),
-                clock);
+                clock,
+                manifestV2WriterEnabled);
     }
 
     @VisibleForTesting
@@ -122,6 +145,30 @@ public class RemoteLogManager implements Closeable {
             RemoteLogStorage remoteLogStorage,
             ScheduledExecutorService scheduledExecutor,
             Clock clock)
+            throws IOException {
+        this(
+                conf,
+                zkClient,
+                coordinatorGateway,
+                localDiskManager,
+                logManager,
+                remoteLogStorage,
+                scheduledExecutor,
+                clock,
+                () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
+    }
+
+    @VisibleForTesting
+    public RemoteLogManager(
+            Configuration conf,
+            ZooKeeperClient zkClient,
+            CoordinatorGateway coordinatorGateway,
+            LocalDiskManager localDiskManager,
+            LogManager logManager,
+            RemoteLogStorage remoteLogStorage,
+            ScheduledExecutorService scheduledExecutor,
+            Clock clock,
+            BooleanSupplier manifestV2WriterEnabled)
             throws IOException {
         this.remoteLogStorage = remoteLogStorage;
         this.zkClient = zkClient;
@@ -136,8 +183,7 @@ public class RemoteLogManager implements Closeable {
         this.taskInterval = conf.get(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION).toMillis();
         this.maxUploadSegmentsPerTask =
                 conf.getInt(ConfigOptions.REMOTE_LOG_TASK_MAX_UPLOAD_SEGMENTS);
-        this.manifestV2WriterEnabled =
-                conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED);
+        this.manifestV2WriterEnabledSupplier = manifestV2WriterEnabled;
         this.manifestV2GcGracePeriodMs =
                 conf.get(ConfigOptions.REMOTE_LOG_MANIFEST_V2_GC_GRACE_PERIOD).toMillis();
         if (manifestV2GcGracePeriodMs < 0L) {
@@ -381,7 +427,7 @@ public class RemoteLogManager implements Closeable {
                                     zkClient,
                                     clock,
                                     maxUploadSegmentsPerTask,
-                                    manifestV2WriterEnabled,
+                                    manifestV2WriterEnabledSupplier,
                                     manifestV2GcGracePeriodMs);
                     LOG.info(
                             "Created a new remote log task for table-bucket{}: {} and getting scheduled",

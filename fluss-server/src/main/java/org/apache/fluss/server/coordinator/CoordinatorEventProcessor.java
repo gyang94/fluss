@@ -59,6 +59,7 @@ import org.apache.fluss.rpc.messages.PbCommitLakeTableSnapshotRespForTable;
 import org.apache.fluss.rpc.messages.RebalanceResponse;
 import org.apache.fluss.rpc.messages.RemoveServerTagResponse;
 import org.apache.fluss.rpc.protocol.ApiError;
+import org.apache.fluss.server.config.RemoteManifestV2WriterGate;
 import org.apache.fluss.server.coordinator.event.AccessContextEvent;
 import org.apache.fluss.server.coordinator.event.AddServerTagEvent;
 import org.apache.fluss.server.coordinator.event.AdjustIsrReceivedEvent;
@@ -196,7 +197,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
     private final RebalanceManager rebalanceManager;
     private final Scheduler scheduler;
     private final long offlineLeaderRetryDelayMs;
-    private final boolean manifestV2WriterEnabled;
+    private final RemoteManifestV2WriterGate remoteManifestV2WriterGate;
     private final CompletedSnapshotStoreManager completedSnapshotStoreManager;
     private final LakeTableHelper lakeTableHelper;
     private ScheduledFuture<?> offlineLeaderRetryTask;
@@ -216,6 +217,40 @@ public class CoordinatorEventProcessor implements EventProcessor {
             KvSnapshotLeaseManager kvSnapshotLeaseManager,
             Scheduler scheduler,
             Clock clock) {
+        this(
+                zooKeeperClient,
+                serverMetadataCache,
+                coordinatorChannelManager,
+                coordinatorContext,
+                replicaCapacityController,
+                autoPartitionManager,
+                lakeTableTieringManager,
+                coordinatorMetricGroup,
+                conf,
+                ioExecutor,
+                metadataManager,
+                kvSnapshotLeaseManager,
+                scheduler,
+                clock,
+                new RemoteManifestV2WriterGate(conf));
+    }
+
+    public CoordinatorEventProcessor(
+            ZooKeeperClient zooKeeperClient,
+            CoordinatorMetadataCache serverMetadataCache,
+            CoordinatorChannelManager coordinatorChannelManager,
+            CoordinatorContext coordinatorContext,
+            ReplicaCapacityController replicaCapacityController,
+            AutoPartitionManager autoPartitionManager,
+            LakeTableTieringManager lakeTableTieringManager,
+            CoordinatorMetricGroup coordinatorMetricGroup,
+            Configuration conf,
+            ExecutorService ioExecutor,
+            MetadataManager metadataManager,
+            KvSnapshotLeaseManager kvSnapshotLeaseManager,
+            Scheduler scheduler,
+            Clock clock,
+            RemoteManifestV2WriterGate remoteManifestV2WriterGate) {
         this.zooKeeperClient = zooKeeperClient;
         this.serverMetadataCache = serverMetadataCache;
         this.coordinatorChannelManager = coordinatorChannelManager;
@@ -278,8 +313,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
                         this, zooKeeperClient, coordinatorEventManager, SystemClock.getInstance());
         this.offlineLeaderRetryDelayMs =
                 conf.get(ConfigOptions.COORDINATOR_OFFLINE_LEADER_RETRY_DELAY).toMillis();
-        this.manifestV2WriterEnabled =
-                conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED);
+        this.remoteManifestV2WriterGate = remoteManifestV2WriterGate;
         if (offlineLeaderRetryDelayMs <= 0) {
             throw new IllegalArgumentException(
                     String.format(
@@ -394,7 +428,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
                 zooKeeperClient.getTabletServers(currentServers);
         for (int server : currentServers) {
             TabletServerRegistration registration = tabletServerRegistrations.get(server);
-            if (manifestV2WriterEnabled
+            if (remoteManifestV2WriterGate.isEnabled()
                     && !registration.supportsCapability(
                             TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
                 LOG.error(
@@ -1307,7 +1341,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
         // when we finish the logic of tablet server
         ServerInfo serverInfo = newTabletServerEvent.getServerInfo();
         int tabletServerId = serverInfo.id();
-        if (manifestV2WriterEnabled
+        if (remoteManifestV2WriterGate.isEnabled()
                 && !serverInfo.supportsCapability(
                         TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
             LOG.error(
@@ -2168,7 +2202,8 @@ public class CoordinatorEventProcessor implements EventProcessor {
         CommitRemoteLogManifestResponse response = new CommitRemoteLogManifestResponse();
         TableBucket tb = event.getTableBucket();
         if (manifestData.isV2CasCommit()) {
-            if (!manifestV2WriterEnabled || !allLiveAssignedReplicasSupportManifestV2(tb)) {
+            if (!remoteManifestV2WriterGate.isEnabled()
+                    || !allLiveAssignedReplicasSupportManifestV2(tb)) {
                 LOG.error(
                         "Rejected Manifest V2 commit for {} because the writer gate is disabled "
                                 + "or a live assigned replica lacks version-dispatch capability.",

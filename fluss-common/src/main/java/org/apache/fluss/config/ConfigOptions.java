@@ -1111,9 +1111,10 @@ public class ConfigOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            "Enables CAS publishing of Manifest V2 snapshots and overlap-aware "
-                                    + "remote segment replacement. Keep disabled until every "
-                                    + "remote-log reader supports manifest version dispatch.");
+                            "Dynamically and irreversibly enables CAS publishing of Manifest V2 "
+                                    + "snapshots and overlap-aware remote segment replacement. "
+                                    + "Keep disabled during rolling upgrades and enable only after "
+                                    + "all servers support manifest version dispatch.");
 
     public static final ConfigOption<Duration> REMOTE_LOG_MANIFEST_V2_GC_GRACE_PERIOD =
             key("remote.log.manifest-v2-gc-grace-period")

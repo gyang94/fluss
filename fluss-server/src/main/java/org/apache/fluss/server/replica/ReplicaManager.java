@@ -151,6 +151,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -272,6 +273,47 @@ public class ReplicaManager implements ServerReconfigurable {
                 fatalErrorHandler,
                 serverMetricGroup,
                 userMetrics,
+                scannerManager,
+                clock,
+                ioExecutor,
+                localDiskManager,
+                () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
+    }
+
+    public ReplicaManager(
+            Configuration conf,
+            Scheduler scheduler,
+            LogManager logManager,
+            KvManager kvManager,
+            ZooKeeperClient zkClient,
+            int serverId,
+            TabletServerMetadataCache metadataCache,
+            RpcClient rpcClient,
+            CoordinatorGateway coordinatorGateway,
+            CompletedKvSnapshotCommitter completedKvSnapshotCommitter,
+            FatalErrorHandler fatalErrorHandler,
+            TabletServerMetricGroup serverMetricGroup,
+            UserMetrics userMetrics,
+            ScannerManager scannerManager,
+            Clock clock,
+            ExecutorService ioExecutor,
+            LocalDiskManager localDiskManager,
+            BooleanSupplier manifestV2WriterEnabled)
+            throws IOException {
+        this(
+                conf,
+                scheduler,
+                logManager,
+                kvManager,
+                zkClient,
+                serverId,
+                metadataCache,
+                rpcClient,
+                coordinatorGateway,
+                completedKvSnapshotCommitter,
+                fatalErrorHandler,
+                serverMetricGroup,
+                userMetrics,
                 new RemoteLogManager(
                         conf,
                         zkClient,
@@ -279,7 +321,8 @@ public class ReplicaManager implements ServerReconfigurable {
                         localDiskManager,
                         logManager,
                         clock,
-                        ioExecutor),
+                        ioExecutor,
+                        manifestV2WriterEnabled),
                 scannerManager,
                 clock,
                 ioExecutor,

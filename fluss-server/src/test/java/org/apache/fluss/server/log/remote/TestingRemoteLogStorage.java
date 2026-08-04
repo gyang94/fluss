@@ -124,6 +124,10 @@ public class TestingRemoteLogStorage extends DefaultRemoteLogStorage {
         copySegmentCount.incrementAndGet();
     }
 
+    public int getCopySegmentCount() {
+        return copySegmentCount.get();
+    }
+
     @Override
     public FsPath writeRemoteLogManifestSnapshot(RemoteLogManifest manifest)
             throws RemoteStorageException {

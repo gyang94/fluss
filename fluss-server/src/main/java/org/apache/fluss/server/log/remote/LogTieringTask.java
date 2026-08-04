@@ -55,6 +55,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeCommitRemoteLogManifestRequest;
@@ -76,7 +77,7 @@ public class LogTieringTask implements Runnable {
     private final ZooKeeperClient zooKeeperClient;
     private final Clock clock;
     private final int maxUploadSegmentsPerTask;
-    private final boolean manifestV2WriterEnabled;
+    private final BooleanSupplier manifestV2WriterEnabledSupplier;
     private final long manifestV2GcGracePeriodMs;
 
     // The copied offset is empty initially for a new leader LogTieringTask, and needs to
@@ -97,6 +98,30 @@ public class LogTieringTask implements Runnable {
             int maxUploadSegmentsPerTask,
             boolean manifestV2WriterEnabled,
             long manifestV2GcGracePeriodMs) {
+        this(
+                replica,
+                remoteLog,
+                remoteLogStorage,
+                remoteLogIndexCache,
+                coordinatorGateway,
+                zooKeeperClient,
+                clock,
+                maxUploadSegmentsPerTask,
+                () -> manifestV2WriterEnabled,
+                manifestV2GcGracePeriodMs);
+    }
+
+    public LogTieringTask(
+            Replica replica,
+            RemoteLogTablet remoteLog,
+            RemoteLogStorage remoteLogStorage,
+            RemoteLogIndexCache remoteLogIndexCache,
+            CoordinatorGateway coordinatorGateway,
+            ZooKeeperClient zooKeeperClient,
+            Clock clock,
+            int maxUploadSegmentsPerTask,
+            BooleanSupplier manifestV2WriterEnabled,
+            long manifestV2GcGracePeriodMs) {
         this.replica = replica;
         this.remoteLog = remoteLog;
         this.physicalTablePath = replica.getPhysicalTablePath();
@@ -109,7 +134,7 @@ public class LogTieringTask implements Runnable {
                 new RemoteLogManifestCommitter(coordinatorGateway, zooKeeperClient);
         this.clock = clock;
         this.maxUploadSegmentsPerTask = maxUploadSegmentsPerTask;
-        this.manifestV2WriterEnabled = manifestV2WriterEnabled;
+        this.manifestV2WriterEnabledSupplier = manifestV2WriterEnabled;
         this.manifestV2GcGracePeriodMs = manifestV2GcGracePeriodMs;
     }
 
@@ -154,7 +179,7 @@ public class LogTieringTask implements Runnable {
         LogTablet logTablet = replica.getLogTablet();
         TableMetricGroup metricGroup = replica.tableMetrics();
         maybeInitializeNextCopyOffset(logTablet);
-        if (manifestV2WriterEnabled) {
+        if (manifestV2WriterEnabledSupplier.getAsBoolean()) {
             runOnceV2(logTablet, metricGroup, true);
         } else {
             runOnceV1(logTablet, metricGroup);
@@ -162,6 +187,14 @@ public class LogTieringTask implements Runnable {
     }
 
     private void runOnceV1(LogTablet logTablet, TableMetricGroup metricGroup) throws Exception {
+        if (remoteLog.currentManifest().getVersion() == RemoteLogManifest.VERSION_2) {
+            LOG.info(
+                    "Skipping the Manifest V1 tiering path for {} because its authoritative "
+                            + "manifest is already V2. The local writer gate has not converged yet.",
+                    tableBucket);
+            return;
+        }
+
         // Get these candidate log segments to copy and these expired remote log segments to clean
         // up.
         List<EnrichedLogSegment> candidateToCopySegments = candidateToCopyLogSegments(logTablet);
@@ -231,6 +264,7 @@ public class LogTieringTask implements Runnable {
                 baseHandle == null
                         ? 1L
                         : baseHandle.handle().getManifestGeneration().orElse(0L) + 1L;
+        boolean migrationChanged = baseManifest.getVersion() == RemoteLogManifest.VERSION_1;
         RemoteLogManifest normalizedBase;
         Long migrationRebuildStartOffset = null;
         if (baseManifest.getVersion() == RemoteLogManifest.VERSION_1) {
@@ -317,6 +351,7 @@ public class LogTieringTask implements Runnable {
                         logTablet.isDataLakeEnabled() ? logTablet.getLakeLogEndOffset() : null);
         boolean expirationChanged = resultManifest != beforeExpiration;
         if (copiedSegments.isEmpty()
+                && !migrationChanged
                 && !eligibilityChanged
                 && !expirationChanged
                 && !garbageCollectionChanged) {
