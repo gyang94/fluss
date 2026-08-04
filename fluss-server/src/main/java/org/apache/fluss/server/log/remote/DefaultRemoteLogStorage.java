@@ -55,6 +55,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 
 import static org.apache.fluss.utils.FlussPaths.INDEX_FILE_SUFFIX;
+import static org.apache.fluss.utils.FlussPaths.REMOTE_LOG_MANIFEST_FILE_SUFFIX;
 import static org.apache.fluss.utils.FlussPaths.REMOTE_LOG_METADATA_DIR_NAME;
 import static org.apache.fluss.utils.FlussPaths.TIME_INDEX_FILE_SUFFIX;
 import static org.apache.fluss.utils.FlussPaths.WRITER_SNAPSHOT_FILE_SUFFIX;
@@ -285,7 +286,8 @@ public class DefaultRemoteLogStorage implements RemoteLogStorage {
             }
             List<RemoteLogStorageObject> objects = new ArrayList<>();
             for (FileStatus status : fileSystem.listStatus(metadataDir)) {
-                if (!status.isDir() && status.getPath().getName().endsWith(".manifest")) {
+                if (!status.isDir()
+                        && status.getPath().getName().endsWith(REMOTE_LOG_MANIFEST_FILE_SUFFIX)) {
                     objects.add(
                             new RemoteLogStorageObject(
                                     status.getPath(), status.getModificationTime()));

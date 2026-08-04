@@ -119,11 +119,6 @@ public class RemoteLogManifestJsonSerde
             throw new IllegalArgumentException(
                     "Unsupported remote log manifest version: " + version);
         }
-        if (version == RemoteLogManifest.VERSION_1) {
-            rejectField(node, GENERATION_FIELD, version);
-            rejectField(node, REMOTE_LOG_START_OFFSET_FIELD, version);
-            rejectField(node, UNREFERENCED_SEGMENTS_FIELD, version);
-        }
 
         String databaseName = required(node, DATABASE_NAME_FIELD).asText();
         String tableName = required(node, TABLE_NAME_FIELD).asText();
@@ -158,14 +153,6 @@ public class RemoteLogManifestJsonSerde
         long generation = required(node, GENERATION_FIELD).asLong();
         JsonNode remoteStartNode = node.get(REMOTE_LOG_START_OFFSET_FIELD);
         Long remoteStartOffset = remoteStartNode == null ? null : remoteStartNode.asLong();
-        if (!activeSegments.isEmpty() && remoteStartOffset == null) {
-            throw new IllegalArgumentException(
-                    "Non-empty V2 manifest is missing " + REMOTE_LOG_START_OFFSET_FIELD);
-        }
-        if (activeSegments.isEmpty() && remoteStartOffset != null) {
-            throw new IllegalArgumentException(
-                    "Empty V2 manifest must not contain " + REMOTE_LOG_START_OFFSET_FIELD);
-        }
 
         JsonNode unreferencedNode = required(node, UNREFERENCED_SEGMENTS_FIELD);
         if (!unreferencedNode.isArray()) {
@@ -233,13 +220,6 @@ public class RemoteLogManifestJsonSerde
             throw new IllegalArgumentException("Missing required field: " + fieldName);
         }
         return field;
-    }
-
-    private static void rejectField(JsonNode node, String fieldName, int version) {
-        if (node.get(fieldName) != null) {
-            throw new IllegalArgumentException(
-                    "Field " + fieldName + " is not valid for manifest version " + version);
-        }
     }
 
     public static RemoteLogManifest fromJson(byte[] json) {

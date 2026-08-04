@@ -40,28 +40,23 @@ class ServerRpcMessageUtilsTest {
                         tableBucket, new FsPath("file:///remote/m1"), 0L, 10L, 1L, 3, 4);
         CommitRemoteLogManifestRequest absentRequest = makeCommitRemoteLogManifestRequest(absent);
         assertThat(getCommitRemoteLogManifestData(absentRequest)).isEqualTo(absent);
-        assertThat(absentRequest.hasExpectedManifestPath()).isFalse();
-        assertThat(absentRequest.hasExpectedManifestGeneration()).isFalse();
         assertThat(absentRequest.hasExpectedZkVersion()).isFalse();
 
         CommitRemoteLogManifestData present =
                 CommitRemoteLogManifestData.v2Present(
-                        tableBucket,
-                        new FsPath("file:///remote/m2"),
-                        0L,
-                        20L,
-                        2L,
-                        new FsPath("file:///remote/m1"),
-                        1L,
-                        7,
-                        3,
-                        4);
+                        tableBucket, new FsPath("file:///remote/m2"), 0L, 20L, 2L, 7, 3, 4);
         assertThat(getCommitRemoteLogManifestData(makeCommitRemoteLogManifestRequest(present)))
                 .isEqualTo(present);
 
+        assertThat(
+                        getCommitRemoteLogManifestData(absentRequest.setExpectedZkVersion(1))
+                                .getExpectedZkVersion())
+                .isEqualTo(1);
         assertThatThrownBy(
-                        () -> getCommitRemoteLogManifestData(absentRequest.setExpectedZkVersion(1)))
+                        () ->
+                                getCommitRemoteLogManifestData(
+                                        absentRequest.setExpectedZkVersion(-1)))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("ABSENT");
+                .hasMessageContaining("wildcard");
     }
 }

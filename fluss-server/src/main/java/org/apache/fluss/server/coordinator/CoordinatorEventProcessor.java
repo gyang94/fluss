@@ -106,7 +106,6 @@ import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
 import org.apache.fluss.server.entity.DeleteReplicaResultForBucket;
 import org.apache.fluss.server.entity.NotifyLeaderAndIsrResultForBucket;
 import org.apache.fluss.server.entity.RemoteLogManifestCommitResult;
-import org.apache.fluss.server.entity.RemoteLogManifestExpectedHandleState;
 import org.apache.fluss.server.kv.snapshot.CompletedSnapshot;
 import org.apache.fluss.server.kv.snapshot.CompletedSnapshotStore;
 import org.apache.fluss.server.metadata.CoordinatorMetadataCache;
@@ -2169,10 +2168,10 @@ public class CoordinatorEventProcessor implements EventProcessor {
         CommitRemoteLogManifestResponse response = new CommitRemoteLogManifestResponse();
         TableBucket tb = event.getTableBucket();
         if (manifestData.isV2CasCommit()) {
-            if (!manifestV2WriterEnabled || !allAssignedReplicasSupportManifestV2(tb)) {
+            if (!manifestV2WriterEnabled || !allLiveAssignedReplicasSupportManifestV2(tb)) {
                 LOG.error(
                         "Rejected Manifest V2 commit for {} because the writer gate is disabled "
-                                + "or an assigned replica lacks version-dispatch capability.",
+                                + "or a live assigned replica lacks version-dispatch capability.",
                         tb);
                 return response.setCommitSuccess(false)
                         .setCommitResult(RemoteLogManifestCommitResult.INVALID_MANIFEST.code());
@@ -2193,18 +2192,13 @@ public class CoordinatorEventProcessor implements EventProcessor {
                             manifestData.getRemoteLogEndOffset());
             boolean committed;
             try {
-                if (manifestData.getExpectedHandleState()
-                        == RemoteLogManifestExpectedHandleState.ABSENT) {
+                if (manifestData.getExpectedZkVersion() == null) {
                     committed =
                             zooKeeperClient.createRemoteLogManifestHandleIfAbsent(tb, newHandle);
                 } else {
                     committed =
                             zooKeeperClient.compareAndSetRemoteLogManifestHandle(
-                                    tb,
-                                    manifestData.getExpectedManifestPath(),
-                                    manifestData.getExpectedManifestGeneration(),
-                                    manifestData.getExpectedZkVersion(),
-                                    newHandle);
+                                    tb, manifestData.getExpectedZkVersion(), newHandle);
                 }
             } catch (Exception e) {
                 // An I/O/transport failure is UNKNOWN. Complete exceptionally so the writer must
@@ -2264,30 +2258,25 @@ public class CoordinatorEventProcessor implements EventProcessor {
         return response;
     }
 
-    private boolean allAssignedReplicasSupportManifestV2(TableBucket tableBucket) {
+    private boolean allLiveAssignedReplicasSupportManifestV2(TableBucket tableBucket) {
         List<Integer> assignedReplicas = coordinatorContext.getAssignment(tableBucket);
         if (assignedReplicas.isEmpty()) {
             return false;
         }
-        try {
-            int[] replicaIds = assignedReplicas.stream().mapToInt(Integer::intValue).toArray();
-            Map<Integer, TabletServerRegistration> registrations =
-                    zooKeeperClient.getTabletServers(replicaIds);
-            for (Integer replicaId : assignedReplicas) {
-                TabletServerRegistration registration = registrations.get(replicaId);
-                if (registration == null
-                        || !registration.supportsCapability(
-                                TabletServerRegistration
-                                        .REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
-                    return false;
-                }
+        boolean hasLiveAssignedReplica = false;
+        Map<Integer, ServerInfo> liveTabletServers = coordinatorContext.getLiveTabletServers();
+        for (Integer replicaId : assignedReplicas) {
+            ServerInfo serverInfo = liveTabletServers.get(replicaId);
+            if (serverInfo == null) {
+                continue;
             }
-            return true;
-        } catch (Exception e) {
-            LOG.error(
-                    "Failed to verify Manifest V2 capability for replicas of {}.", tableBucket, e);
-            return false;
+            hasLiveAssignedReplica = true;
+            if (!serverInfo.supportsCapability(
+                    TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
+                return false;
+            }
         }
+        return hasLiveAssignedReplica;
     }
 
     private <T> void processAccessContext(AccessContextEvent<T> event) {

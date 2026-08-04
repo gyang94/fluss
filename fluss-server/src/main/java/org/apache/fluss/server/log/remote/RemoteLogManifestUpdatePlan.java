@@ -20,7 +20,6 @@ package org.apache.fluss.server.log.remote;
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.remote.RemoteLogManifest;
-import org.apache.fluss.remote.RemoteLogManifestReplacementPlanner.PlanType;
 import org.apache.fluss.remote.RemoteLogSegment;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
 import org.apache.fluss.server.zk.data.VersionedRemoteLogManifestHandle;
@@ -31,7 +30,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Immutable overlap-aware Manifest V2 update and its authoritative CAS base. */
@@ -40,34 +38,16 @@ public final class RemoteLogManifestUpdatePlan {
     private final @Nullable VersionedRemoteLogManifestHandle baseHandle;
     private final RemoteLogManifest resultManifest;
     private final List<RemoteLogSegment> segmentsToCopy;
-    private final List<RemoteLogSegment> segmentsToUnreference;
-    private final List<PlanType> planTypes;
     private final long nextCopyOffset;
 
     public RemoteLogManifestUpdatePlan(
             @Nullable VersionedRemoteLogManifestHandle baseHandle,
             RemoteLogManifest resultManifest,
             List<RemoteLogSegment> segmentsToCopy,
-            List<RemoteLogSegment> segmentsToUnreference,
-            List<PlanType> planTypes,
             long nextCopyOffset) {
         this.resultManifest = checkNotNull(resultManifest);
-        checkArgument(
-                resultManifest.getVersion() == RemoteLogManifest.VERSION_2,
-                "Update plan requires Manifest V2");
-        long expectedGeneration =
-                baseHandle == null
-                        ? 1L
-                        : baseHandle.handle().getManifestGeneration().orElse(0L) + 1L;
-        checkArgument(
-                resultManifest.getGeneration() == expectedGeneration,
-                "Result generation %s does not follow authoritative base generation %s",
-                resultManifest.getGeneration(),
-                expectedGeneration - 1L);
         this.baseHandle = baseHandle;
         this.segmentsToCopy = immutableCopy(segmentsToCopy);
-        this.segmentsToUnreference = immutableCopy(segmentsToUnreference);
-        this.planTypes = Collections.unmodifiableList(new ArrayList<>(checkNotNull(planTypes)));
         this.nextCopyOffset = nextCopyOffset;
     }
 
@@ -81,14 +61,6 @@ public final class RemoteLogManifestUpdatePlan {
 
     public List<RemoteLogSegment> segmentsToCopy() {
         return segmentsToCopy;
-    }
-
-    public List<RemoteLogSegment> segmentsToUnreference() {
-        return segmentsToUnreference;
-    }
-
-    public List<PlanType> planTypes() {
-        return planTypes;
     }
 
     public long nextCopyOffset() {
@@ -114,8 +86,6 @@ public final class RemoteLogManifestUpdatePlan {
                 resultManifest.getRemoteLogStartOffset(),
                 resultManifest.getRemoteLogEndOffset(),
                 resultManifest.getGeneration(),
-                baseHandle.handle().getRemoteLogManifestPath(),
-                baseHandle.handle().getManifestGeneration().orElse(0L),
                 baseHandle.zkVersion(),
                 coordinatorEpoch,
                 bucketLeaderEpoch);

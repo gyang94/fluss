@@ -49,9 +49,6 @@ public class CommitRemoteLogManifestData {
     private final int bucketLeaderEpoch;
 
     private final @Nullable Integer manifestFormatVersion;
-    private final @Nullable RemoteLogManifestExpectedHandleState expectedHandleState;
-    private final @Nullable FsPath expectedManifestPath;
-    private final @Nullable Long expectedManifestGeneration;
     private final @Nullable Integer expectedZkVersion;
     private final @Nullable Long newManifestGeneration;
 
@@ -71,9 +68,6 @@ public class CommitRemoteLogManifestData {
                 bucketLeaderEpoch,
                 null,
                 null,
-                null,
-                null,
-                null,
                 null);
     }
 
@@ -85,45 +79,29 @@ public class CommitRemoteLogManifestData {
             int coordinatorEpoch,
             int bucketLeaderEpoch,
             @Nullable Integer manifestFormatVersion,
-            @Nullable RemoteLogManifestExpectedHandleState expectedHandleState,
-            @Nullable FsPath expectedManifestPath,
-            @Nullable Long expectedManifestGeneration,
             @Nullable Integer expectedZkVersion,
             @Nullable Long newManifestGeneration) {
         if (manifestFormatVersion == null) {
             checkArgument(
-                    expectedHandleState == null
-                            && expectedManifestPath == null
-                            && expectedManifestGeneration == null
-                            && expectedZkVersion == null
-                            && newManifestGeneration == null,
+                    expectedZkVersion == null && newManifestGeneration == null,
                     "Legacy manifest commit must not contain V2 CAS fields");
         } else {
             checkArgument(manifestFormatVersion == 2, "Only Manifest V2 supports CAS publish");
-            checkArgument(expectedHandleState != null, "Expected handle state is required");
             checkArgument(
                     newManifestGeneration != null && newManifestGeneration > 0L,
                     "New manifest generation must be positive");
             checkArgument(
-                    remoteLogStartOffset < remoteLogEndOffset,
-                    "V2 remote log offsets must form a non-empty half-open range");
-            if (expectedHandleState == RemoteLogManifestExpectedHandleState.ABSENT) {
-                checkArgument(
-                        expectedManifestPath == null
-                                && expectedManifestGeneration == null
-                                && expectedZkVersion == null,
-                        "ABSENT commit must not contain expected handle fields");
+                    isEmptyRemoteLogRange(remoteLogStartOffset, remoteLogEndOffset)
+                            || remoteLogStartOffset < remoteLogEndOffset,
+                    "V2 remote log offsets must form a half-open range or the empty range");
+            if (expectedZkVersion == null) {
                 checkArgument(
                         newManifestGeneration == 1L, "Initial Manifest V2 generation must be 1");
             } else {
                 checkArgument(
-                        expectedManifestPath != null
-                                && expectedManifestGeneration != null
-                                && expectedZkVersion != null,
-                        "PRESENT commit requires expected path, generation, and ZK version");
-                checkArgument(
-                        newManifestGeneration == expectedManifestGeneration + 1L,
-                        "New generation must equal expected generation + 1");
+                        expectedZkVersion >= 0,
+                        "Expected ZK version must not use the wildcard value: %s",
+                        expectedZkVersion);
             }
         }
         this.tableBucket = tableBucket;
@@ -133,9 +111,6 @@ public class CommitRemoteLogManifestData {
         this.coordinatorEpoch = coordinatorEpoch;
         this.bucketLeaderEpoch = bucketLeaderEpoch;
         this.manifestFormatVersion = manifestFormatVersion;
-        this.expectedHandleState = expectedHandleState;
-        this.expectedManifestPath = expectedManifestPath;
-        this.expectedManifestGeneration = expectedManifestGeneration;
         this.expectedZkVersion = expectedZkVersion;
         this.newManifestGeneration = newManifestGeneration;
     }
@@ -156,9 +131,6 @@ public class CommitRemoteLogManifestData {
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 2,
-                RemoteLogManifestExpectedHandleState.ABSENT,
-                null,
-                null,
                 null,
                 newManifestGeneration);
     }
@@ -169,8 +141,6 @@ public class CommitRemoteLogManifestData {
             long remoteLogStartOffset,
             long remoteLogEndOffset,
             long newManifestGeneration,
-            FsPath expectedManifestPath,
-            long expectedManifestGeneration,
             int expectedZkVersion,
             int coordinatorEpoch,
             int bucketLeaderEpoch) {
@@ -182,9 +152,6 @@ public class CommitRemoteLogManifestData {
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 2,
-                RemoteLogManifestExpectedHandleState.PRESENT,
-                expectedManifestPath,
-                expectedManifestGeneration,
                 expectedZkVersion,
                 newManifestGeneration);
     }
@@ -217,20 +184,13 @@ public class CommitRemoteLogManifestData {
         return manifestFormatVersion != null;
     }
 
+    /** Returns whether this commit publishes a Manifest V2 with no active remote range. */
+    public boolean isEmptyV2Manifest() {
+        return isV2CasCommit() && isEmptyRemoteLogRange(remoteLogStartOffset, remoteLogEndOffset);
+    }
+
     public @Nullable Integer getManifestFormatVersion() {
         return manifestFormatVersion;
-    }
-
-    public @Nullable RemoteLogManifestExpectedHandleState getExpectedHandleState() {
-        return expectedHandleState;
-    }
-
-    public @Nullable FsPath getExpectedManifestPath() {
-        return expectedManifestPath;
-    }
-
-    public @Nullable Long getExpectedManifestGeneration() {
-        return expectedManifestGeneration;
     }
 
     public @Nullable Integer getExpectedZkVersion() {
@@ -248,6 +208,8 @@ public class CommitRemoteLogManifestData {
                 + tableBucket
                 + ", metadataSnapshotPath="
                 + remoteLogManifestPath
+                + ", remoteLogStartOffset="
+                + remoteLogStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
                 + ", coordinatorEpoch="
@@ -256,12 +218,6 @@ public class CommitRemoteLogManifestData {
                 + bucketLeaderEpoch
                 + ", manifestFormatVersion="
                 + manifestFormatVersion
-                + ", expectedHandleState="
-                + expectedHandleState
-                + ", expectedManifestPath="
-                + expectedManifestPath
-                + ", expectedManifestGeneration="
-                + expectedManifestGeneration
                 + ", expectedZkVersion="
                 + expectedZkVersion
                 + ", newManifestGeneration="
@@ -280,13 +236,11 @@ public class CommitRemoteLogManifestData {
         CommitRemoteLogManifestData that = (CommitRemoteLogManifestData) o;
         return Objects.equals(tableBucket, that.tableBucket)
                 && Objects.equals(remoteLogManifestPath, that.remoteLogManifestPath)
+                && remoteLogStartOffset == that.remoteLogStartOffset
                 && remoteLogEndOffset == that.remoteLogEndOffset
                 && coordinatorEpoch == that.coordinatorEpoch
                 && bucketLeaderEpoch == that.bucketLeaderEpoch
                 && Objects.equals(manifestFormatVersion, that.manifestFormatVersion)
-                && expectedHandleState == that.expectedHandleState
-                && Objects.equals(expectedManifestPath, that.expectedManifestPath)
-                && Objects.equals(expectedManifestGeneration, that.expectedManifestGeneration)
                 && Objects.equals(expectedZkVersion, that.expectedZkVersion)
                 && Objects.equals(newManifestGeneration, that.newManifestGeneration);
     }
@@ -296,14 +250,16 @@ public class CommitRemoteLogManifestData {
         return Objects.hash(
                 tableBucket,
                 remoteLogManifestPath,
+                remoteLogStartOffset,
                 remoteLogEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 manifestFormatVersion,
-                expectedHandleState,
-                expectedManifestPath,
-                expectedManifestGeneration,
                 expectedZkVersion,
                 newManifestGeneration);
+    }
+
+    private static boolean isEmptyRemoteLogRange(long startOffset, long endOffset) {
+        return startOffset == Long.MAX_VALUE && endOffset == -1L;
     }
 }

@@ -63,9 +63,15 @@ public class RemoteLogManifestHandle {
             checkArgument(
                     manifestGeneration != null && manifestGeneration > 0L,
                     "V2 manifest generation must be positive");
-            checkArgument(
-                    remoteLogStartOffset != null && remoteLogStartOffset < remoteLogEndOffset,
-                    "V2 remote log offsets must form a non-empty half-open range");
+            if (remoteLogStartOffset == null) {
+                checkArgument(
+                        remoteLogEndOffset == -1L,
+                        "Empty V2 manifest handle must use remote log end offset -1");
+            } else {
+                checkArgument(
+                        remoteLogStartOffset < remoteLogEndOffset,
+                        "V2 remote log offsets must form a non-empty half-open range");
+            }
         }
         this.version = version;
         this.remoteLogManifestPath = remoteLogManifestPath;
@@ -79,12 +85,22 @@ public class RemoteLogManifestHandle {
             long manifestGeneration,
             long remoteLogStartOffset,
             long remoteLogEndOffset) {
+        if (remoteLogStartOffset == Long.MAX_VALUE && remoteLogEndOffset == -1L) {
+            return v2Empty(remoteLogManifestPath, manifestGeneration);
+        }
         return new RemoteLogManifestHandle(
                 VERSION_2,
                 remoteLogManifestPath,
                 manifestGeneration,
                 remoteLogStartOffset,
                 remoteLogEndOffset);
+    }
+
+    /** Creates a Manifest V2 handle whose authoritative snapshot has no active remote range. */
+    public static RemoteLogManifestHandle v2Empty(
+            FsPath remoteLogManifestPath, long manifestGeneration) {
+        return new RemoteLogManifestHandle(
+                VERSION_2, remoteLogManifestPath, manifestGeneration, null, -1L);
     }
 
     public static FsPath fromRemoteLogManifestPath(String remoteLogManifestPath) {
@@ -113,6 +129,11 @@ public class RemoteLogManifestHandle {
 
     public long getRemoteLogEndOffset() {
         return remoteLogEndOffset;
+    }
+
+    /** Returns whether this is a Manifest V2 handle with no active remote range. */
+    public boolean isEmptyV2() {
+        return version == VERSION_2 && remoteLogStartOffset == null;
     }
 
     @Override

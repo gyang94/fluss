@@ -188,7 +188,6 @@ import org.apache.fluss.server.entity.NotifyLakeTableOffsetData;
 import org.apache.fluss.server.entity.NotifyLeaderAndIsrData;
 import org.apache.fluss.server.entity.NotifyLeaderAndIsrResultForBucket;
 import org.apache.fluss.server.entity.NotifyRemoteLogOffsetsData;
-import org.apache.fluss.server.entity.RemoteLogManifestExpectedHandleState;
 import org.apache.fluss.server.entity.StopReplicaData;
 import org.apache.fluss.server.entity.StopReplicaResultForBucket;
 import org.apache.fluss.server.kv.snapshot.CompletedSnapshot;
@@ -1684,11 +1683,7 @@ public class ServerRpcMessageUtils {
                         request.getBucketId());
         FsPath manifestPath = new FsPath(request.getRemoteLogManifestPath());
         if (!request.hasManifestFormatVersion()) {
-            if (request.hasExpectedHandleState()
-                    || request.hasExpectedManifestPath()
-                    || request.hasExpectedManifestGeneration()
-                    || request.hasExpectedZkVersion()
-                    || request.hasNewManifestGeneration()) {
+            if (request.hasExpectedZkVersion() || request.hasNewManifestGeneration()) {
                 throw new IllegalArgumentException("Legacy manifest commit contains V2 CAS fields");
             }
             return new CommitRemoteLogManifestData(
@@ -1700,21 +1695,11 @@ public class ServerRpcMessageUtils {
                     request.getBucketLeaderEpoch());
         }
 
-        if (request.getManifestFormatVersion() != 2
-                || !request.hasExpectedHandleState()
-                || !request.hasNewManifestGeneration()) {
+        if (request.getManifestFormatVersion() != 2 || !request.hasNewManifestGeneration()) {
             throw new IllegalArgumentException(
-                    "Manifest V2 commit requires format version, expected state, and generation");
+                    "Manifest V2 commit requires format version and generation");
         }
-        RemoteLogManifestExpectedHandleState expectedState =
-                RemoteLogManifestExpectedHandleState.fromCode(request.getExpectedHandleState());
-        if (expectedState == RemoteLogManifestExpectedHandleState.ABSENT) {
-            if (request.hasExpectedManifestPath()
-                    || request.hasExpectedManifestGeneration()
-                    || request.hasExpectedZkVersion()) {
-                throw new IllegalArgumentException(
-                        "ABSENT manifest commit contains PRESENT-only fields");
-            }
+        if (!request.hasExpectedZkVersion()) {
             return CommitRemoteLogManifestData.v2Absent(
                     tableBucket,
                     manifestPath,
@@ -1724,20 +1709,12 @@ public class ServerRpcMessageUtils {
                     request.getCoordinatorEpoch(),
                     request.getBucketLeaderEpoch());
         }
-        if (!request.hasExpectedManifestPath()
-                || !request.hasExpectedManifestGeneration()
-                || !request.hasExpectedZkVersion()) {
-            throw new IllegalArgumentException(
-                    "PRESENT manifest commit requires expected path, generation, and ZK version");
-        }
         return CommitRemoteLogManifestData.v2Present(
                 tableBucket,
                 manifestPath,
                 request.getRemoteLogStartOffset(),
                 request.getRemoteLogEndOffset(),
                 request.getNewManifestGeneration(),
-                new FsPath(request.getExpectedManifestPath()),
-                request.getExpectedManifestGeneration(),
                 request.getExpectedZkVersion(),
                 request.getCoordinatorEpoch(),
                 request.getBucketLeaderEpoch());
@@ -1760,17 +1737,10 @@ public class ServerRpcMessageUtils {
                 .setBucketLeaderEpoch(commitRemoteLogManifestData.getBucketLeaderEpoch());
         if (commitRemoteLogManifestData.isV2CasCommit()) {
             request.setManifestFormatVersion(commitRemoteLogManifestData.getManifestFormatVersion())
-                    .setExpectedHandleState(
-                            commitRemoteLogManifestData.getExpectedHandleState().code())
                     .setNewManifestGeneration(
                             commitRemoteLogManifestData.getNewManifestGeneration());
-            if (commitRemoteLogManifestData.getExpectedHandleState()
-                    == RemoteLogManifestExpectedHandleState.PRESENT) {
-                request.setExpectedManifestPath(
-                                commitRemoteLogManifestData.getExpectedManifestPath().toString())
-                        .setExpectedManifestGeneration(
-                                commitRemoteLogManifestData.getExpectedManifestGeneration())
-                        .setExpectedZkVersion(commitRemoteLogManifestData.getExpectedZkVersion());
+            if (commitRemoteLogManifestData.getExpectedZkVersion() != null) {
+                request.setExpectedZkVersion(commitRemoteLogManifestData.getExpectedZkVersion());
             }
         }
         return request;

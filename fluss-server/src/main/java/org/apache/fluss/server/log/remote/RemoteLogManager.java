@@ -78,7 +78,6 @@ public class RemoteLogManager implements Closeable {
     private final long taskInterval;
     private final int maxUploadSegmentsPerTask;
     private final boolean manifestV2WriterEnabled;
-    private final boolean manifestV2GcEnabled;
     private final long manifestV2GcGracePeriodMs;
     private final Map<File, RemoteLogIndexCache> remoteLogIndexCachesByDir;
     private final RemoteLogStorage remoteLogStorage;
@@ -139,13 +138,8 @@ public class RemoteLogManager implements Closeable {
                 conf.getInt(ConfigOptions.REMOTE_LOG_TASK_MAX_UPLOAD_SEGMENTS);
         this.manifestV2WriterEnabled =
                 conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED);
-        this.manifestV2GcEnabled = conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_GC_ENABLED);
         this.manifestV2GcGracePeriodMs =
                 conf.get(ConfigOptions.REMOTE_LOG_MANIFEST_V2_GC_GRACE_PERIOD).toMillis();
-        if (manifestV2GcEnabled && !manifestV2WriterEnabled) {
-            throw new IllegalArgumentException(
-                    "Manifest V2 GC requires remote.log.manifest-v2-writer-enabled=true");
-        }
         if (manifestV2GcGracePeriodMs < 0L) {
             throw new IllegalArgumentException("Manifest V2 GC grace period must not be negative");
         }
@@ -330,10 +324,17 @@ public class RemoteLogManager implements Closeable {
             }
             return;
         }
+        boolean emptyManifest = manifest.getRemoteLogSegmentList().isEmpty();
+        boolean startOffsetMatches =
+                emptyManifest
+                        ? handle.isEmptyV2()
+                        : handle.getRemoteLogStartOffset().isPresent()
+                                && handle.getRemoteLogStartOffset().getAsLong()
+                                        == manifest.getRemoteLogStartOffset();
         if (manifest.getVersion() != RemoteLogManifest.VERSION_2
+                || !handle.getManifestGeneration().isPresent()
                 || handle.getManifestGeneration().getAsLong() != manifest.getGeneration()
-                || handle.getRemoteLogStartOffset().getAsLong()
-                        != manifest.getRemoteLogStartOffset()
+                || !startOffsetMatches
                 || handle.getRemoteLogEndOffset() != manifest.getRemoteLogEndOffset()) {
             throw new IllegalStateException(
                     "V2 remote log manifest handle hints do not match manifest content");
@@ -381,7 +382,6 @@ public class RemoteLogManager implements Closeable {
                                     clock,
                                     maxUploadSegmentsPerTask,
                                     manifestV2WriterEnabled,
-                                    manifestV2GcEnabled,
                                     manifestV2GcGracePeriodMs);
                     LOG.info(
                             "Created a new remote log task for table-bucket{}: {} and getting scheduled",

@@ -24,7 +24,6 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.ConfigurationUtils;
 import org.apache.fluss.config.FlussConfigUtils;
 import org.apache.fluss.exception.CoordinatorEpochFencedException;
-import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.metadata.DatabaseSummary;
 import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
@@ -1403,31 +1402,10 @@ public class ZooKeeperClient implements AutoCloseable {
         }
     }
 
-    /**
-     * Replaces an existing authoritative handle only when path, virtual generation, and ZK version
-     * all match the caller's base snapshot.
-     */
+    /** Replaces an existing authoritative handle only when its ZK version matches the base. */
     public boolean compareAndSetRemoteLogManifestHandle(
-            TableBucket tableBucket,
-            FsPath expectedManifestPath,
-            long expectedManifestGeneration,
-            int expectedZkVersion,
-            RemoteLogManifestHandle newHandle)
+            TableBucket tableBucket, int expectedZkVersion, RemoteLogManifestHandle newHandle)
             throws Exception {
-        Optional<VersionedRemoteLogManifestHandle> currentOpt =
-                getVersionedRemoteLogManifestHandle(tableBucket);
-        if (!currentOpt.isPresent()) {
-            return false;
-        }
-        VersionedRemoteLogManifestHandle current = currentOpt.get();
-        RemoteLogManifestHandle currentHandle = current.handle();
-        long currentGeneration = currentHandle.getManifestGeneration().orElse(0L);
-        if (current.zkVersion() != expectedZkVersion
-                || !currentHandle.getRemoteLogManifestPath().equals(expectedManifestPath)
-                || currentGeneration != expectedManifestGeneration) {
-            return false;
-        }
-
         try {
             zkClient.setData()
                     .withVersion(expectedZkVersion)

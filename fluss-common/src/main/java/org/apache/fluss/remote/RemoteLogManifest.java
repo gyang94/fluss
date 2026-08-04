@@ -32,6 +32,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
+
 /**
  * A remote log manifest is an immutable list of current {@link RemoteLogSegment} which represents a
  * snapshot of a remote log tablet.
@@ -216,7 +218,13 @@ public final class RemoteLogManifest {
         if (version == VERSION_1) {
             return buildV1ActiveReferences();
         }
-        return buildV2ActiveReferences(remoteLogStartOffset);
+        if (remoteLogSegmentList.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return buildV2ActiveReferences(
+                checkNotNull(
+                        remoteLogStartOffset,
+                        "Non-empty V2 manifest must define remote log start offset"));
     }
 
     private List<RemoteLogSegmentReference> buildV1ActiveReferences() {
@@ -229,13 +237,12 @@ public final class RemoteLogManifest {
         return references;
     }
 
-    private List<RemoteLogSegmentReference> buildV2ActiveReferences(
-            @Nullable Long remoteLogStartOffset) {
+    private List<RemoteLogSegmentReference> buildV2ActiveReferences(long remoteLogStartOffset) {
         List<RemoteLogSegmentReference> references = new ArrayList<>(remoteLogSegmentList.size());
         for (int i = 0; i < remoteLogSegmentList.size(); i++) {
             RemoteLogSegment segment = remoteLogSegmentList.get(i);
             long logicalStartOffset =
-                    i == 0 ? remoteLogStartOffset.longValue() : segment.remoteLogStartOffset();
+                    i == 0 ? remoteLogStartOffset : segment.remoteLogStartOffset();
             long logicalEndOffset =
                     i + 1 < remoteLogSegmentList.size()
                             ? remoteLogSegmentList.get(i + 1).remoteLogStartOffset()
@@ -264,9 +271,6 @@ public final class RemoteLogManifest {
 
     public RemoteLogManifest trimAndMerge(
             List<RemoteLogSegment> deletedSegments, List<RemoteLogSegment> addedSegments) {
-        if (version != VERSION_1) {
-            throw new IllegalStateException("trimAndMerge only supports V1 manifests");
-        }
         Set<UUID> deletedIds =
                 deletedSegments.stream()
                         .map(RemoteLogSegment::remoteLogSegmentId)

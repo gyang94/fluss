@@ -29,6 +29,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests of {@link RemoteLogManifestJsonSerde}. */
@@ -158,17 +159,26 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
     }
 
     @Test
-    void testRejectVersionFieldMismatchAndMissingV2Fields() {
+    void testV1IgnoresV2Fields() {
         String identityFields =
                 "\"database\":\"db\",\"table\":\"mytable\",\"table_id\":1001,\"bucket_id\":1";
-        assertThatThrownBy(
-                        () ->
-                                deserialize(
-                                        "{\"version\":1,\"generation\":1,"
-                                                + identityFields
-                                                + ",\"remote_log_segments\":[]}"))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("generation is not valid for manifest version 1");
+        RemoteLogManifest manifest =
+                deserialize(
+                        "{\"version\":1,\"generation\":1,"
+                                + identityFields
+                                + ",\"remote_log_start_offset\":0,\"remote_log_segments\":[],"
+                                + "\"unreferenced_segments\":[]}");
+
+        assertThat(manifest.getVersion()).isEqualTo(RemoteLogManifest.VERSION_1);
+        assertThat(manifest.getGeneration()).isZero();
+        assertThat(manifest.getPersistedRemoteLogStartOffset()).isNull();
+        assertThat(manifest.getUnreferencedRemoteLogSegments()).isEmpty();
+    }
+
+    @Test
+    void testRejectMissingV2Fields() {
+        String identityFields =
+                "\"database\":\"db\",\"table\":\"mytable\",\"table_id\":1001,\"bucket_id\":1";
         assertThatThrownBy(
                         () ->
                                 deserialize(
@@ -176,7 +186,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                                 + identityFields
                                                 + ",\"remote_log_segments\":[{\"segment_id\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"start_offset\":0,\"end_offset\":10,\"max_timestamp\":10,\"size_in_bytes\":10}],\"unreferenced_segments\":[]}"))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("missing remote_log_start_offset");
+                .hasMessageContaining("must define remote log start offset");
     }
 
     private static RemoteLogManifest deserialize(String json) {

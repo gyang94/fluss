@@ -24,14 +24,60 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
+import static org.apache.fluss.remote.UnreferencedRemoteLogSegment.GC_INELIGIBLE_TIMESTAMP;
 import static org.apache.fluss.utils.Preconditions.checkArgument;
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Converts an authoritative V1 manifest into a canonical V2 manifest. */
 @Internal
 public final class RemoteLogManifestV2Migration {
 
-    public static RemoteLogManifest migrate(
-            RemoteLogManifest v1Manifest, long newGeneration, long unreferencedAtMs) {
+    /** Classification of a V1-to-V2 migration. */
+    public enum MigrationType {
+        MIGRATED,
+        GAPPED
+    }
+
+    /** A canonical V2 base together with whether it requires rebuilding from a local segment. */
+    public static final class Result {
+        private final MigrationType migrationType;
+        private final RemoteLogManifest resultManifest;
+        private final long gapStartOffset;
+        private final long gapEndOffset;
+
+        private Result(
+                MigrationType migrationType,
+                RemoteLogManifest resultManifest,
+                long gapStartOffset,
+                long gapEndOffset) {
+            this.migrationType = checkNotNull(migrationType);
+            this.resultManifest = checkNotNull(resultManifest);
+            this.gapStartOffset = gapStartOffset;
+            this.gapEndOffset = gapEndOffset;
+        }
+
+        public MigrationType migrationType() {
+            return migrationType;
+        }
+
+        public RemoteLogManifest resultManifest() {
+            return resultManifest;
+        }
+
+        public long gapStartOffset() {
+            return gapStartOffset;
+        }
+
+        public long gapEndOffset() {
+            return gapEndOffset;
+        }
+
+        public boolean requiresRebuild() {
+            return migrationType == MigrationType.GAPPED;
+        }
+    }
+
+    public static Result migrate(RemoteLogManifest v1Manifest, long newGeneration) {
         checkArgument(
                 v1Manifest.getVersion() == RemoteLogManifest.VERSION_1,
                 "Only V1 manifests can be migrated");
@@ -65,10 +111,7 @@ public final class RemoteLogManifestV2Migration {
             sameStartWinners.add(winner);
             for (int i = index; i < groupEnd - 1; i++) {
                 unreferencedSegments.add(
-                        replaced(
-                                sortedSegments.get(i),
-                                winner.remoteLogSegmentId(),
-                                unreferencedAtMs));
+                        replaced(sortedSegments.get(i), winner.remoteLogSegmentId()));
             }
             index = groupEnd;
         }
@@ -82,16 +125,15 @@ public final class RemoteLogManifestV2Migration {
 
             RemoteLogSegment previous = activeSegments.get(activeSegments.size() - 1);
             if (segment.remoteLogStartOffset() > previous.remoteLogEndOffset()) {
-                throw new IllegalArgumentException(
-                        "Cannot migrate V1 manifest with gap ["
-                                + previous.remoteLogEndOffset()
-                                + ", "
-                                + segment.remoteLogStartOffset()
-                                + ")");
+                return gappedResult(
+                        v1Manifest,
+                        sortedSegments,
+                        newGeneration,
+                        previous.remoteLogEndOffset(),
+                        segment.remoteLogStartOffset());
             }
             if (segment.remoteLogEndOffset() <= previous.remoteLogEndOffset()) {
-                unreferencedSegments.add(
-                        replaced(segment, previous.remoteLogSegmentId(), unreferencedAtMs));
+                unreferencedSegments.add(replaced(segment, previous.remoteLogSegmentId()));
             } else {
                 activeSegments.add(segment);
             }
@@ -99,20 +141,50 @@ public final class RemoteLogManifestV2Migration {
 
         Long remoteStartOffset =
                 activeSegments.isEmpty() ? null : activeSegments.get(0).remoteLogStartOffset();
-        return RemoteLogManifest.createV2(
-                newGeneration,
-                v1Manifest.getPhysicalTablePath(),
-                v1Manifest.getTableBucket(),
-                activeSegments,
-                remoteStartOffset,
-                unreferencedSegments);
+        return new Result(
+                MigrationType.MIGRATED,
+                RemoteLogManifest.createV2(
+                        newGeneration,
+                        v1Manifest.getPhysicalTablePath(),
+                        v1Manifest.getTableBucket(),
+                        activeSegments,
+                        remoteStartOffset,
+                        unreferencedSegments),
+                -1L,
+                -1L);
+    }
+
+    private static Result gappedResult(
+            RemoteLogManifest v1Manifest,
+            List<RemoteLogSegment> sortedSegments,
+            long newGeneration,
+            long gapStartOffset,
+            long gapEndOffset) {
+        List<UnreferencedRemoteLogSegment> unreferencedSegments = new ArrayList<>();
+        for (RemoteLogSegment segment : sortedSegments) {
+            unreferencedSegments.add(
+                    new UnreferencedRemoteLogSegment(
+                            segment,
+                            GC_INELIGIBLE_TIMESTAMP,
+                            UnreferencedRemoteLogSegment.Reason.REPLACED,
+                            null));
+        }
+        RemoteLogManifest recoveryBase =
+                RemoteLogManifest.createV2(
+                        newGeneration,
+                        v1Manifest.getPhysicalTablePath(),
+                        v1Manifest.getTableBucket(),
+                        new ArrayList<>(),
+                        null,
+                        unreferencedSegments);
+        return new Result(MigrationType.GAPPED, recoveryBase, gapStartOffset, gapEndOffset);
     }
 
     private static UnreferencedRemoteLogSegment replaced(
-            RemoteLogSegment segment, UUID replacementSegmentId, long unreferencedAtMs) {
+            RemoteLogSegment segment, UUID replacementSegmentId) {
         return new UnreferencedRemoteLogSegment(
                 segment,
-                unreferencedAtMs,
+                UnreferencedRemoteLogSegment.GC_INELIGIBLE_TIMESTAMP,
                 UnreferencedRemoteLogSegment.Reason.REPLACED,
                 replacementSegmentId);
     }

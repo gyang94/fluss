@@ -22,8 +22,8 @@ import org.apache.fluss.annotation.Internal;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.UUID;
 
+import static org.apache.fluss.remote.UnreferencedRemoteLogSegment.GC_INELIGIBLE_TIMESTAMP;
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -34,7 +34,8 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
  * a record-batch boundary in every overlapping segment. Clean ISR replication preserves the encoded
  * record batches, and local log rolling only creates segment boundaries between complete batches.
  * The planner validates offset ranges but does not read remote log objects to revalidate their
- * batch layout.
+ * batch layout. Planning preserves the input manifest generation; the caller owns generation
+ * assignment for the complete publish batch.
  */
 @Internal
 public final class RemoteLogManifestReplacementPlanner {
@@ -44,6 +45,7 @@ public final class RemoteLogManifestReplacementPlanner {
         INITIAL_COPY,
         ALREADY_COVERED,
         GAP,
+        RESTART_AFTER_GAP,
         APPEND,
         REPLACE_AND_CLIP,
         REPLACE_AND_CLIP_START
@@ -82,8 +84,7 @@ public final class RemoteLogManifestReplacementPlanner {
         }
     }
 
-    public static Result plan(
-            RemoteLogManifest manifest, RemoteLogSegment candidate, long unreferencedAtMs) {
+    public static Result plan(RemoteLogManifest manifest, RemoteLogSegment candidate) {
         checkArgument(
                 manifest.getVersion() == RemoteLogManifest.VERSION_2,
                 "Replacement planning requires a V2 manifest");
@@ -93,18 +94,9 @@ public final class RemoteLogManifestReplacementPlanner {
         checkArgument(
                 candidate.tableBucket().equals(manifest.getTableBucket()),
                 "Candidate table bucket does not match manifest");
-        ensureNewSegmentId(manifest, candidate.remoteLogSegmentId());
 
         if (manifest.getRemoteLogSegmentList().isEmpty()) {
-            RemoteLogManifest resultManifest =
-                    RemoteLogManifest.createV2(
-                            manifest.getGeneration() + 1,
-                            manifest.getPhysicalTablePath(),
-                            manifest.getTableBucket(),
-                            Collections.singletonList(candidate),
-                            candidate.remoteLogStartOffset(),
-                            manifest.getUnreferencedRemoteLogSegments());
-            return new Result(PlanType.INITIAL_COPY, resultManifest, Collections.emptyList());
+            return initialCopy(manifest, candidate, candidate.remoteLogStartOffset());
         }
 
         long remoteStartOffset = manifest.getRemoteLogStartOffset();
@@ -139,14 +131,6 @@ public final class RemoteLogManifestReplacementPlanner {
             }
         }
 
-        if (insertionOffset > remoteStartOffset) {
-            checkArgument(!activeSegments.isEmpty(), "Replacement is missing a prefix segment");
-            RemoteLogSegment prefix = activeSegments.get(activeSegments.size() - 1);
-            checkArgument(
-                    prefix.remoteLogEndOffset() >= insertionOffset,
-                    "Replacement creates a logical gap before offset %s",
-                    insertionOffset);
-        }
         activeSegments.add(candidate);
 
         List<UnreferencedRemoteLogSegment> unreferencedSegments =
@@ -155,14 +139,14 @@ public final class RemoteLogManifestReplacementPlanner {
             unreferencedSegments.add(
                     new UnreferencedRemoteLogSegment(
                             segment,
-                            unreferencedAtMs,
+                            GC_INELIGIBLE_TIMESTAMP,
                             UnreferencedRemoteLogSegment.Reason.REPLACED,
                             candidate.remoteLogSegmentId()));
         }
 
         RemoteLogManifest resultManifest =
                 RemoteLogManifest.createV2(
-                        manifest.getGeneration() + 1,
+                        manifest.getGeneration(),
                         manifest.getPhysicalTablePath(),
                         manifest.getTableBucket(),
                         activeSegments,
@@ -172,28 +156,115 @@ public final class RemoteLogManifestReplacementPlanner {
     }
 
     /**
-     * Moves a continuous expired logical prefix to unreferenced metadata without deleting objects.
+     * Starts an empty logical remote range from a complete physical candidate segment.
      *
-     * <p>The last active reference is retained because the current V2 handle format represents only
-     * non-empty ranges. This is conservative: expiration may be delayed, but readable data is never
-     * removed early.
+     * <p>{@code logicalStartOffset} may clip records below the current local retention boundary.
+     */
+    public static Result initialCopy(
+            RemoteLogManifest manifest, RemoteLogSegment candidate, long logicalStartOffset) {
+        checkArgument(
+                manifest.getVersion() == RemoteLogManifest.VERSION_2,
+                "Initial-copy planning requires a V2 manifest");
+        checkArgument(
+                manifest.getRemoteLogSegmentList().isEmpty(),
+                "Initial-copy planning requires an empty manifest");
+        checkArgument(
+                candidate.physicalTablePath().equals(manifest.getPhysicalTablePath()),
+                "Candidate physical table path does not match manifest");
+        checkArgument(
+                candidate.tableBucket().equals(manifest.getTableBucket()),
+                "Candidate table bucket does not match manifest");
+        checkArgument(
+                candidate.remoteLogStartOffset() <= logicalStartOffset
+                        && logicalStartOffset < candidate.remoteLogEndOffset(),
+                "Logical start offset %s must be covered by candidate [%s, %s)",
+                logicalStartOffset,
+                candidate.remoteLogStartOffset(),
+                candidate.remoteLogEndOffset());
+
+        RemoteLogManifest resultManifest =
+                RemoteLogManifest.createV2(
+                        manifest.getGeneration(),
+                        manifest.getPhysicalTablePath(),
+                        manifest.getTableBucket(),
+                        Collections.singletonList(candidate),
+                        logicalStartOffset,
+                        manifest.getUnreferencedRemoteLogSegments());
+        return new Result(PlanType.INITIAL_COPY, resultManifest, Collections.emptyList());
+    }
+
+    /**
+     * Restarts the logical remote range after local retention has made a detected gap impossible to
+     * fill.
+     *
+     * <p>The candidate is kept as a complete physical object, while {@code newRemoteStartOffset}
+     * clips its logical start. All previously active segments become GC-ineligible unreferenced
+     * metadata until the new manifest has been observed as authoritative.
+     */
+    public static Result restartAfterGap(
+            RemoteLogManifest manifest, RemoteLogSegment candidate, long newRemoteStartOffset) {
+        checkArgument(
+                manifest.getVersion() == RemoteLogManifest.VERSION_2,
+                "Gap recovery requires a V2 manifest");
+        checkArgument(
+                candidate.physicalTablePath().equals(manifest.getPhysicalTablePath()),
+                "Candidate physical table path does not match manifest");
+        checkArgument(
+                candidate.tableBucket().equals(manifest.getTableBucket()),
+                "Candidate table bucket does not match manifest");
+        checkArgument(
+                !manifest.getRemoteLogSegmentList().isEmpty(),
+                "Gap recovery requires a non-empty manifest");
+        checkArgument(
+                candidate.remoteLogStartOffset() > manifest.getRemoteLogEndOffset(),
+                "Gap recovery requires a candidate after the current remote range");
+        checkArgument(
+                candidate.remoteLogStartOffset() <= newRemoteStartOffset
+                        && newRemoteStartOffset < candidate.remoteLogEndOffset(),
+                "New remote start offset %s must be covered by candidate [%s, %s)",
+                newRemoteStartOffset,
+                candidate.remoteLogStartOffset(),
+                candidate.remoteLogEndOffset());
+
+        List<RemoteLogSegment> segmentsToUnreference =
+                new ArrayList<>(manifest.getRemoteLogSegmentList());
+        List<UnreferencedRemoteLogSegment> unreferencedSegments =
+                new ArrayList<>(manifest.getUnreferencedRemoteLogSegments());
+        for (RemoteLogSegment segment : segmentsToUnreference) {
+            unreferencedSegments.add(
+                    new UnreferencedRemoteLogSegment(
+                            segment,
+                            GC_INELIGIBLE_TIMESTAMP,
+                            UnreferencedRemoteLogSegment.Reason.REPLACED,
+                            candidate.remoteLogSegmentId()));
+        }
+
+        RemoteLogManifest resultManifest =
+                RemoteLogManifest.createV2(
+                        manifest.getGeneration(),
+                        manifest.getPhysicalTablePath(),
+                        manifest.getTableBucket(),
+                        Collections.singletonList(candidate),
+                        newRemoteStartOffset,
+                        unreferencedSegments);
+        return new Result(PlanType.RESTART_AFTER_GAP, resultManifest, segmentsToUnreference);
+    }
+
+    /**
+     * Moves a continuous expired logical prefix to unreferenced metadata without deleting objects.
      */
     public static RemoteLogManifest expireContinuousPrefix(
-            RemoteLogManifest manifest,
-            long currentTimeMs,
-            long ttlMs,
-            Long lakeLogEndOffset,
-            long unreferencedAtMs) {
+            RemoteLogManifest manifest, long currentTimeMs, long ttlMs, Long lakeLogEndOffset) {
         checkArgument(
                 manifest.getVersion() == RemoteLogManifest.VERSION_2,
                 "Expiration planning requires a V2 manifest");
-        if (ttlMs <= 0L || manifest.getRemoteLogSegmentList().size() <= 1) {
+        if (ttlMs <= 0L || manifest.getRemoteLogSegmentList().isEmpty()) {
             return manifest;
         }
 
         List<RemoteLogSegmentReference> references = manifest.getRemoteLogSegmentReferences();
         int expireCount = 0;
-        while (expireCount < references.size() - 1) {
+        while (expireCount < references.size()) {
             RemoteLogSegment segment = references.get(expireCount).remoteLogSegment();
             boolean expired = currentTimeMs - segment.maxTimestamp() > ttlMs;
             boolean tieredToLake =
@@ -217,7 +288,7 @@ public final class RemoteLogManifestReplacementPlanner {
             unreferencedSegments.add(
                     new UnreferencedRemoteLogSegment(
                             references.get(index).remoteLogSegment(),
-                            unreferencedAtMs,
+                            GC_INELIGIBLE_TIMESTAMP,
                             UnreferencedRemoteLogSegment.Reason.EXPIRED,
                             null));
         }
@@ -226,23 +297,51 @@ public final class RemoteLogManifestReplacementPlanner {
                 manifest.getPhysicalTablePath(),
                 manifest.getTableBucket(),
                 activeSegments,
-                references.get(expireCount).logicalStartOffset(),
+                activeSegments.isEmpty() ? null : references.get(expireCount).logicalStartOffset(),
                 unreferencedSegments);
     }
 
-    private static void ensureNewSegmentId(RemoteLogManifest manifest, UUID candidateId) {
-        for (RemoteLogSegment segment : manifest.getRemoteLogSegmentList()) {
-            checkArgument(
-                    !segment.remoteLogSegmentId().equals(candidateId),
-                    "Candidate segment id already exists in active segments: %s",
-                    candidateId);
-        }
+    /**
+     * Starts the GC grace-period clock after an unreferenced transition has been observed in the
+     * authoritative manifest.
+     */
+    public static RemoteLogManifest markUnreferencedSegmentsGcEligible(
+            RemoteLogManifest manifest, long eligibleAtMs) {
+        checkArgument(
+                manifest.getVersion() == RemoteLogManifest.VERSION_2,
+                "GC eligibility requires a V2 manifest");
+        checkArgument(
+                eligibleAtMs >= 0L && eligibleAtMs != GC_INELIGIBLE_TIMESTAMP,
+                "GC eligibility timestamp is invalid: %s",
+                eligibleAtMs);
+
+        boolean changed = false;
+        List<UnreferencedRemoteLogSegment> eligibleSegments = new ArrayList<>();
         for (UnreferencedRemoteLogSegment segment : manifest.getUnreferencedRemoteLogSegments()) {
-            checkArgument(
-                    !segment.remoteLogSegment().remoteLogSegmentId().equals(candidateId),
-                    "Candidate segment id already exists in unreferenced segments: %s",
-                    candidateId);
+            if (segment.isGcEligible()) {
+                eligibleSegments.add(segment);
+                continue;
+            }
+            changed = true;
+            eligibleSegments.add(
+                    new UnreferencedRemoteLogSegment(
+                            segment.remoteLogSegment(),
+                            eligibleAtMs,
+                            segment.reason(),
+                            segment.replacementSegmentId()));
         }
+        if (!changed) {
+            return manifest;
+        }
+        return RemoteLogManifest.createV2(
+                manifest.getGeneration(),
+                manifest.getPhysicalTablePath(),
+                manifest.getTableBucket(),
+                manifest.getRemoteLogSegmentList(),
+                manifest.getRemoteLogSegmentList().isEmpty()
+                        ? null
+                        : manifest.getRemoteLogStartOffset(),
+                eligibleSegments);
     }
 
     private RemoteLogManifestReplacementPlanner() {}

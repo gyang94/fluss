@@ -1115,15 +1115,6 @@ public class ConfigOptions {
                                     + "remote segment replacement. Keep disabled until every "
                                     + "remote-log reader supports manifest version dispatch.");
 
-    public static final ConfigOption<Boolean> REMOTE_LOG_MANIFEST_V2_GC_ENABLED =
-            key("remote.log.manifest-v2-gc-enabled")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            "Enables grace-period deletion of Manifest V2 unreferenced segments "
-                                    + "and orphan remote objects. This option only takes effect "
-                                    + "when the Manifest V2 writer is enabled.");
-
     public static final ConfigOption<Duration> REMOTE_LOG_MANIFEST_V2_GC_GRACE_PERIOD =
             key("remote.log.manifest-v2-gc-grace-period")
                     .durationType()

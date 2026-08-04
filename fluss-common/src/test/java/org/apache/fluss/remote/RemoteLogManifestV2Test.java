@@ -35,6 +35,7 @@ import static org.apache.fluss.remote.RemoteLogManifestReplacementPlanner.PlanTy
 import static org.apache.fluss.remote.RemoteLogManifestReplacementPlanner.PlanType.INITIAL_COPY;
 import static org.apache.fluss.remote.RemoteLogManifestReplacementPlanner.PlanType.REPLACE_AND_CLIP;
 import static org.apache.fluss.remote.RemoteLogManifestReplacementPlanner.PlanType.REPLACE_AND_CLIP_START;
+import static org.apache.fluss.remote.RemoteLogManifestReplacementPlanner.PlanType.RESTART_AFTER_GAP;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -155,9 +156,12 @@ class RemoteLogManifestV2Test {
                         TABLE_BUCKET,
                         Arrays.asList(fullyCovered, extending, shortSameStart, winner));
 
-        RemoteLogManifest migrated =
-                RemoteLogManifestV2Migration.migrate(v1, 1L, UNREFERENCED_AT_MS);
+        RemoteLogManifestV2Migration.Result migration =
+                RemoteLogManifestV2Migration.migrate(v1, 1L);
+        RemoteLogManifest migrated = migration.resultManifest();
 
+        assertThat(migration.migrationType())
+                .isEqualTo(RemoteLogManifestV2Migration.MigrationType.MIGRATED);
         assertThat(migrated.getVersion()).isEqualTo(RemoteLogManifest.VERSION_2);
         assertThat(migrated.getGeneration()).isEqualTo(1L);
         assertThat(migrated.getRemoteLogSegmentList()).containsExactly(winner, extending);
@@ -167,17 +171,14 @@ class RemoteLogManifestV2Test {
     }
 
     @Test
-    void testRejectAmbiguousOrGappedV1Migration() {
+    void testRejectAmbiguousAndClassifyGappedV1Migration() {
         RemoteLogSegment sameRangeA = segment(0, 10);
         RemoteLogSegment sameRangeB = segment(0, 10);
         RemoteLogManifest ambiguous =
                 new RemoteLogManifest(
                         PHYSICAL_TABLE_PATH, TABLE_BUCKET, Arrays.asList(sameRangeA, sameRangeB));
 
-        assertThatThrownBy(
-                        () ->
-                                RemoteLogManifestV2Migration.migrate(
-                                        ambiguous, 1L, UNREFERENCED_AT_MS))
+        assertThatThrownBy(() -> RemoteLogManifestV2Migration.migrate(ambiguous, 1L))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Cannot deterministically migrate");
 
@@ -186,10 +187,16 @@ class RemoteLogManifestV2Test {
                         PHYSICAL_TABLE_PATH,
                         TABLE_BUCKET,
                         Arrays.asList(segment(0, 10), segment(11, 20)));
-        assertThatThrownBy(
-                        () -> RemoteLogManifestV2Migration.migrate(gapped, 1L, UNREFERENCED_AT_MS))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("gap");
+        RemoteLogManifestV2Migration.Result gappedMigration =
+                RemoteLogManifestV2Migration.migrate(gapped, 1L);
+        assertThat(gappedMigration.migrationType())
+                .isEqualTo(RemoteLogManifestV2Migration.MigrationType.GAPPED);
+        assertThat(gappedMigration.gapStartOffset()).isEqualTo(10L);
+        assertThat(gappedMigration.gapEndOffset()).isEqualTo(11L);
+        assertThat(gappedMigration.resultManifest().getRemoteLogSegmentList()).isEmpty();
+        assertThat(gappedMigration.resultManifest().getUnreferencedRemoteLogSegments())
+                .extracting(UnreferencedRemoteLogSegment::remoteLogSegment)
+                .containsExactlyInAnyOrderElementsOf(gapped.getRemoteLogSegmentList());
     }
 
     @Test
@@ -205,7 +212,12 @@ class RemoteLogManifestV2Test {
         RemoteLogSegment first = segment(0, 10);
         RemoteLogManifestReplacementPlanner.Result initial = plan(empty, first);
         assertThat(initial.planType()).isEqualTo(INITIAL_COPY);
-        assertThat(initial.resultManifest().getGeneration()).isEqualTo(2L);
+        assertThat(initial.resultManifest().getGeneration()).isEqualTo(1L);
+
+        RemoteLogManifestReplacementPlanner.Result clippedInitial =
+                RemoteLogManifestReplacementPlanner.initialCopy(empty, first, 5L);
+        assertThat(clippedInitial.planType()).isEqualTo(INITIAL_COPY);
+        assertThat(clippedInitial.resultManifest().getRemoteLogStartOffset()).isEqualTo(5L);
 
         RemoteLogSegment append = segment(10, 20);
         RemoteLogManifestReplacementPlanner.Result appended =
@@ -226,6 +238,33 @@ class RemoteLogManifestV2Test {
     }
 
     @Test
+    void testRestartAfterGapAdvancesLogicalRange() {
+        RemoteLogSegment first = segment(0, 10);
+        RemoteLogManifest manifest = v2(1L, 0L, first);
+        RemoteLogSegment candidate = segment(20, 30);
+
+        RemoteLogManifestReplacementPlanner.Result result =
+                RemoteLogManifestReplacementPlanner.restartAfterGap(manifest, candidate, 22L);
+
+        assertThat(result.planType()).isEqualTo(RESTART_AFTER_GAP);
+        assertThat(result.requiresManifestCommit()).isTrue();
+        assertThat(result.resultManifest().getGeneration()).isEqualTo(1L);
+        assertThat(result.resultManifest().getRemoteLogStartOffset()).isEqualTo(22L);
+        assertThat(result.resultManifest().getRemoteLogEndOffset()).isEqualTo(30L);
+        assertThat(result.resultManifest().getRemoteLogSegmentList()).containsExactly(candidate);
+        assertThat(result.segmentsToUnreference()).containsExactly(first);
+        assertThat(result.resultManifest().getUnreferencedRemoteLogSegments())
+                .singleElement()
+                .satisfies(
+                        unreferenced -> {
+                            assertThat(unreferenced.remoteLogSegment()).isEqualTo(first);
+                            assertThat(unreferenced.isGcEligible()).isFalse();
+                            assertThat(unreferenced.replacementSegmentId())
+                                    .isEqualTo(candidate.remoteLogSegmentId());
+                        });
+    }
+
+    @Test
     void testPlanPartialAndMultiSegmentReplacement() {
         RemoteLogSegment segmentA = segment(0, 10);
         RemoteLogSegment segmentC = segment(10, 15);
@@ -242,6 +281,19 @@ class RemoteLogManifestV2Test {
                         new RemoteLogSegmentReference(segmentA, 0L, 5L),
                         new RemoteLogSegmentReference(replacement, 5L, 20L));
         assertThat(result.segmentsToUnreference()).containsExactly(segmentC);
+        assertThat(result.resultManifest().getUnreferencedRemoteLogSegments())
+                .allMatch(entry -> !entry.isGcEligible());
+
+        RemoteLogManifest eligible =
+                RemoteLogManifestReplacementPlanner.markUnreferencedSegmentsGcEligible(
+                        result.resultManifest(), UNREFERENCED_AT_MS);
+        assertThat(eligible.getUnreferencedRemoteLogSegments())
+                .extracting(UnreferencedRemoteLogSegment::unreferencedAtMs)
+                .containsExactly(UNREFERENCED_AT_MS);
+        assertThat(
+                        RemoteLogManifestReplacementPlanner.markUnreferencedSegmentsGcEligible(
+                                eligible, UNREFERENCED_AT_MS + 1L))
+                .isSameAs(eligible);
     }
 
     @Test
@@ -274,7 +326,7 @@ class RemoteLogManifestV2Test {
 
         RemoteLogManifest expired =
                 RemoteLogManifestReplacementPlanner.expireContinuousPrefix(
-                        manifest, 100L, 85L, null, UNREFERENCED_AT_MS);
+                        manifest, 100L, 85L, null);
 
         assertThat(expired.getGeneration()).isEqualTo(3L);
         assertThat(expired.getRemoteLogStartOffset()).isEqualTo(5L);
@@ -288,26 +340,31 @@ class RemoteLogManifestV2Test {
     }
 
     @Test
-    void testExpirationStopsAtFirstIneligibleReferenceAndRetainsLastReference() {
+    void testExpirationStopsAtFirstIneligibleReferenceAndCanExpireLastReference() {
         RemoteLogSegment first = segment(0, 10);
         RemoteLogSegment second = segment(10, 20);
         RemoteLogManifest twoSegments = v2(1L, 0L, first, second);
 
         assertThat(
                         RemoteLogManifestReplacementPlanner.expireContinuousPrefix(
-                                twoSegments, 100L, 0L, 5L, UNREFERENCED_AT_MS))
+                                twoSegments, 100L, 0L, 5L))
                 .isSameAs(twoSegments);
 
         RemoteLogManifest onlyOne = v2(1L, 0L, first);
-        assertThat(
-                        RemoteLogManifestReplacementPlanner.expireContinuousPrefix(
-                                onlyOne, 100L, 0L, null, UNREFERENCED_AT_MS))
-                .isSameAs(onlyOne);
+        RemoteLogManifest empty =
+                RemoteLogManifestReplacementPlanner.expireContinuousPrefix(onlyOne, 100L, 1L, null);
+        assertThat(empty.getRemoteLogSegmentList()).isEmpty();
+        assertThat(empty.getPersistedRemoteLogStartOffset()).isNull();
+        assertThat(empty.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
+        assertThat(empty.getRemoteLogEndOffset()).isEqualTo(-1L);
+        assertThat(empty.getUnreferencedRemoteLogSegments())
+                .extracting(UnreferencedRemoteLogSegment::remoteLogSegment)
+                .containsExactly(first);
     }
 
     private RemoteLogManifestReplacementPlanner.Result plan(
             RemoteLogManifest manifest, RemoteLogSegment segment) {
-        return RemoteLogManifestReplacementPlanner.plan(manifest, segment, UNREFERENCED_AT_MS);
+        return RemoteLogManifestReplacementPlanner.plan(manifest, segment);
     }
 
     private RemoteLogManifest v2(

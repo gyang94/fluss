@@ -58,9 +58,11 @@ public class RemoteLogManifestHandleJsonSerde
             generator.writeNumberField(
                     MANIFEST_GENERATION,
                     remoteLogManifestHandle.getManifestGeneration().getAsLong());
-            generator.writeNumberField(
-                    REMOTE_LOG_START_OFFSET,
-                    remoteLogManifestHandle.getRemoteLogStartOffset().getAsLong());
+            if (remoteLogManifestHandle.getRemoteLogStartOffset().isPresent()) {
+                generator.writeNumberField(
+                        REMOTE_LOG_START_OFFSET,
+                        remoteLogManifestHandle.getRemoteLogStartOffset().getAsLong());
+            }
         }
 
         generator.writeEndObject();
@@ -72,16 +74,24 @@ public class RemoteLogManifestHandleJsonSerde
         String remoteLogManifestPath = required(node, REMOTE_LOG_MANIFEST_PATH).asText();
         long remoteLogEndOffset = required(node, REMOTE_LOG_END_OFFSET).asLong();
         if (version == RemoteLogManifestHandle.VERSION_1) {
-            rejectField(node, MANIFEST_GENERATION, version);
-            rejectField(node, REMOTE_LOG_START_OFFSET, version);
             return new RemoteLogManifestHandle(
                     fromRemoteLogManifestPath(remoteLogManifestPath), remoteLogEndOffset);
         }
         if (version == RemoteLogManifestHandle.VERSION_2) {
+            JsonNode remoteLogStartOffsetNode = node.get(REMOTE_LOG_START_OFFSET);
+            if (remoteLogStartOffsetNode == null || remoteLogStartOffsetNode.isNull()) {
+                if (remoteLogEndOffset != -1L) {
+                    throw new IllegalArgumentException(
+                            "Empty V2 manifest handle must use remote log end offset -1");
+                }
+                return RemoteLogManifestHandle.v2Empty(
+                        fromRemoteLogManifestPath(remoteLogManifestPath),
+                        required(node, MANIFEST_GENERATION).asLong());
+            }
             return RemoteLogManifestHandle.v2(
                     fromRemoteLogManifestPath(remoteLogManifestPath),
                     required(node, MANIFEST_GENERATION).asLong(),
-                    required(node, REMOTE_LOG_START_OFFSET).asLong(),
+                    remoteLogStartOffsetNode.asLong(),
                     remoteLogEndOffset);
         }
         throw new IllegalArgumentException(
@@ -95,15 +105,5 @@ public class RemoteLogManifestHandleJsonSerde
                     "Missing required remote log manifest handle field: " + field);
         }
         return value;
-    }
-
-    private static void rejectField(JsonNode node, String field, int version) {
-        if (node.has(field)) {
-            throw new IllegalArgumentException(
-                    "Remote log manifest handle field "
-                            + field
-                            + " is not valid for version "
-                            + version);
-        }
     }
 }

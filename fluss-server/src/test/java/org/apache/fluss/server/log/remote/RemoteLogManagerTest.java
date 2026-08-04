@@ -135,6 +135,17 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                         manifest.getRemoteLogEndOffset()),
                 manifest);
 
+        RemoteLogManifest emptyManifest =
+                RemoteLogManifest.createV2(
+                        3L,
+                        logTablet.getPhysicalTablePath(),
+                        tableBucket,
+                        Collections.emptyList(),
+                        null,
+                        Collections.emptyList());
+        RemoteLogManager.validateManifestHandle(
+                RemoteLogManifestHandle.v2Empty(manifestPath, 3L), emptyManifest);
+
         assertThatThrownBy(
                         () ->
                                 RemoteLogManager.validateManifestHandle(
@@ -408,8 +419,8 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         // behavior and returns the complete contiguous, non-overlapping tail.
         RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
         remoteLogTablet.replaceManifest(
-                RemoteLogManifestV2Migration.migrate(
-                        remoteLogTablet.currentManifest(), 1L, System.currentTimeMillis()));
+                RemoteLogManifestV2Migration.migrate(remoteLogTablet.currentManifest(), 1L)
+                        .resultManifest());
         future = new CompletableFuture<>();
         replicaManager.fetchLogRecords(
                 new FetchParams(-1, Integer.MAX_VALUE),

@@ -122,7 +122,6 @@ import org.apache.fluss.rpc.protocol.ApiError;
 import org.apache.fluss.server.entity.AdjustIsrResultForBucket;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
 import org.apache.fluss.server.entity.RemoteLogManifestCommitResult;
-import org.apache.fluss.server.entity.RemoteLogManifestExpectedHandleState;
 import org.apache.fluss.server.zk.ZooKeeperClient;
 import org.apache.fluss.server.zk.data.LeaderAndIsr;
 import org.apache.fluss.server.zk.data.RemoteLogManifestHandle;
@@ -387,8 +386,7 @@ public class TestCoordinatorGateway implements CoordinatorGateway {
                                 commitRemoteLogManifestData.getRemoteLogStartOffset(),
                                 commitRemoteLogManifestData.getRemoteLogEndOffset());
                 boolean committed;
-                if (commitRemoteLogManifestData.getExpectedHandleState()
-                        == RemoteLogManifestExpectedHandleState.ABSENT) {
+                if (commitRemoteLogManifestData.getExpectedZkVersion() == null) {
                     committed =
                             zkClient.createRemoteLogManifestHandleIfAbsent(
                                     commitRemoteLogManifestData.getTableBucket(), newHandle);
@@ -396,8 +394,6 @@ public class TestCoordinatorGateway implements CoordinatorGateway {
                     committed =
                             zkClient.compareAndSetRemoteLogManifestHandle(
                                     commitRemoteLogManifestData.getTableBucket(),
-                                    commitRemoteLogManifestData.getExpectedManifestPath(),
-                                    commitRemoteLogManifestData.getExpectedManifestGeneration(),
                                     commitRemoteLogManifestData.getExpectedZkVersion(),
                                     newHandle);
                 }

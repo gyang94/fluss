@@ -24,6 +24,7 @@ import org.apache.fluss.remote.RemoteLogSegment;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.messages.CommitRemoteLogManifestRequest;
 import org.apache.fluss.rpc.messages.CommitRemoteLogManifestResponse;
+import org.apache.fluss.server.coordinator.TestCoordinatorGateway;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
 import org.apache.fluss.server.entity.RemoteLogManifestCommitResult;
 import org.apache.fluss.server.zk.NOPErrorHandler;
@@ -38,18 +39,15 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
 import static org.apache.fluss.record.TestData.DATA1_PHYSICAL_TABLE_PATH;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /** Tests transport-unknown reconciliation for {@link RemoteLogManifestCommitter}. */
 class RemoteLogManifestCommitterTest {
@@ -76,9 +74,8 @@ class RemoteLogManifestCommitterTest {
     void testReconcileLostAbsentCreateResponse() throws Exception {
         TableBucket tableBucket = new TableBucket(1L, 0);
         CommitRemoteLogManifestData data = absentData(tableBucket, "m1");
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenAnswer(
+        TestingCoordinatorGateway gateway =
+                testingGateway(
                         ignored -> {
                             zooKeeperClient.createRemoteLogManifestHandleIfAbsent(
                                     tableBucket, handleFor(data));
@@ -89,7 +86,7 @@ class RemoteLogManifestCommitterTest {
                 new RemoteLogManifestCommitter(gateway, zooKeeperClient).commit(data);
 
         assertThat(result).isEqualTo(RemoteLogManifestCommitResult.COMMITTED);
-        verify(gateway).commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class));
+        assertThat(gateway.getCommitAttempts()).isEqualTo(1);
     }
 
     @Test
@@ -99,9 +96,7 @@ class RemoteLogManifestCommitterTest {
         zooKeeperClient.createRemoteLogManifestHandleIfAbsent(
                 tableBucket,
                 RemoteLogManifestHandle.v2(new FsPath("file:///remote/other"), 1L, 0L, 10L));
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenReturn(failedFuture());
+        CoordinatorGateway gateway = testingGateway(ignored -> failedFuture());
 
         assertThat(new RemoteLogManifestCommitter(gateway, zooKeeperClient).commit(data))
                 .isEqualTo(RemoteLogManifestCommitResult.CONFLICT);
@@ -111,38 +106,30 @@ class RemoteLogManifestCommitterTest {
     void testRetryWhenHandleRemainsAbsent() throws Exception {
         TableBucket tableBucket = new TableBucket(3L, 0);
         CommitRemoteLogManifestData data = absentData(tableBucket, "m1");
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenReturn(
-                        failedFuture(),
-                        CompletableFuture.completedFuture(
-                                new CommitRemoteLogManifestResponse()
-                                        .setCommitSuccess(true)
-                                        .setCommitResult(
-                                                RemoteLogManifestCommitResult.COMMITTED.code())));
+        TestingCoordinatorGateway gateway =
+                testingGateway(ignored -> failedFuture(), ignored -> committedFuture());
 
         assertThat(new RemoteLogManifestCommitter(gateway, zooKeeperClient).commit(data))
                 .isEqualTo(RemoteLogManifestCommitResult.COMMITTED);
-        verify(gateway, times(2))
-                .commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class));
+        assertThat(gateway.getCommitAttempts()).isEqualTo(2);
     }
 
     @Test
     void testLegacyBooleanResponseIsNotAcceptedAsV2Commit() throws Exception {
         TableBucket tableBucket = new TableBucket(8L, 0);
         CommitRemoteLogManifestData data = absentData(tableBucket, "m1");
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenReturn(
-                        CompletableFuture.completedFuture(
-                                new CommitRemoteLogManifestResponse().setCommitSuccess(true)));
+        TestingCoordinatorGateway gateway =
+                testingGateway(
+                        ignored ->
+                                CompletableFuture.completedFuture(
+                                        new CommitRemoteLogManifestResponse()
+                                                .setCommitSuccess(true)));
 
         assertThatThrownBy(
                         () -> new RemoteLogManifestCommitter(gateway, zooKeeperClient).commit(data))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("remains unknown");
-        verify(gateway, times(10))
-                .commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class));
+        assertThat(gateway.getCommitAttempts()).isEqualTo(10);
     }
 
     @Test
@@ -160,17 +147,14 @@ class RemoteLogManifestCommitterTest {
                         0L,
                         20L,
                         1L,
-                        basePath,
-                        0L,
                         base.zkVersion(),
                         1,
                         1);
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenAnswer(
+        CoordinatorGateway gateway =
+                testingGateway(
                         ignored -> {
                             zooKeeperClient.compareAndSetRemoteLogManifestHandle(
-                                    tableBucket, basePath, 0L, base.zkVersion(), handleFor(data));
+                                    tableBucket, base.zkVersion(), handleFor(data));
                             return failedFuture();
                         });
 
@@ -187,20 +171,12 @@ class RemoteLogManifestCommitterTest {
         VersionedRemoteLogManifestHandle base =
                 zooKeeperClient.getVersionedRemoteLogManifestHandle(tableBucket).get();
         CommitRemoteLogManifestData data = presentData(tableBucket, base, "v2");
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenReturn(
-                        failedFuture(),
-                        CompletableFuture.completedFuture(
-                                new CommitRemoteLogManifestResponse()
-                                        .setCommitSuccess(true)
-                                        .setCommitResult(
-                                                RemoteLogManifestCommitResult.COMMITTED.code())));
+        TestingCoordinatorGateway gateway =
+                testingGateway(ignored -> failedFuture(), ignored -> committedFuture());
 
         assertThat(new RemoteLogManifestCommitter(gateway, zooKeeperClient).commit(data))
                 .isEqualTo(RemoteLogManifestCommitResult.COMMITTED);
-        verify(gateway, times(2))
-                .commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class));
+        assertThat(gateway.getCommitAttempts()).isEqualTo(2);
     }
 
     @Test
@@ -214,13 +190,9 @@ class RemoteLogManifestCommitterTest {
         CommitRemoteLogManifestData data = presentData(tableBucket, base, "ours");
         zooKeeperClient.compareAndSetRemoteLogManifestHandle(
                 tableBucket,
-                basePath,
-                0L,
                 base.zkVersion(),
                 RemoteLogManifestHandle.v2(new FsPath("file:///remote/other"), 1L, 0L, 20L));
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenReturn(failedFuture());
+        CoordinatorGateway gateway = testingGateway(ignored -> failedFuture());
 
         assertThat(new RemoteLogManifestCommitter(gateway, zooKeeperClient).commit(data))
                 .isEqualTo(RemoteLogManifestCommitResult.CONFLICT);
@@ -249,18 +221,12 @@ class RemoteLogManifestCommitterTest {
                         0L,
                         Collections.emptyList());
         RemoteLogTablet tablet = new RemoteLogTablet(DATA1_PHYSICAL_TABLE_PATH, tableBucket, -1L);
-        CoordinatorGateway gateway = mock(CoordinatorGateway.class);
-        when(gateway.commitRemoteLogManifest(any(CommitRemoteLogManifestRequest.class)))
-                .thenAnswer(
+        CoordinatorGateway gateway =
+                testingGateway(
                         ignored -> {
                             zooKeeperClient.createRemoteLogManifestHandleIfAbsent(
                                     tableBucket, handleFor(data));
-                            return CompletableFuture.completedFuture(
-                                    new CommitRemoteLogManifestResponse()
-                                            .setCommitSuccess(true)
-                                            .setCommitResult(
-                                                    RemoteLogManifestCommitResult.COMMITTED
-                                                            .code()));
+                            return committedFuture();
                         });
 
         RemoteLogManifestCommitResult result =
@@ -287,8 +253,6 @@ class RemoteLogManifestCommitterTest {
                 0L,
                 20L,
                 1L,
-                base.handle().getRemoteLogManifestPath(),
-                base.handle().getManifestGeneration().orElse(0L),
                 base.zkVersion(),
                 1,
                 1);
@@ -306,5 +270,51 @@ class RemoteLogManifestCommitterTest {
         CompletableFuture<CommitRemoteLogManifestResponse> future = new CompletableFuture<>();
         future.completeExceptionally(new RuntimeException("response lost"));
         return future;
+    }
+
+    private static CompletableFuture<CommitRemoteLogManifestResponse> committedFuture() {
+        return CompletableFuture.completedFuture(
+                new CommitRemoteLogManifestResponse()
+                        .setCommitSuccess(true)
+                        .setCommitResult(RemoteLogManifestCommitResult.COMMITTED.code()));
+    }
+
+    @SafeVarargs
+    private static TestingCoordinatorGateway testingGateway(CommitAction... commitActions) {
+        return new TestingCoordinatorGateway(Arrays.asList(commitActions));
+    }
+
+    @FunctionalInterface
+    private interface CommitAction {
+        CompletableFuture<CommitRemoteLogManifestResponse> commit(
+                CommitRemoteLogManifestRequest request) throws Exception;
+    }
+
+    private static final class TestingCoordinatorGateway extends TestCoordinatorGateway {
+        private final List<CommitAction> commitActions;
+        private int commitAttempts;
+
+        private TestingCoordinatorGateway(List<CommitAction> commitActions) {
+            this.commitActions = commitActions;
+        }
+
+        @Override
+        public CompletableFuture<CommitRemoteLogManifestResponse> commitRemoteLogManifest(
+                CommitRemoteLogManifestRequest request) {
+            int actionIndex = Math.min(commitAttempts, commitActions.size() - 1);
+            commitAttempts++;
+            try {
+                return commitActions.get(actionIndex).commit(request);
+            } catch (Exception e) {
+                CompletableFuture<CommitRemoteLogManifestResponse> future =
+                        new CompletableFuture<>();
+                future.completeExceptionally(e);
+                return future;
+            }
+        }
+
+        private int getCommitAttempts() {
+            return commitAttempts;
+        }
     }
 }

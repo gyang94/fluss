@@ -22,7 +22,6 @@ import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.messages.CommitRemoteLogManifestResponse;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
 import org.apache.fluss.server.entity.RemoteLogManifestCommitResult;
-import org.apache.fluss.server.entity.RemoteLogManifestExpectedHandleState;
 import org.apache.fluss.server.zk.ZooKeeperClient;
 import org.apache.fluss.server.zk.data.RemoteLogManifestHandle;
 import org.apache.fluss.server.zk.data.VersionedRemoteLogManifestHandle;
@@ -83,7 +82,6 @@ public final class RemoteLogManifestCommitter {
             RemoteLogManifest manifest,
             RemoteLogTablet remoteLogTablet)
             throws Exception {
-        validateManifest(data, manifest);
         RemoteLogManifestCommitResult result = commit(data);
         if (result != RemoteLogManifestCommitResult.COMMITTED) {
             return result;
@@ -100,25 +98,6 @@ public final class RemoteLogManifestCommitter {
         return RemoteLogManifestCommitResult.COMMITTED;
     }
 
-    private static void validateManifest(
-            CommitRemoteLogManifestData data, RemoteLogManifest manifest) {
-        checkArgument(
-                manifest.getVersion() == RemoteLogManifest.VERSION_2,
-                "CAS commit requires a Manifest V2 snapshot");
-        checkArgument(
-                manifest.getTableBucket().equals(data.getTableBucket()),
-                "Manifest table bucket does not match commit request");
-        checkArgument(
-                manifest.getGeneration() == data.getNewManifestGeneration(),
-                "Manifest generation does not match commit request");
-        checkArgument(
-                manifest.getRemoteLogStartOffset() == data.getRemoteLogStartOffset(),
-                "Manifest start offset does not match commit request");
-        checkArgument(
-                manifest.getRemoteLogEndOffset() == data.getRemoteLogEndOffset(),
-                "Manifest end offset does not match commit request");
-    }
-
     private ReconciliationResult reconcile(CommitRemoteLogManifestData data) throws Exception {
         Optional<VersionedRemoteLogManifestHandle> currentOpt =
                 zooKeeperClient.getVersionedRemoteLogManifestHandle(data.getTableBucket());
@@ -126,7 +105,7 @@ public final class RemoteLogManifestCommitter {
             return ReconciliationResult.COMMITTED;
         }
 
-        if (data.getExpectedHandleState() == RemoteLogManifestExpectedHandleState.ABSENT) {
+        if (data.getExpectedZkVersion() == null) {
             return currentOpt.isPresent()
                     ? ReconciliationResult.CONFLICT
                     : ReconciliationResult.RETRY;
@@ -136,12 +115,7 @@ public final class RemoteLogManifestCommitter {
         }
 
         VersionedRemoteLogManifestHandle current = currentOpt.get();
-        long currentGeneration = current.handle().getManifestGeneration().orElse(0L);
-        if (current.zkVersion() == data.getExpectedZkVersion()
-                && current.handle()
-                        .getRemoteLogManifestPath()
-                        .equals(data.getExpectedManifestPath())
-                && currentGeneration == data.getExpectedManifestGeneration()) {
+        if (current.zkVersion() == data.getExpectedZkVersion()) {
             return ReconciliationResult.RETRY;
         }
         return ReconciliationResult.CONFLICT;
@@ -153,9 +127,17 @@ public final class RemoteLogManifestCommitter {
                 && current.getRemoteLogManifestPath().equals(data.getRemoteLogManifestPath())
                 && current.getManifestGeneration().isPresent()
                 && current.getManifestGeneration().getAsLong() == data.getNewManifestGeneration()
-                && current.getRemoteLogStartOffset().isPresent()
-                && current.getRemoteLogStartOffset().getAsLong() == data.getRemoteLogStartOffset()
+                && remoteLogRangeMatches(current, data)
                 && current.getRemoteLogEndOffset() == data.getRemoteLogEndOffset();
+    }
+
+    private static boolean remoteLogRangeMatches(
+            RemoteLogManifestHandle current, CommitRemoteLogManifestData data) {
+        if (data.isEmptyV2Manifest()) {
+            return current.isEmptyV2();
+        }
+        return current.getRemoteLogStartOffset().isPresent()
+                && current.getRemoteLogStartOffset().getAsLong() == data.getRemoteLogStartOffset();
     }
 
     private enum ReconciliationResult {

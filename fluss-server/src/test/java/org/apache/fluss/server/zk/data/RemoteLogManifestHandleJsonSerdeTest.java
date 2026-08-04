@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link org.apache.fluss.server.zk.data.RemoteLogManifestHandleJsonSerde}. */
@@ -43,6 +44,8 @@ public class RemoteLogManifestHandleJsonSerdeTest
                     100L),
             RemoteLogManifestHandle.v2(
                     new FsPath("oss://test/log/db/table/0/v2.manifest"), 8L, 5L, 20L),
+            RemoteLogManifestHandle.v2Empty(
+                    new FsPath("oss://test/log/db/table/0/v2-empty.manifest"), 9L),
         };
     }
 
@@ -53,16 +56,24 @@ public class RemoteLogManifestHandleJsonSerdeTest
                     + "847532e6-1fec-4d7a-9b17-ce28223a6e72.manifest\",\"remote_log_end_offset\":100}",
             "{\"version\":2,\"remote_log_manifest_path\":\"oss://test/log/db/table/0/v2.manifest\","
                     + "\"remote_log_end_offset\":20,\"manifest_generation\":8,"
-                    + "\"remote_log_start_offset\":5}"
+                    + "\"remote_log_start_offset\":5}",
+            "{\"version\":2,\"remote_log_manifest_path\":\"oss://test/log/db/table/0/"
+                    + "v2-empty.manifest\",\"remote_log_end_offset\":-1,"
+                    + "\"manifest_generation\":9}"
         };
     }
 
     @Test
-    void testStrictVersionDispatch() {
+    void testVersionDispatch() {
         assertInvalid("{\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10}");
-        assertInvalid(
-                "{\"version\":1,\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10,"
-                        + "\"manifest_generation\":1}");
+        RemoteLogManifestHandle v1Handle =
+                deserialize(
+                        "{\"version\":1,\"remote_log_manifest_path\":\"x\","
+                                + "\"remote_log_end_offset\":10,\"manifest_generation\":1,"
+                                + "\"remote_log_start_offset\":0}");
+        assertThat(v1Handle.getVersion()).isEqualTo(RemoteLogManifestHandle.VERSION_1);
+        assertThat(v1Handle.getManifestGeneration()).isEmpty();
+        assertThat(v1Handle.getRemoteLogStartOffset()).isEmpty();
         assertInvalid(
                 "{\"version\":2,\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10,"
                         + "\"manifest_generation\":1}");
@@ -71,11 +82,11 @@ public class RemoteLogManifestHandleJsonSerdeTest
     }
 
     private static void assertInvalid(String json) {
-        assertThatThrownBy(
-                        () ->
-                                JsonSerdeUtils.readValue(
-                                        json.getBytes(StandardCharsets.UTF_8),
-                                        RemoteLogManifestHandleJsonSerde.INSTANCE))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> deserialize(json)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static RemoteLogManifestHandle deserialize(String json) {
+        return JsonSerdeUtils.readValue(
+                json.getBytes(StandardCharsets.UTF_8), RemoteLogManifestHandleJsonSerde.INSTANCE);
     }
 }

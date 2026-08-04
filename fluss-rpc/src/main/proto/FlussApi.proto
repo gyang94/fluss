@@ -567,10 +567,8 @@ message CommitRemoteLogManifestRequest {
   required int32 bucket_leader_epoch = 8;
   // Manifest V2 CAS fields. All are omitted by the legacy V1 commit path.
   optional int32 manifest_format_version = 9;
-  // 0 = ABSENT, 1 = PRESENT.
-  optional int32 expected_handle_state = 10;
-  optional string expected_manifest_path = 11;
-  optional int64 expected_manifest_generation = 12;
+  // Field numbers 10, 11, and 12 were used by redundant CAS fields and must not be reused.
+  // Omitted for create-if-absent; present for a versioned update.
   optional int32 expected_zk_version = 13;
   optional int64 new_manifest_generation = 14;
 }

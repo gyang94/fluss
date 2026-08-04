@@ -132,19 +132,11 @@ class ZooKeeperClientTest {
 
         assertThat(
                         zookeeperClient.compareAndSetRemoteLogManifestHandle(
-                                tableBucket,
-                                new FsPath("file:///remote/not-authoritative.manifest"),
-                                0L,
-                                initial.zkVersion(),
-                                v2))
+                                tableBucket, initial.zkVersion() + 1, v2))
                 .isFalse();
         assertThat(
                         zookeeperClient.compareAndSetRemoteLogManifestHandle(
-                                tableBucket, v1Path, 0L, initial.zkVersion() + 1, v2))
-                .isFalse();
-        assertThat(
-                        zookeeperClient.compareAndSetRemoteLogManifestHandle(
-                                tableBucket, v1Path, 0L, initial.zkVersion(), v2))
+                                tableBucket, initial.zkVersion(), v2))
                 .isTrue();
 
         VersionedRemoteLogManifestHandle migrated =
@@ -153,7 +145,7 @@ class ZooKeeperClientTest {
         assertThat(migrated.zkVersion()).isEqualTo(1);
         assertThat(
                         zookeeperClient.compareAndSetRemoteLogManifestHandle(
-                                tableBucket, v2Path, 1L, migrated.zkVersion(), v3))
+                                tableBucket, migrated.zkVersion(), v3))
                 .isTrue();
         assertThat(zookeeperClient.getRemoteLogManifestHandle(tableBucket)).contains(v3);
     }

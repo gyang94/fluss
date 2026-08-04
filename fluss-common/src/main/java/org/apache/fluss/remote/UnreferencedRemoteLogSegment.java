@@ -30,12 +30,13 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 /** Metadata retained for a remote segment that no longer participates in logical reads. */
 @Internal
 public final class UnreferencedRemoteLogSegment {
+    /** Timestamp sentinel used until the unreferenced transition is observed as authoritative. */
+    public static final long GC_INELIGIBLE_TIMESTAMP = Long.MAX_VALUE;
 
     /** The reason why a physical remote segment stopped participating in logical reads. */
     public enum Reason {
         REPLACED,
-        EXPIRED,
-        DELETE_STARTED
+        EXPIRED
     }
 
     private final RemoteLogSegment remoteLogSegment;
@@ -64,6 +65,11 @@ public final class UnreferencedRemoteLogSegment {
 
     public long unreferencedAtMs() {
         return unreferencedAtMs;
+    }
+
+    /** Returns whether the grace-period clock has been started for this segment. */
+    public boolean isGcEligible() {
+        return unreferencedAtMs != GC_INELIGIBLE_TIMESTAMP;
     }
 
     public Reason reason() {

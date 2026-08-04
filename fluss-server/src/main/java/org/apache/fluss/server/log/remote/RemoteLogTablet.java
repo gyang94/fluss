@@ -83,8 +83,6 @@ public class RemoteLogTablet {
     /** The registered metrics for remote log. */
     private volatile MetricGroup remoteLogMetrics;
 
-    private volatile long orphanManifestCount;
-
     private volatile RemoteLogManifest currentManifest;
 
     private volatile @Nullable VersionedRemoteLogManifestHandle currentHandle;
@@ -131,14 +129,6 @@ public class RemoteLogTablet {
                             });
                     metricGroup.gauge(MetricNames.LOG_END_OFFSET, () -> remoteLogEndOffset);
                     metricGroup.gauge(MetricNames.REMOTE_LOG_SIZE, this::getRemoteSizeInBytes);
-                    metricGroup.gauge(
-                            MetricNames.REMOTE_UNREFERENCED_BYTES,
-                            this::getUnreferencedSizeInBytes);
-                    metricGroup.gauge(
-                            MetricNames.REMOTE_UNREFERENCED_SEGMENT_COUNT,
-                            this::getUnreferencedSegmentCount);
-                    metricGroup.gauge(
-                            MetricNames.REMOTE_ORPHAN_MANIFEST_COUNT, () -> orphanManifestCount);
                     remoteLogMetrics = metricGroup;
                 });
     }
@@ -161,11 +151,6 @@ public class RemoteLogTablet {
     /** Returns the number of persisted unreferenced segments waiting for GC. */
     public int getUnreferencedSegmentCount() {
         return inReadLock(lock, () -> currentManifest.getUnreferencedRemoteLogSegments().size());
-    }
-
-    /** Updates the number of non-authoritative manifest snapshots seen by the latest sweep. */
-    public void updateOrphanManifestCount(long orphanManifestCount) {
-        this.orphanManifestCount = orphanManifestCount;
     }
 
     public void unregisterMetrics() {

@@ -110,6 +110,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -1233,6 +1234,15 @@ class CoordinatorEventProcessorTest {
 
         VersionedRemoteLogManifestHandle legacyHandle =
                 zookeeperClient.getVersionedRemoteLogManifestHandle(tableBucket).get();
+        // An assigned follower may have no live registration while it is restarting. It must not
+        // block the live leader from publishing a V2 manifest.
+        fromCtx(
+                ctx -> {
+                    List<Integer> assignment = new ArrayList<>(ctx.getAssignment(tableBucket));
+                    assignment.add(99);
+                    ctx.updateBucketReplicaAssignment(tableBucket, assignment);
+                    return null;
+                });
         CommitRemoteLogManifestData v2Commit =
                 CommitRemoteLogManifestData.v2Present(
                         tableBucket,
@@ -1240,8 +1250,6 @@ class CoordinatorEventProcessorTest {
                         0L,
                         10L,
                         1L,
-                        legacyHandle.handle().getRemoteLogManifestPath(),
-                        0L,
                         legacyHandle.zkVersion(),
                         coordinatorEpoch,
                         bucketLeaderEpoch);
@@ -1281,8 +1289,6 @@ class CoordinatorEventProcessorTest {
                         0L,
                         20L,
                         2L,
-                        currentHandle.handle().getRemoteLogManifestPath(),
-                        1L,
                         currentHandle.zkVersion(),
                         coordinatorEpoch,
                         bucketLeaderEpoch - 1);
