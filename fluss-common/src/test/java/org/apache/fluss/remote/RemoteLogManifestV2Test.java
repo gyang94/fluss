@@ -172,8 +172,7 @@ class RemoteLogManifestV2Test {
                 RemoteLogManifestV2Migration.migrate(v1, 1L);
         RemoteLogManifest migrated = migration.resultManifest();
 
-        assertThat(migration.migrationType())
-                .isEqualTo(RemoteLogManifestV2Migration.MigrationType.MIGRATED);
+        assertThat(migration.requiresRebuild()).isFalse();
         assertThat(migrated.getVersion()).isEqualTo(RemoteLogManifest.VERSION_2);
         assertThat(migrated.getGeneration()).isEqualTo(1L);
         assertThat(migrated.getRemoteLogSegmentList()).containsExactly(winner, extending);
@@ -201,8 +200,7 @@ class RemoteLogManifestV2Test {
                         Arrays.asList(segment(0, 10), segment(11, 20)));
         RemoteLogManifestV2Migration.Result gappedMigration =
                 RemoteLogManifestV2Migration.migrate(gapped, 1L);
-        assertThat(gappedMigration.migrationType())
-                .isEqualTo(RemoteLogManifestV2Migration.MigrationType.GAPPED);
+        assertThat(gappedMigration.requiresRebuild()).isTrue();
         assertThat(gappedMigration.gapStartOffset()).isEqualTo(10L);
         assertThat(gappedMigration.gapEndOffset()).isEqualTo(11L);
         assertThat(gappedMigration.resultManifest().getRemoteLogSegmentList()).isEmpty();
@@ -241,12 +239,10 @@ class RemoteLogManifestV2Test {
         RemoteLogManifestReplacementPlanner.Result covered =
                 plan(appended.resultManifest(), segment(5, 15));
         assertThat(covered.planType()).isEqualTo(ALREADY_COVERED);
-        assertThat(covered.requiresManifestCommit()).isFalse();
 
         RemoteLogManifestReplacementPlanner.Result gap =
                 plan(appended.resultManifest(), segment(21, 30));
         assertThat(gap.planType()).isEqualTo(GAP);
-        assertThat(gap.requiresManifestCommit()).isFalse();
     }
 
     @Test
@@ -259,12 +255,10 @@ class RemoteLogManifestV2Test {
                 RemoteLogManifestReplacementPlanner.restartAfterGap(manifest, candidate, 22L);
 
         assertThat(result.planType()).isEqualTo(RESTART_AFTER_GAP);
-        assertThat(result.requiresManifestCommit()).isTrue();
         assertThat(result.resultManifest().getGeneration()).isEqualTo(1L);
         assertThat(result.resultManifest().getRemoteLogStartOffset()).isEqualTo(22L);
         assertThat(result.resultManifest().getRemoteLogEndOffset()).isEqualTo(30L);
         assertThat(result.resultManifest().getRemoteLogSegmentList()).containsExactly(candidate);
-        assertThat(result.segmentsToUnreference()).containsExactly(first);
         assertThat(result.resultManifest().getUnreferencedRemoteLogSegments())
                 .singleElement()
                 .satisfies(
@@ -292,7 +286,6 @@ class RemoteLogManifestV2Test {
                 .containsExactly(
                         new RemoteLogSegmentReference(segmentA, 0L, 5L),
                         new RemoteLogSegmentReference(replacement, 5L, 20L));
-        assertThat(result.segmentsToUnreference()).containsExactly(segmentC);
         assertThat(result.resultManifest().getUnreferencedRemoteLogSegments())
                 .allMatch(entry -> !entry.isGcEligible());
 
@@ -318,7 +311,6 @@ class RemoteLogManifestV2Test {
         assertThat(sameStartResult.planType()).isEqualTo(REPLACE_AND_CLIP);
         assertThat(sameStartResult.resultManifest().getRemoteLogSegmentList())
                 .containsExactly(sameStart);
-        assertThat(sameStartResult.segmentsToUnreference()).containsExactly(old);
 
         RemoteLogSegment startClipped = segment(50, 250);
         RemoteLogManifestReplacementPlanner.Result startClippedResult =

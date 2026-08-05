@@ -55,16 +55,10 @@ public final class RemoteLogManifestReplacementPlanner {
     public static final class Result {
         private final PlanType planType;
         private final RemoteLogManifest resultManifest;
-        private final List<RemoteLogSegment> segmentsToUnreference;
 
-        private Result(
-                PlanType planType,
-                RemoteLogManifest resultManifest,
-                List<RemoteLogSegment> segmentsToUnreference) {
+        private Result(PlanType planType, RemoteLogManifest resultManifest) {
             this.planType = checkNotNull(planType);
             this.resultManifest = checkNotNull(resultManifest);
-            this.segmentsToUnreference =
-                    Collections.unmodifiableList(new ArrayList<>(segmentsToUnreference));
         }
 
         public PlanType planType() {
@@ -74,26 +68,13 @@ public final class RemoteLogManifestReplacementPlanner {
         public RemoteLogManifest resultManifest() {
             return resultManifest;
         }
-
-        public List<RemoteLogSegment> segmentsToUnreference() {
-            return segmentsToUnreference;
-        }
-
-        public boolean requiresManifestCommit() {
-            return planType != PlanType.ALREADY_COVERED && planType != PlanType.GAP;
-        }
     }
 
     public static Result plan(RemoteLogManifest manifest, RemoteLogSegment candidate) {
         checkArgument(
                 manifest.getVersion() == RemoteLogManifest.VERSION_2,
                 "Replacement planning requires a V2 manifest");
-        checkArgument(
-                candidate.physicalTablePath().equals(manifest.getPhysicalTablePath()),
-                "Candidate physical table path does not match manifest");
-        checkArgument(
-                candidate.tableBucket().equals(manifest.getTableBucket()),
-                "Candidate table bucket does not match manifest");
+        validateCandidateIdentity(manifest, candidate);
 
         if (manifest.getRemoteLogSegmentList().isEmpty()) {
             return initialCopy(manifest, candidate, candidate.remoteLogStartOffset());
@@ -105,10 +86,10 @@ public final class RemoteLogManifestReplacementPlanner {
         long candidateEndOffset = candidate.remoteLogEndOffset();
 
         if (candidateEndOffset <= remoteEndOffset) {
-            return new Result(PlanType.ALREADY_COVERED, manifest, Collections.emptyList());
+            return new Result(PlanType.ALREADY_COVERED, manifest);
         }
         if (candidateStartOffset > remoteEndOffset) {
-            return new Result(PlanType.GAP, manifest, Collections.emptyList());
+            return new Result(PlanType.GAP, manifest);
         }
 
         PlanType planType;
@@ -152,7 +133,7 @@ public final class RemoteLogManifestReplacementPlanner {
                         activeSegments,
                         remoteStartOffset,
                         unreferencedSegments);
-        return new Result(planType, resultManifest, segmentsToUnreference);
+        return new Result(planType, resultManifest);
     }
 
     /**
@@ -168,12 +149,7 @@ public final class RemoteLogManifestReplacementPlanner {
         checkArgument(
                 manifest.getRemoteLogSegmentList().isEmpty(),
                 "Initial-copy planning requires an empty manifest");
-        checkArgument(
-                candidate.physicalTablePath().equals(manifest.getPhysicalTablePath()),
-                "Candidate physical table path does not match manifest");
-        checkArgument(
-                candidate.tableBucket().equals(manifest.getTableBucket()),
-                "Candidate table bucket does not match manifest");
+        validateCandidateIdentity(manifest, candidate);
         checkArgument(
                 candidate.remoteLogStartOffset() <= logicalStartOffset
                         && logicalStartOffset < candidate.remoteLogEndOffset(),
@@ -190,7 +166,7 @@ public final class RemoteLogManifestReplacementPlanner {
                         Collections.singletonList(candidate),
                         logicalStartOffset,
                         manifest.getUnreferencedRemoteLogSegments());
-        return new Result(PlanType.INITIAL_COPY, resultManifest, Collections.emptyList());
+        return new Result(PlanType.INITIAL_COPY, resultManifest);
     }
 
     /**
@@ -206,12 +182,7 @@ public final class RemoteLogManifestReplacementPlanner {
         checkArgument(
                 manifest.getVersion() == RemoteLogManifest.VERSION_2,
                 "Gap recovery requires a V2 manifest");
-        checkArgument(
-                candidate.physicalTablePath().equals(manifest.getPhysicalTablePath()),
-                "Candidate physical table path does not match manifest");
-        checkArgument(
-                candidate.tableBucket().equals(manifest.getTableBucket()),
-                "Candidate table bucket does not match manifest");
+        validateCandidateIdentity(manifest, candidate);
         checkArgument(
                 !manifest.getRemoteLogSegmentList().isEmpty(),
                 "Gap recovery requires a non-empty manifest");
@@ -247,7 +218,7 @@ public final class RemoteLogManifestReplacementPlanner {
                         Collections.singletonList(candidate),
                         newRemoteStartOffset,
                         unreferencedSegments);
-        return new Result(PlanType.RESTART_AFTER_GAP, resultManifest, segmentsToUnreference);
+        return new Result(PlanType.RESTART_AFTER_GAP, resultManifest);
     }
 
     /**
@@ -342,6 +313,16 @@ public final class RemoteLogManifestReplacementPlanner {
                         ? null
                         : manifest.getRemoteLogStartOffset(),
                 eligibleSegments);
+    }
+
+    private static void validateCandidateIdentity(
+            RemoteLogManifest manifest, RemoteLogSegment candidate) {
+        checkArgument(
+                candidate.physicalTablePath().equals(manifest.getPhysicalTablePath()),
+                "Candidate physical table path does not match manifest");
+        checkArgument(
+                candidate.tableBucket().equals(manifest.getTableBucket()),
+                "Candidate table bucket does not match manifest");
     }
 
     private RemoteLogManifestReplacementPlanner() {}

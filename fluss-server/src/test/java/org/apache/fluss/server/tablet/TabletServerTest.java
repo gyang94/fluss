@@ -30,7 +30,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.util.Optional;
 
-import static org.apache.fluss.server.zk.data.TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Test for {@link TabletServer}. */
@@ -87,10 +86,6 @@ class TabletServerTest extends ServerTestBase {
 
         TabletServerRegistration tabletServerRegistration = optionalTabletServerRegistration.get();
         assertThat(tabletServerRegistration.getRack()).isEqualTo(RACK);
-        assertThat(
-                        tabletServerRegistration.supportsCapability(
-                                REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY))
-                .isTrue();
         verifyEndpoint(
                 tabletServerRegistration.getEndpoints(), server.getRpcServer().getBindEndpoints());
     }

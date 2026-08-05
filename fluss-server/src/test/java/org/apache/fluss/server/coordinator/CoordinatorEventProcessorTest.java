@@ -73,7 +73,6 @@ import org.apache.fluss.server.metadata.ClusterMetadata;
 import org.apache.fluss.server.metadata.CoordinatorMetadataCache;
 import org.apache.fluss.server.metadata.ServerInfo;
 import org.apache.fluss.server.metadata.TableMetadata;
-import org.apache.fluss.server.metadata.TabletServerResource;
 import org.apache.fluss.server.metrics.group.TestingMetricGroups;
 import org.apache.fluss.server.tablet.TestTabletServerGateway;
 import org.apache.fluss.server.zk.NOPErrorHandler;
@@ -110,7 +109,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -140,7 +138,6 @@ import static org.apache.fluss.server.testutils.KvTestUtils.mockCompletedSnapsho
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getAdjustIsrResponseData;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getUpdateMetadataRequestData;
 import static org.apache.fluss.server.utils.TableAssignmentUtils.generateAssignment;
-import static org.apache.fluss.server.zk.data.TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.apache.fluss.testutils.common.CommonTestUtils.waitValue;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -211,9 +208,7 @@ class CoordinatorEventProcessorTest {
                             "rack" + i,
                             Collections.singletonList(
                                     new Endpoint("host" + i, 1000, DEFAULT_LISTENER_NAME)),
-                            System.currentTimeMillis(),
-                            TabletServerResource.unknown(),
-                            Collections.singleton(REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)));
+                            System.currentTimeMillis()));
         }
     }
 
@@ -1234,15 +1229,6 @@ class CoordinatorEventProcessorTest {
 
         VersionedRemoteLogManifestHandle legacyHandle =
                 zookeeperClient.getVersionedRemoteLogManifestHandle(tableBucket).get();
-        // An assigned follower may have no live registration while it is restarting. It must not
-        // block the live leader from publishing a V2 manifest.
-        fromCtx(
-                ctx -> {
-                    List<Integer> assignment = new ArrayList<>(ctx.getAssignment(tableBucket));
-                    assignment.add(99);
-                    ctx.updateBucketReplicaAssignment(tableBucket, assignment);
-                    return null;
-                });
         CommitRemoteLogManifestData v2Commit =
                 CommitRemoteLogManifestData.v2Present(
                         tableBucket,

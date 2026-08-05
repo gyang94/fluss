@@ -28,12 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.TreeSet;
 import java.util.stream.Collectors;
-
-import static java.util.Collections.emptySet;
-import static java.util.Collections.unmodifiableSet;
 
 /**
  * ServerInfo is used to save the endpoint metadata in controller and synchronize for each server.
@@ -50,7 +45,6 @@ public class ServerInfo {
     private final Map<String, Endpoint> endpointMap;
     private final ServerType serverType;
     private final TabletServerResource resource;
-    private final Set<String> capabilities;
 
     public ServerInfo(
             Integer id, @Nullable String rack, List<Endpoint> endpoints, ServerType serverType) {
@@ -63,17 +57,6 @@ public class ServerInfo {
             List<Endpoint> endpoints,
             ServerType serverType,
             TabletServerResource resource) {
-        this(id, rack, endpoints, serverType, resource, emptySet());
-    }
-
-    /** Creates server metadata with the capabilities advertised during registration. */
-    public ServerInfo(
-            Integer id,
-            @Nullable String rack,
-            List<Endpoint> endpoints,
-            ServerType serverType,
-            TabletServerResource resource,
-            Set<String> capabilities) {
         this.id = id;
         this.rack = rack;
         this.endpointMap =
@@ -81,7 +64,6 @@ public class ServerInfo {
                         .collect(Collectors.toMap(Endpoint::getListenerName, endpoint -> endpoint));
         this.serverType = serverType;
         this.resource = resource;
-        this.capabilities = unmodifiableSet(new TreeSet<>(capabilities));
     }
 
     public Integer id() {
@@ -130,11 +112,6 @@ public class ServerInfo {
         return resource;
     }
 
-    /** Returns whether the server advertised the requested protocol capability. */
-    public boolean supportsCapability(String capability) {
-        return capabilities.contains(capability);
-    }
-
     @Override
     public boolean equals(Object o) {
         if (o == null || getClass() != o.getClass()) {
@@ -144,13 +121,12 @@ public class ServerInfo {
         return Objects.equals(id, that.id)
                 && Objects.equals(rack, that.rack)
                 && Objects.equals(endpointMap, that.endpointMap)
-                && Objects.equals(resource, that.resource)
-                && Objects.equals(capabilities, that.capabilities);
+                && Objects.equals(resource, that.resource);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(id, rack, endpointMap, resource, capabilities);
+        return Objects.hash(id, rack, endpointMap, resource);
     }
 
     @Override
@@ -166,8 +142,6 @@ public class ServerInfo {
                 + serverType
                 + ", resource="
                 + resource
-                + ", capabilities="
-                + capabilities
                 + '}';
     }
 }

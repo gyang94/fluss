@@ -318,28 +318,49 @@ public class LogTieringTask implements Runnable {
                         migrationRebuildStartOffset == null
                                 ? nextCopyOffset
                                 : migrationRebuildStartOffset);
-        List<CandidatePlan> candidatePlans =
-                planCandidates(
-                        eligibleBase,
-                        candidates,
-                        logTablet.localLogStartOffset(),
-                        migrationRebuildStartOffset);
-
         RemoteLogManifest resultManifest = eligibleBase;
         List<RemoteLogSegment> copiedSegments = new ArrayList<>();
         long successfulNextCopyOffset = nextCopyOffset;
-        for (CandidatePlan candidatePlan : candidatePlans) {
-            PlanType planType = candidatePlan.planningResult.planType();
-            if (planType == PlanType.ALREADY_COVERED) {
-                successfulNextCopyOffset = candidatePlan.enrichedLogSegment.nextSegmentOffset;
+        for (EnrichedLogSegment candidate : candidates) {
+            RemoteLogSegment remoteLogSegment = createRemoteLogSegment(candidate);
+            RemoteLogManifestReplacementPlanner.Result planningResult =
+                    migrationRebuildStartOffset != null
+                                    && resultManifest.getRemoteLogSegmentList().isEmpty()
+                            ? RemoteLogManifestReplacementPlanner.initialCopy(
+                                    resultManifest, remoteLogSegment, migrationRebuildStartOffset)
+                            : RemoteLogManifestReplacementPlanner.plan(
+                                    resultManifest, remoteLogSegment);
+            if (planningResult.planType() == PlanType.GAP) {
+                long localLogStartOffset = logTablet.localLogStartOffset();
+                if (resultManifest.getRemoteLogEndOffset() >= localLogStartOffset) {
+                    throw new IllegalStateException(
+                            String.format(
+                                    "Remote gap [%s, %s) for bucket %s is still locally available",
+                                    resultManifest.getRemoteLogEndOffset(),
+                                    remoteLogSegment.remoteLogStartOffset(),
+                                    tableBucket));
+                }
+                planningResult =
+                        RemoteLogManifestReplacementPlanner.restartAfterGap(
+                                resultManifest, remoteLogSegment, localLogStartOffset);
+                LOG.info(
+                        "Restarting Manifest V2 range at local log start offset {} for bucket {} "
+                                + "because local retention removed remote gap [{}, {})",
+                        localLogStartOffset,
+                        tableBucket,
+                        resultManifest.getRemoteLogEndOffset(),
+                        remoteLogSegment.remoteLogStartOffset());
+            }
+            if (planningResult.planType() == PlanType.ALREADY_COVERED) {
+                successfulNextCopyOffset = candidate.nextSegmentOffset;
                 continue;
             }
-            if (!copyPlannedSegment(logTablet, candidatePlan, metricGroup)) {
+            if (!copyPlannedSegment(logTablet, candidate, remoteLogSegment, metricGroup)) {
                 break;
             }
-            copiedSegments.add(candidatePlan.remoteLogSegment);
-            resultManifest = candidatePlan.planningResult.resultManifest();
-            successfulNextCopyOffset = candidatePlan.enrichedLogSegment.nextSegmentOffset;
+            copiedSegments.add(remoteLogSegment);
+            resultManifest = planningResult.resultManifest();
+            successfulNextCopyOffset = candidate.nextSegmentOffset;
         }
 
         RemoteLogManifest beforeExpiration = resultManifest;
@@ -359,9 +380,6 @@ public class LogTieringTask implements Runnable {
             return;
         }
 
-        RemoteLogManifestUpdatePlan updatePlan =
-                new RemoteLogManifestUpdatePlan(
-                        baseHandle, resultManifest, copiedSegments, successfulNextCopyOffset);
         FsPath manifestPath;
         try {
             manifestPath = remoteLogStorage.writeRemoteLogManifestSnapshot(resultManifest);
@@ -371,8 +389,7 @@ public class LogTieringTask implements Runnable {
         }
 
         CommitRemoteLogManifestData commitData =
-                updatePlan.toCommitData(
-                        manifestPath, replica.getCoordinatorEpoch(), replica.getBucketEpoch());
+                createV2CommitData(baseHandle, resultManifest, manifestPath);
         RemoteLogManifestCommitResult commitResult;
         try {
             commitResult =
@@ -386,15 +403,40 @@ public class LogTieringTask implements Runnable {
 
         if (commitResult == RemoteLogManifestCommitResult.COMMITTED) {
             applyPublishedOffsets(logTablet, resultManifest);
-            nextCopyOffset = updatePlan.nextCopyOffset();
+            nextCopyOffset = successfulNextCopyOffset;
             return;
         }
 
-        cleanupRejectedPlan(updatePlan, manifestPath, metricGroup, logTablet);
+        cleanupRejectedPlan(copiedSegments, manifestPath, metricGroup, logTablet);
         if (commitResult == RemoteLogManifestCommitResult.CONFLICT && allowConflictReplan) {
             nextCopyOffset = findNextCopyOffset(logTablet);
             runOnceV2(logTablet, metricGroup, false);
         }
+    }
+
+    private CommitRemoteLogManifestData createV2CommitData(
+            VersionedRemoteLogManifestHandle baseHandle,
+            RemoteLogManifest resultManifest,
+            FsPath manifestPath) {
+        if (baseHandle == null) {
+            return CommitRemoteLogManifestData.v2Absent(
+                    tableBucket,
+                    manifestPath,
+                    resultManifest.getRemoteLogStartOffset(),
+                    resultManifest.getRemoteLogEndOffset(),
+                    resultManifest.getGeneration(),
+                    replica.getCoordinatorEpoch(),
+                    replica.getBucketEpoch());
+        }
+        return CommitRemoteLogManifestData.v2Present(
+                tableBucket,
+                manifestPath,
+                resultManifest.getRemoteLogStartOffset(),
+                resultManifest.getRemoteLogEndOffset(),
+                resultManifest.getGeneration(),
+                baseHandle.zkVersion(),
+                replica.getCoordinatorEpoch(),
+                replica.getBucketEpoch());
     }
 
     private RemoteLogManifest collectUnreferencedSegments(
@@ -542,51 +584,6 @@ public class LogTieringTask implements Runnable {
         return first != null && second != null && first.getPath().equals(second.getPath());
     }
 
-    private List<CandidatePlan> planCandidates(
-            RemoteLogManifest normalizedBase,
-            List<EnrichedLogSegment> candidates,
-            long localLogStartOffset,
-            Long initialCopyStartOffset)
-            throws IOException {
-        List<CandidatePlan> plans = new ArrayList<>();
-        RemoteLogManifest workingManifest = normalizedBase;
-        for (EnrichedLogSegment candidate : candidates) {
-            RemoteLogSegment remoteLogSegment = createRemoteLogSegment(candidate);
-            RemoteLogManifestReplacementPlanner.Result result =
-                    initialCopyStartOffset != null
-                                    && workingManifest.getRemoteLogSegmentList().isEmpty()
-                            ? RemoteLogManifestReplacementPlanner.initialCopy(
-                                    workingManifest, remoteLogSegment, initialCopyStartOffset)
-                            : RemoteLogManifestReplacementPlanner.plan(
-                                    workingManifest, remoteLogSegment);
-            if (result.planType() == PlanType.GAP) {
-                if (workingManifest.getRemoteLogEndOffset() >= localLogStartOffset) {
-                    throw new IllegalStateException(
-                            String.format(
-                                    "Remote gap [%s, %s) for bucket %s is still locally available",
-                                    workingManifest.getRemoteLogEndOffset(),
-                                    remoteLogSegment.remoteLogStartOffset(),
-                                    tableBucket));
-                }
-                result =
-                        RemoteLogManifestReplacementPlanner.restartAfterGap(
-                                workingManifest, remoteLogSegment, localLogStartOffset);
-                LOG.info(
-                        "Restarting Manifest V2 range at local log start offset {} for bucket {} "
-                                + "because local retention removed remote gap [{}, {})",
-                        localLogStartOffset,
-                        tableBucket,
-                        workingManifest.getRemoteLogEndOffset(),
-                        remoteLogSegment.remoteLogStartOffset());
-            }
-            plans.add(new CandidatePlan(candidate, remoteLogSegment, result));
-            if (result.requiresManifestCommit()) {
-                workingManifest = result.resultManifest();
-            }
-        }
-        return plans;
-    }
-
     private RemoteLogManifest normalizeV2Generation(
             RemoteLogManifest baseManifest, long targetGeneration) {
         return RemoteLogManifest.createV2(
@@ -615,13 +612,16 @@ public class LogTieringTask implements Runnable {
     }
 
     private boolean copyPlannedSegment(
-            LogTablet logTablet, CandidatePlan candidatePlan, TableMetricGroup metricGroup)
+            LogTablet logTablet,
+            EnrichedLogSegment candidate,
+            RemoteLogSegment remoteLogSegment,
+            TableMetricGroup metricGroup)
             throws Exception {
-        LogSegment segment = candidatePlan.enrichedLogSegment.logSegment;
+        LogSegment segment = candidate.logSegment;
         File writerIdSnapshotFile =
                 logTablet
                         .writerStateManager()
-                        .fetchSnapshot(candidatePlan.enrichedLogSegment.nextSegmentOffset)
+                        .fetchSnapshot(candidate.nextSegmentOffset)
                         .orElse(null);
         LogSegmentFiles logSegmentFiles =
                 new LogSegmentFiles(
@@ -630,23 +630,23 @@ public class LogTieringTask implements Runnable {
                         toPathIfExists(segment.timeIndex().file()),
                         writerIdSnapshotFile == null ? null : writerIdSnapshotFile.toPath());
         try {
-            remoteLogStorage.copyLogSegmentFiles(candidatePlan.remoteLogSegment, logSegmentFiles);
+            remoteLogStorage.copyLogSegmentFiles(remoteLogSegment, logSegmentFiles);
         } catch (RemoteStorageException e) {
             metricGroup.remoteLogCopyErrors().inc();
             LOG.warn(
                     "Failed to copy planned Manifest V2 segment {} for bucket {}",
-                    candidatePlan.remoteLogSegment,
+                    remoteLogSegment,
                     tableBucket,
                     e);
             return false;
         }
         metricGroup.remoteLogCopyRequests().inc();
-        metricGroup.remoteLogCopyBytes().inc(candidatePlan.remoteLogSegment.segmentSizeInBytes());
+        metricGroup.remoteLogCopyBytes().inc(remoteLogSegment.segmentSizeInBytes());
         return true;
     }
 
     private void cleanupRejectedPlan(
-            RemoteLogManifestUpdatePlan updatePlan,
+            List<RemoteLogSegment> copiedSegments,
             FsPath manifestPath,
             TableMetricGroup metricGroup,
             LogTablet logTablet)
@@ -678,14 +678,14 @@ public class LogTieringTask implements Runnable {
                     null);
         }
 
-        for (RemoteLogSegment copiedSegment : updatePlan.segmentsToCopy()) {
+        for (RemoteLogSegment copiedSegment : copiedSegments) {
             if (authoritativeSegmentIds.contains(copiedSegment.remoteLogSegmentId())) {
                 throw new IllegalStateException(
                         "Rejected plan segment is referenced by the authoritative manifest: "
                                 + copiedSegment.remoteLogSegmentId());
             }
         }
-        deleteRemoteLogSegmentFiles(updatePlan.segmentsToCopy(), metricGroup);
+        deleteRemoteLogSegmentFiles(copiedSegments, metricGroup);
         remoteLogStorage.deleteRemoteLogManifestSnapshot(manifestPath);
     }
 
@@ -1021,21 +1021,6 @@ public class LogTieringTask implements Runnable {
 
     public String toString() {
         return this.getClass() + "[" + tableBucket + "]";
-    }
-
-    private static final class CandidatePlan {
-        private final EnrichedLogSegment enrichedLogSegment;
-        private final RemoteLogSegment remoteLogSegment;
-        private final RemoteLogManifestReplacementPlanner.Result planningResult;
-
-        private CandidatePlan(
-                EnrichedLogSegment enrichedLogSegment,
-                RemoteLogSegment remoteLogSegment,
-                RemoteLogManifestReplacementPlanner.Result planningResult) {
-            this.enrichedLogSegment = enrichedLogSegment;
-            this.remoteLogSegment = remoteLogSegment;
-            this.planningResult = planningResult;
-        }
     }
 
     private static class EnrichedLogSegment {

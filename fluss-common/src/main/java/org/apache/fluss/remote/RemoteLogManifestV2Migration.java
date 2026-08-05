@@ -32,32 +32,22 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 @Internal
 public final class RemoteLogManifestV2Migration {
 
-    /** Classification of a V1-to-V2 migration. */
-    public enum MigrationType {
-        MIGRATED,
-        GAPPED
-    }
-
     /** A canonical V2 base together with whether it requires rebuilding from a local segment. */
     public static final class Result {
-        private final MigrationType migrationType;
+        private final boolean requiresRebuild;
         private final RemoteLogManifest resultManifest;
         private final long gapStartOffset;
         private final long gapEndOffset;
 
         private Result(
-                MigrationType migrationType,
+                boolean requiresRebuild,
                 RemoteLogManifest resultManifest,
                 long gapStartOffset,
                 long gapEndOffset) {
-            this.migrationType = checkNotNull(migrationType);
+            this.requiresRebuild = requiresRebuild;
             this.resultManifest = checkNotNull(resultManifest);
             this.gapStartOffset = gapStartOffset;
             this.gapEndOffset = gapEndOffset;
-        }
-
-        public MigrationType migrationType() {
-            return migrationType;
         }
 
         public RemoteLogManifest resultManifest() {
@@ -73,7 +63,7 @@ public final class RemoteLogManifestV2Migration {
         }
 
         public boolean requiresRebuild() {
-            return migrationType == MigrationType.GAPPED;
+            return requiresRebuild;
         }
     }
 
@@ -142,7 +132,7 @@ public final class RemoteLogManifestV2Migration {
         Long remoteStartOffset =
                 activeSegments.isEmpty() ? null : activeSegments.get(0).remoteLogStartOffset();
         return new Result(
-                MigrationType.MIGRATED,
+                false,
                 RemoteLogManifest.createV2(
                         newGeneration,
                         v1Manifest.getPhysicalTablePath(),
@@ -177,7 +167,7 @@ public final class RemoteLogManifestV2Migration {
                         new ArrayList<>(),
                         null,
                         unreferencedSegments);
-        return new Result(MigrationType.GAPPED, recoveryBase, gapStartOffset, gapEndOffset);
+        return new Result(true, recoveryBase, gapStartOffset, gapEndOffset);
     }
 
     private static UnreferencedRemoteLogSegment replaced(

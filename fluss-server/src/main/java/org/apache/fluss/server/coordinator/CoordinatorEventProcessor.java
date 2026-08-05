@@ -428,23 +428,13 @@ public class CoordinatorEventProcessor implements EventProcessor {
                 zooKeeperClient.getTabletServers(currentServers);
         for (int server : currentServers) {
             TabletServerRegistration registration = tabletServerRegistrations.get(server);
-            if (remoteManifestV2WriterGate.isEnabled()
-                    && !registration.supportsCapability(
-                            TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
-                LOG.error(
-                        "Excluding tablet server {} because Manifest V2 writer is enabled but "
-                                + "the server lacks version-dispatch capability.",
-                        server);
-                continue;
-            }
             ServerInfo serverInfo =
                     new ServerInfo(
                             server,
                             registration.getRack(),
                             registration.getEndpoints(),
                             ServerType.TABLET_SERVER,
-                            registration.getResource(),
-                            registration.getCapabilities());
+                            registration.getResource());
             // Get internal listener endpoint to send request to tablet server.
             Endpoint internalEndpoint = serverInfo.endpoint(internalListenerName);
             if (internalEndpoint == null) {
@@ -1341,15 +1331,6 @@ public class CoordinatorEventProcessor implements EventProcessor {
         // when we finish the logic of tablet server
         ServerInfo serverInfo = newTabletServerEvent.getServerInfo();
         int tabletServerId = serverInfo.id();
-        if (remoteManifestV2WriterGate.isEnabled()
-                && !serverInfo.supportsCapability(
-                        TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
-            LOG.error(
-                    "Rejecting tablet server {} while Manifest V2 writer is enabled because it "
-                            + "lacks version-dispatch capability.",
-                    tabletServerId);
-            return;
-        }
         if (coordinatorContext.getLiveTabletServers().containsKey(serverInfo.id())) {
             // if the dead server is already in live servers, return directly
             // it may happen during coordinator server initiation, the watcher watch a new tablet
@@ -2202,11 +2183,9 @@ public class CoordinatorEventProcessor implements EventProcessor {
         CommitRemoteLogManifestResponse response = new CommitRemoteLogManifestResponse();
         TableBucket tb = event.getTableBucket();
         if (manifestData.isV2CasCommit()) {
-            if (!remoteManifestV2WriterGate.isEnabled()
-                    || !allLiveAssignedReplicasSupportManifestV2(tb)) {
+            if (!remoteManifestV2WriterGate.isEnabled()) {
                 LOG.error(
-                        "Rejected Manifest V2 commit for {} because the writer gate is disabled "
-                                + "or a live assigned replica lacks version-dispatch capability.",
+                        "Rejected Manifest V2 commit for {} because the writer gate is disabled.",
                         tb);
                 return response.setCommitSuccess(false)
                         .setCommitResult(RemoteLogManifestCommitResult.INVALID_MANIFEST.code());
@@ -2291,27 +2270,6 @@ public class CoordinatorEventProcessor implements EventProcessor {
         coordinatorRequestBatch.sendNotifyRemoteLogOffsetsRequest(
                 coordinatorContext.getCoordinatorEpoch());
         return response;
-    }
-
-    private boolean allLiveAssignedReplicasSupportManifestV2(TableBucket tableBucket) {
-        List<Integer> assignedReplicas = coordinatorContext.getAssignment(tableBucket);
-        if (assignedReplicas.isEmpty()) {
-            return false;
-        }
-        boolean hasLiveAssignedReplica = false;
-        Map<Integer, ServerInfo> liveTabletServers = coordinatorContext.getLiveTabletServers();
-        for (Integer replicaId : assignedReplicas) {
-            ServerInfo serverInfo = liveTabletServers.get(replicaId);
-            if (serverInfo == null) {
-                continue;
-            }
-            hasLiveAssignedReplica = true;
-            if (!serverInfo.supportsCapability(
-                    TabletServerRegistration.REMOTE_MANIFEST_VERSION_DISPATCH_CAPABILITY)) {
-                return false;
-            }
-        }
-        return hasLiveAssignedReplica;
     }
 
     private <T> void processAccessContext(AccessContextEvent<T> event) {
