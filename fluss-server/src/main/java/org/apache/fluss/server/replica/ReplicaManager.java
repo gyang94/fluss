@@ -277,6 +277,7 @@ public class ReplicaManager implements ServerReconfigurable {
                 clock,
                 ioExecutor,
                 localDiskManager,
+                pluginManager,
                 () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
     }
 
@@ -298,6 +299,7 @@ public class ReplicaManager implements ServerReconfigurable {
             Clock clock,
             ExecutorService ioExecutor,
             LocalDiskManager localDiskManager,
+            @Nullable PluginManager pluginManager,
             BooleanSupplier manifestV2WriterEnabled)
             throws IOException {
         this(
