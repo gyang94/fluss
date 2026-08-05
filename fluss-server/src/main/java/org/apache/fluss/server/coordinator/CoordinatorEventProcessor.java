@@ -216,39 +216,6 @@ public class CoordinatorEventProcessor implements EventProcessor {
             MetadataManager metadataManager,
             KvSnapshotLeaseManager kvSnapshotLeaseManager,
             Scheduler scheduler,
-            Clock clock) {
-        this(
-                zooKeeperClient,
-                serverMetadataCache,
-                coordinatorChannelManager,
-                coordinatorContext,
-                replicaCapacityController,
-                autoPartitionManager,
-                lakeTableTieringManager,
-                coordinatorMetricGroup,
-                conf,
-                ioExecutor,
-                metadataManager,
-                kvSnapshotLeaseManager,
-                scheduler,
-                clock,
-                new RemoteManifestV2WriterGate(conf));
-    }
-
-    public CoordinatorEventProcessor(
-            ZooKeeperClient zooKeeperClient,
-            CoordinatorMetadataCache serverMetadataCache,
-            CoordinatorChannelManager coordinatorChannelManager,
-            CoordinatorContext coordinatorContext,
-            ReplicaCapacityController replicaCapacityController,
-            AutoPartitionManager autoPartitionManager,
-            LakeTableTieringManager lakeTableTieringManager,
-            CoordinatorMetricGroup coordinatorMetricGroup,
-            Configuration conf,
-            ExecutorService ioExecutor,
-            MetadataManager metadataManager,
-            KvSnapshotLeaseManager kvSnapshotLeaseManager,
-            Scheduler scheduler,
             Clock clock,
             RemoteManifestV2WriterGate remoteManifestV2WriterGate) {
         this.zooKeeperClient = zooKeeperClient;
@@ -2188,7 +2155,7 @@ public class CoordinatorEventProcessor implements EventProcessor {
                         "Rejected Manifest V2 commit for {} because the writer gate is disabled.",
                         tb);
                 return response.setCommitSuccess(false)
-                        .setCommitResult(RemoteLogManifestCommitResult.INVALID_MANIFEST.code());
+                        .setCommitResult(RemoteLogManifestCommitResult.V2_WRITER_DISABLED.code());
             }
             try {
                 validateFencedEvent(event);

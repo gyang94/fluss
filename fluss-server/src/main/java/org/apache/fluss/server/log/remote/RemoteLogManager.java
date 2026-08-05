@@ -106,54 +106,10 @@ public class RemoteLogManager implements Closeable {
                 coordinatorGateway,
                 localDiskManager,
                 logManager,
-                clock,
-                ioExecutor,
-                () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
-    }
-
-    public RemoteLogManager(
-            Configuration conf,
-            ZooKeeperClient zkClient,
-            CoordinatorGateway coordinatorGateway,
-            LocalDiskManager localDiskManager,
-            LogManager logManager,
-            Clock clock,
-            ExecutorService ioExecutor,
-            BooleanSupplier manifestV2WriterEnabled)
-            throws IOException {
-        this(
-                conf,
-                zkClient,
-                coordinatorGateway,
-                localDiskManager,
-                logManager,
                 new DefaultRemoteLogStorage(conf, ioExecutor),
                 Executors.newScheduledThreadPool(
                         conf.getInt(ConfigOptions.REMOTE_LOG_MANAGER_THREAD_POOL_SIZE),
                         new ExecutorThreadFactory(RLM_SCHEDULED_THREAD_PREFIX)),
-                clock,
-                manifestV2WriterEnabled);
-    }
-
-    @VisibleForTesting
-    public RemoteLogManager(
-            Configuration conf,
-            ZooKeeperClient zkClient,
-            CoordinatorGateway coordinatorGateway,
-            LocalDiskManager localDiskManager,
-            LogManager logManager,
-            RemoteLogStorage remoteLogStorage,
-            ScheduledExecutorService scheduledExecutor,
-            Clock clock)
-            throws IOException {
-        this(
-                conf,
-                zkClient,
-                coordinatorGateway,
-                localDiskManager,
-                logManager,
-                remoteLogStorage,
-                scheduledExecutor,
                 clock,
                 () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
     }

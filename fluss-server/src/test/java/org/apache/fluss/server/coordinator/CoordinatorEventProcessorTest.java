@@ -49,6 +49,7 @@ import org.apache.fluss.rpc.messages.UpdateMetadataRequest;
 import org.apache.fluss.rpc.protocol.ApiError;
 import org.apache.fluss.rpc.protocol.ApiKeys;
 import org.apache.fluss.rpc.protocol.Errors;
+import org.apache.fluss.server.config.RemoteManifestV2WriterGate;
 import org.apache.fluss.server.coordinator.event.AccessContextEvent;
 import org.apache.fluss.server.coordinator.event.AdjustIsrReceivedEvent;
 import org.apache.fluss.server.coordinator.event.CommitKvSnapshotEvent;
@@ -1149,10 +1150,6 @@ class CoordinatorEventProcessorTest {
 
     @Test
     void testNotifyOffsetsWithShrinkISR(@TempDir Path tempDir) throws Exception {
-        eventProcessor.shutdown();
-        manifestV2WriterEnabledForTest = true;
-        eventProcessor = buildCoordinatorEventProcessor();
-        eventProcessor.startup();
         initCoordinatorChannel(Collections.singleton(ApiKeys.UPDATE_METADATA));
         TablePath t1 = TablePath.of(defaultDatabase, "test_notify_with_shrink_isr");
         final long t1Id =
@@ -1226,11 +1223,78 @@ class CoordinatorEventProcessorTest {
                 () ->
                         verifyReceiveRequestExceptFor(
                                 3, leader, NotifyKvSnapshotOffsetRequest.class));
+    }
+
+    @Test
+    void testRejectV2CommitWithDedicatedResultWhenWriterGateDisabled(@TempDir Path tempDir)
+            throws Exception {
+        TableBucket tableBucket = new TableBucket(1L, 0);
+        CommitRemoteLogManifestData commitData =
+                CommitRemoteLogManifestData.v2CreateIfAbsent(
+                        tableBucket,
+                        new FsPath(tempDir.resolve("v2.manifest").toString()),
+                        0L,
+                        10L,
+                        10L,
+                        1L,
+                        0,
+                        0);
+        CompletableFuture<CommitRemoteLogManifestResponse> response = new CompletableFuture<>();
+
+        eventProcessor
+                .getCoordinatorEventManager()
+                .put(new CommitRemoteLogManifestEvent(commitData, response));
+
+        assertThat(response.get().getCommitResult())
+                .isEqualTo(RemoteLogManifestCommitResult.V2_WRITER_DISABLED.code());
+    }
+
+    @Test
+    void testCommitRemoteLogManifestV2Results(@TempDir Path tempDir) throws Exception {
+        eventProcessor.shutdown();
+        manifestV2WriterEnabledForTest = true;
+        eventProcessor = buildCoordinatorEventProcessor();
+        eventProcessor.startup();
+        initCoordinatorChannel(Collections.singleton(ApiKeys.UPDATE_METADATA));
+
+        TablePath tablePath = TablePath.of(defaultDatabase, "test_commit_remote_log_manifest_v2");
+        long tableId =
+                createTable(
+                        tablePath,
+                        new TabletServerInfo[] {
+                            new TabletServerInfo(0, "rack0"),
+                            new TabletServerInfo(1, "rack1"),
+                            new TabletServerInfo(2, "rack2")
+                        });
+        TableBucket tableBucket = new TableBucket(tableId, 0);
+        LeaderAndIsr leaderAndIsr =
+                waitValue(
+                        () -> fromCtx((ctx) -> ctx.getBucketLeaderAndIsr(tableBucket)),
+                        Duration.ofMinutes(1),
+                        "leader not elected");
+        int coordinatorEpoch = leaderAndIsr.coordinatorEpoch();
+        int bucketLeaderEpoch = leaderAndIsr.leaderEpoch();
+        CoordinatorEventManager coordinatorEventManager =
+                eventProcessor.getCoordinatorEventManager();
+
+        CompletableFuture<CommitRemoteLogManifestResponse> legacyResponse =
+                new CompletableFuture<>();
+        coordinatorEventManager.put(
+                new CommitRemoteLogManifestEvent(
+                        new CommitRemoteLogManifestData(
+                                tableBucket,
+                                new FsPath(tempDir.resolve("v1.manifest").toString()),
+                                0L,
+                                0L,
+                                coordinatorEpoch,
+                                bucketLeaderEpoch),
+                        legacyResponse));
+        assertThat(legacyResponse.get().isCommitSuccess()).isTrue();
 
         VersionedRemoteLogManifestHandle legacyHandle =
                 zookeeperClient.getVersionedRemoteLogManifestHandle(tableBucket).get();
         CommitRemoteLogManifestData v2Commit =
-                CommitRemoteLogManifestData.v2Present(
+                CommitRemoteLogManifestData.v2CompareAndSet(
                         tableBucket,
                         new FsPath(tempDir.resolve("v2.manifest").toString()),
                         0L,
@@ -1270,7 +1334,7 @@ class CoordinatorEventProcessorTest {
         VersionedRemoteLogManifestHandle currentHandle =
                 zookeeperClient.getVersionedRemoteLogManifestHandle(tableBucket).get();
         CommitRemoteLogManifestData fencedCommit =
-                CommitRemoteLogManifestData.v2Present(
+                CommitRemoteLogManifestData.v2CompareAndSet(
                         tableBucket,
                         new FsPath(tempDir.resolve("v3.manifest").toString()),
                         0L,
@@ -2195,7 +2259,8 @@ class CoordinatorEventProcessorTest {
                 metadataManager,
                 kvSnapshotLeaseManager,
                 scheduler,
-                SystemClock.getInstance());
+                SystemClock.getInstance(),
+                new RemoteManifestV2WriterGate(conf));
     }
 
     private static class RecordingAutoPartitionManager extends AutoPartitionManager {

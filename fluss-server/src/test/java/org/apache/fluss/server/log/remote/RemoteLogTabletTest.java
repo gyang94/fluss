@@ -270,6 +270,9 @@ class RemoteLogTabletTest extends RemoteLogTestBase {
 
         remoteLogTablet.replaceManifest(manifest, handle);
 
+        RemoteLogTablet.ManifestSnapshot snapshot = remoteLogTablet.currentManifestSnapshot();
+        assertThat(snapshot.manifest()).isSameAs(manifest);
+        assertThat(snapshot.handle()).isSameAs(handle);
         assertThat(remoteLogTablet.currentManifest()).isSameAs(manifest);
         assertThat(remoteLogTablet.currentHandle()).isSameAs(handle);
         assertThat(remoteLogTablet.allRemoteLogSegmentReferences())

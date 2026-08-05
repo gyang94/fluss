@@ -1702,7 +1702,7 @@ public class ServerRpcMessageUtils {
                     "Manifest V2 commit requires format version, generation, and tiered end offset");
         }
         if (!request.hasExpectedZkVersion()) {
-            return CommitRemoteLogManifestData.v2Absent(
+            return CommitRemoteLogManifestData.v2CreateIfAbsent(
                     tableBucket,
                     manifestPath,
                     request.getRemoteLogStartOffset(),
@@ -1712,7 +1712,7 @@ public class ServerRpcMessageUtils {
                     request.getCoordinatorEpoch(),
                     request.getBucketLeaderEpoch());
         }
-        return CommitRemoteLogManifestData.v2Present(
+        return CommitRemoteLogManifestData.v2CompareAndSet(
                 tableBucket,
                 manifestPath,
                 request.getRemoteLogStartOffset(),

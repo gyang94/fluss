@@ -22,7 +22,8 @@ public enum RemoteLogManifestCommitResult {
     COMMITTED(0),
     CONFLICT(1),
     FENCED(2),
-    INVALID_MANIFEST(3);
+    INVALID_MANIFEST(3),
+    V2_WRITER_DISABLED(4);
 
     private final int code;
 

@@ -161,7 +161,7 @@ class RemoteLogManifestCommitterTest {
         VersionedRemoteLogManifestHandle base =
                 zooKeeperClient.getVersionedRemoteLogManifestHandle(tableBucket).get();
         CommitRemoteLogManifestData data =
-                CommitRemoteLogManifestData.v2Present(
+                CommitRemoteLogManifestData.v2CompareAndSet(
                         tableBucket,
                         new FsPath("file:///remote/v2"),
                         0L,
@@ -263,13 +263,13 @@ class RemoteLogManifestCommitterTest {
 
     private static CommitRemoteLogManifestData absentData(
             TableBucket tableBucket, String manifestName) {
-        return CommitRemoteLogManifestData.v2Absent(
+        return CommitRemoteLogManifestData.v2CreateIfAbsent(
                 tableBucket, new FsPath("file:///remote/" + manifestName), 0L, 10L, 10L, 1L, 1, 1);
     }
 
     private static CommitRemoteLogManifestData presentData(
             TableBucket tableBucket, VersionedRemoteLogManifestHandle base, String manifestName) {
-        return CommitRemoteLogManifestData.v2Present(
+        return CommitRemoteLogManifestData.v2CompareAndSet(
                 tableBucket,
                 new FsPath("file:///remote/" + manifestName),
                 0L,

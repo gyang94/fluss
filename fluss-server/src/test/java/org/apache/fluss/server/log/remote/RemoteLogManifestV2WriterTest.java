@@ -26,11 +26,14 @@ import org.apache.fluss.remote.RemoteLogManifest;
 import org.apache.fluss.remote.RemoteLogSegment;
 import org.apache.fluss.remote.RemoteLogSegmentReference;
 import org.apache.fluss.remote.UnreferencedRemoteLogSegment;
+import org.apache.fluss.server.entity.RemoteLogManifestCommitResult;
 import org.apache.fluss.server.log.LogTablet;
 import org.apache.fluss.server.zk.data.RemoteLogManifestHandle;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.time.Duration;
 import java.util.Arrays;
@@ -93,6 +96,29 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
     }
 
     @Test
+    void testInterruptedCopyDoesNotPublishCopiedPrefix() throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tableBucket, false);
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
+        remoteLogStorage.copySegmentInterruptAfterNCopies.set(1);
+
+        boolean interrupted;
+        try {
+            remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+            interrupted = Thread.currentThread().isInterrupted();
+        } finally {
+            Thread.interrupted();
+        }
+
+        assertThat(interrupted).isTrue();
+        assertThat(remoteLogStorage.getCopySegmentCount()).isEqualTo(1);
+        assertThat(remoteLogManager.remoteLogTablet(tableBucket).currentManifest().getVersion())
+                .isEqualTo(RemoteLogManifest.VERSION_1);
+        assertThat(zkClient.getVersionedRemoteLogManifestHandle(tableBucket)).isEmpty();
+    }
+
+    @Test
     void testExistingTieringTaskSwitchesToV2AfterDynamicActivation() throws Exception {
         manifestV2WriterEnabled.set(false);
         TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
@@ -109,6 +135,39 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
 
         assertThat(remoteLogManager.remoteLogTablet(tableBucket).currentManifest().getVersion())
                 .isEqualTo(RemoteLogManifest.VERSION_2);
+    }
+
+    @Test
+    void testDynamicActivationMigratesDuplicateV1Range() throws Exception {
+        manifestV2WriterEnabled.set(false);
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        RemoteLogSegment earlier = remoteSegment(tableBucket, 0L, 10L, manualClock.milliseconds());
+        RemoteLogSegment later = remoteSegment(tableBucket, 0L, 10L, manualClock.milliseconds());
+        RemoteLogManifest duplicateV1 =
+                new RemoteLogManifest(
+                        DATA1_PHYSICAL_TABLE_PATH, tableBucket, Arrays.asList(earlier, later));
+        FsPath basePath = remoteLogStorage.writeRemoteLogManifestSnapshot(duplicateV1);
+        zkClient.createRemoteLogManifestHandleIfAbsent(
+                tableBucket, new RemoteLogManifestHandle(basePath, 10L));
+        makeLogTableAsLeader(tableBucket, false);
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 2);
+
+        manifestV2WriterEnabled.set(true);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        RemoteLogManifest migrated =
+                remoteLogManager.remoteLogTablet(tableBucket).currentManifest();
+        assertThat(migrated.getVersion()).isEqualTo(RemoteLogManifest.VERSION_2);
+        assertThat(migrated.getRemoteLogSegmentList()).first().isEqualTo(later);
+        assertThat(migrated.getUnreferencedRemoteLogSegments())
+                .singleElement()
+                .satisfies(
+                        unreferenced -> {
+                            assertThat(unreferenced.remoteLogSegment()).isEqualTo(earlier);
+                            assertThat(unreferenced.replacementSegmentId())
+                                    .isEqualTo(later.remoteLogSegmentId());
+                        });
     }
 
     @Test
@@ -232,13 +291,18 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
 
     private static RemoteLogSegment remoteSegment(
             TableBucket tableBucket, long startOffset, long endOffset) {
+        return remoteSegment(tableBucket, startOffset, endOffset, 0L);
+    }
+
+    private static RemoteLogSegment remoteSegment(
+            TableBucket tableBucket, long startOffset, long endOffset, long maxTimestamp) {
         return RemoteLogSegment.Builder.builder()
                 .physicalTablePath(DATA1_PHYSICAL_TABLE_PATH)
                 .tableBucket(tableBucket)
                 .remoteLogSegmentId(UUID.randomUUID())
                 .remoteLogStartOffset(startOffset)
                 .remoteLogEndOffset(endOffset)
-                .maxTimestamp(0L)
+                .maxTimestamp(maxTimestamp)
                 .segmentSizeInBytes(1)
                 .build();
     }
@@ -261,6 +325,67 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
                         result.getRemoteLogSegmentList().stream()
                                 .map(segment -> segment.remoteLogSegmentId().toString())
                                 .collect(Collectors.toSet()));
+    }
+
+    @Test
+    void testCoordinatorV2WriterDisabledFallsBackToV1AndRetriesV2NextRun() throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tableBucket, false);
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
+        testCoordinatorGateway.commitRemoteLogManifestResultOnce.set(
+                RemoteLogManifestCommitResult.V2_WRITER_DISABLED);
+
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        RemoteLogManifest fallback =
+                remoteLogManager.remoteLogTablet(tableBucket).currentManifest();
+        assertThat(fallback.getVersion()).isEqualTo(RemoteLogManifest.VERSION_1);
+        assertThat(fallback.getRemoteLogSegmentList()).hasSize(2);
+        assertThat(listRemoteLogFiles(tableBucket))
+                .isEqualTo(
+                        fallback.getRemoteLogSegmentList().stream()
+                                .map(segment -> segment.remoteLogSegmentId().toString())
+                                .collect(Collectors.toSet()));
+
+        int copyCountBeforeProbe = remoteLogStorage.getCopySegmentCount();
+        int segmentCountBeforeProbe = fallback.getRemoteLogSegmentList().size();
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 2);
+        testCoordinatorGateway.commitRemoteLogManifestResultOnce.set(
+                RemoteLogManifestCommitResult.V2_WRITER_DISABLED);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        RemoteLogManifest secondFallback =
+                remoteLogManager.remoteLogTablet(tableBucket).currentManifest();
+        int copiedByV1 = secondFallback.getRemoteLogSegmentList().size() - segmentCountBeforeProbe;
+        assertThat(remoteLogStorage.getCopySegmentCount() - copyCountBeforeProbe)
+                .isEqualTo(copiedByV1);
+
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        assertThat(remoteLogManager.remoteLogTablet(tableBucket).currentManifest().getVersion())
+                .isEqualTo(RemoteLogManifest.VERSION_2);
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = RemoteLogManifestCommitResult.class,
+            names = {"INVALID_MANIFEST", "FENCED"})
+    void testHardV2RejectionCleansPlanWithoutV1Fallback(RemoteLogManifestCommitResult commitResult)
+            throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tableBucket, false);
+        addMultiSegmentsToLogTablet(
+                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
+        testCoordinatorGateway.commitRemoteLogManifestResultOnce.set(commitResult);
+
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+
+        RemoteLogManifest result = remoteLogManager.remoteLogTablet(tableBucket).currentManifest();
+        assertThat(result.getVersion()).isEqualTo(RemoteLogManifest.VERSION_1);
+        assertThat(result.getRemoteLogSegmentList()).isEmpty();
+        assertThat(listRemoteLogFiles(tableBucket)).isEmpty();
     }
 
     @Test
@@ -468,58 +593,5 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
                                 .currentManifest()
                                 .getUnreferencedRemoteLogSegments())
                 .isEmpty();
-    }
-
-    @Test
-    void testOrphanSweeperCleansRejectedCopyAfterGrace() throws Exception {
-        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
-        makeLogTableAsLeader(tableBucket, false);
-        addMultiSegmentsToLogTablet(
-                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
-        testCoordinatorGateway.commitRemoteLogManifestConflictOnce.set(true);
-        remoteLogStorage.deleteSegmentFailFirstN.set(2);
-
-        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
-        RemoteLogManifest authoritative =
-                remoteLogManager.remoteLogTablet(tableBucket).currentManifest();
-        assertThat(listRemoteLogFiles(tableBucket).size())
-                .isGreaterThan(authoritative.getRemoteLogSegmentList().size());
-
-        manualClock.advanceTime(Duration.ofHours(1).plusSeconds(1));
-        remoteLogStorage.deleteSegmentObjectFailFirstN.set(1);
-        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
-        assertThat(listRemoteLogFiles(tableBucket).size())
-                .isGreaterThan(authoritative.getRemoteLogSegmentList().size());
-
-        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
-        assertThat(listRemoteLogFiles(tableBucket))
-                .isEqualTo(
-                        authoritative.getRemoteLogSegmentList().stream()
-                                .map(segment -> segment.remoteLogSegmentId().toString())
-                                .collect(Collectors.toSet()));
-    }
-
-    @Test
-    void testOrphanManifestSweeperPreservesAuthoritativeSnapshot() throws Exception {
-        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
-        makeLogTableAsLeader(tableBucket, false);
-        addMultiSegmentsToLogTablet(
-                replicaManager.getReplicaOrException(tableBucket).getLogTablet(), 3);
-        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
-        RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tableBucket);
-        FsPath authoritativePath =
-                remoteLogTablet.currentHandle().handle().getRemoteLogManifestPath();
-        FsPath orphanPath =
-                remoteLogStorage.writeRemoteLogManifestSnapshot(remoteLogTablet.currentManifest());
-
-        manualClock.advanceTime(Duration.ofHours(1).plusSeconds(1));
-        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
-
-        assertThat(
-                        remoteLogStorage.listRemoteLogManifestSnapshots(
-                                DATA1_PHYSICAL_TABLE_PATH, tableBucket))
-                .extracting(object -> object.path().getPath())
-                .contains(authoritativePath.getPath())
-                .doesNotContain(orphanPath.getPath());
     }
 }

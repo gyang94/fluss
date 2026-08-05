@@ -20,8 +20,6 @@ package org.apache.fluss.server.log.remote;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.RemoteStorageException;
 import org.apache.fluss.fs.FsPath;
-import org.apache.fluss.metadata.PhysicalTablePath;
-import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.remote.RemoteLogManifest;
 import org.apache.fluss.remote.RemoteLogSegment;
 
@@ -50,11 +48,14 @@ public class TestingRemoteLogStorage extends DefaultRemoteLogStorage {
      */
     public final AtomicInteger copySegmentFailAfterNCopies = new AtomicInteger(-1);
 
+    /**
+     * When set to a non-negative value N, the (N+1)th segment copy is interrupted once after N
+     * successful copies.
+     */
+    public final AtomicInteger copySegmentInterruptAfterNCopies = new AtomicInteger(-1);
+
     /** Number of upcoming metadata-driven segment deletions that should fail. */
     public final AtomicInteger deleteSegmentFailFirstN = new AtomicInteger(0);
-
-    /** Number of upcoming orphan-directory deletions that should fail. */
-    public final AtomicInteger deleteSegmentObjectFailFirstN = new AtomicInteger(0);
 
     private final AtomicInteger copySegmentCount = new AtomicInteger(0);
 
@@ -115,6 +116,13 @@ public class TestingRemoteLogStorage extends DefaultRemoteLogStorage {
     public void copyLogSegmentFiles(
             RemoteLogSegment remoteLogSegment, LogSegmentFiles logSegmentFiles)
             throws RemoteStorageException {
+        int interruptAfter = copySegmentInterruptAfterNCopies.get();
+        if (interruptAfter >= 0
+                && copySegmentCount.get() >= interruptAfter
+                && copySegmentInterruptAfterNCopies.compareAndSet(interruptAfter, -1)) {
+            throw new RemoteStorageException(
+                    "Simulated interrupted segment copy", new InterruptedException("interrupted"));
+        }
         int failAfter = copySegmentFailAfterNCopies.get();
         if (failAfter >= 0 && copySegmentCount.get() >= failAfter) {
             throw new RemoteStorageException(
@@ -144,16 +152,6 @@ public class TestingRemoteLogStorage extends DefaultRemoteLogStorage {
             throw new RemoteStorageException("Simulated segment delete failure");
         }
         super.deleteLogSegmentFiles(remoteLogSegment);
-    }
-
-    @Override
-    public void deleteRemoteLogSegmentObject(
-            PhysicalTablePath physicalTablePath, TableBucket tableBucket, UUID segmentId)
-            throws RemoteStorageException {
-        if (deleteSegmentObjectFailFirstN.getAndUpdate(n -> n > 0 ? n - 1 : 0) > 0) {
-            throw new RemoteStorageException("Simulated orphan segment delete failure");
-        }
-        super.deleteRemoteLogSegmentObject(physicalTablePath, tableBucket, segmentId);
     }
 
     @Override

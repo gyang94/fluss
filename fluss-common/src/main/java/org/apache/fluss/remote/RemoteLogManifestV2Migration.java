@@ -83,15 +83,9 @@ public final class RemoteLogManifestV2Migration {
                 groupEnd++;
             }
 
+            // The sort is stable, so equal ranges retain V1 manifest order and the later entry
+            // wins, matching the V1 reader's tie-breaker.
             RemoteLogSegment winner = sortedSegments.get(groupEnd - 1);
-            if (groupEnd - index > 1
-                    && sortedSegments.get(groupEnd - 2).remoteLogEndOffset()
-                            == winner.remoteLogEndOffset()) {
-                throw new IllegalArgumentException(
-                        "Cannot deterministically migrate V1 segments with identical start and end "
-                                + "offsets at "
-                                + startOffset);
-            }
             sameStartWinners.add(winner);
             for (int i = index; i < groupEnd - 1; i++) {
                 unreferencedSegments.add(

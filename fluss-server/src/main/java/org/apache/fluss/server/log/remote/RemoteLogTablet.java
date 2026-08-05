@@ -55,6 +55,28 @@ public class RemoteLogTablet {
     private static final long INIT_REMOTE_LOG_START_OFFSET = Long.MAX_VALUE;
     private static final long INIT_REMOTE_LOG_END_OFFSET = -1L;
 
+    /** An immutable, atomically captured manifest and authoritative handle pair. */
+    public static final class ManifestSnapshot {
+        private final RemoteLogManifest manifest;
+        private final @Nullable VersionedRemoteLogManifestHandle handle;
+
+        private ManifestSnapshot(
+                RemoteLogManifest manifest, @Nullable VersionedRemoteLogManifestHandle handle) {
+            this.manifest = manifest;
+            this.handle = handle;
+        }
+
+        /** Returns the manifest captured by this snapshot. */
+        public RemoteLogManifest manifest() {
+            return manifest;
+        }
+
+        /** Returns the authoritative handle captured with the manifest, if any. */
+        public @Nullable VersionedRemoteLogManifestHandle handle() {
+            return handle;
+        }
+    }
+
     private final TableBucket tableBucket;
 
     private final PhysicalTablePath physicalTablePath;
@@ -350,6 +372,13 @@ public class RemoteLogTablet {
     /** Returns the authoritative handle snapshot used to load the current manifest, if any. */
     public @Nullable VersionedRemoteLogManifestHandle currentHandle() {
         return inReadLock(lock, () -> currentHandle);
+    }
+
+    /**
+     * Atomically captures the current manifest and its authoritative handle under one read lock.
+     */
+    public ManifestSnapshot currentManifestSnapshot() {
+        return inReadLock(lock, () -> new ManifestSnapshot(currentManifest, currentHandle));
     }
 
     public void loadRemoteLogManifest(RemoteLogManifest manifestSnapshot) {

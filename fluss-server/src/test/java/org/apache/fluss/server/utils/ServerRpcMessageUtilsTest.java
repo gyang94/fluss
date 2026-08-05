@@ -40,14 +40,14 @@ class ServerRpcMessageUtilsTest {
     void testRemoteLogManifestCasRequestRoundTrip() {
         TableBucket tableBucket = new TableBucket(1L, 0);
         CommitRemoteLogManifestData absent =
-                CommitRemoteLogManifestData.v2Absent(
+                CommitRemoteLogManifestData.v2CreateIfAbsent(
                         tableBucket, new FsPath("file:///remote/m1"), 0L, 10L, 10L, 1L, 3, 4);
         CommitRemoteLogManifestRequest absentRequest = makeCommitRemoteLogManifestRequest(absent);
         assertThat(getCommitRemoteLogManifestData(absentRequest)).isEqualTo(absent);
         assertThat(absentRequest.hasExpectedZkVersion()).isFalse();
 
         CommitRemoteLogManifestData present =
-                CommitRemoteLogManifestData.v2Present(
+                CommitRemoteLogManifestData.v2CompareAndSet(
                         tableBucket, new FsPath("file:///remote/m2"), 0L, 20L, 20L, 2L, 7, 3, 4);
         assertThat(getCommitRemoteLogManifestData(makeCommitRemoteLogManifestRequest(present)))
                 .isEqualTo(present);

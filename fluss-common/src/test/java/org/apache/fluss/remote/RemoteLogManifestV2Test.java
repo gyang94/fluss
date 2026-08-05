@@ -172,17 +172,28 @@ class RemoteLogManifestV2Test {
     }
 
     @Test
-    void testRejectAmbiguousAndClassifyGappedV1Migration() {
-        RemoteLogSegment sameRangeA = segment(0, 10);
-        RemoteLogSegment sameRangeB = segment(0, 10);
-        RemoteLogManifest ambiguous =
+    void testMigrateDuplicateRangeKeepsLaterManifestEntry() {
+        RemoteLogSegment earlier = segment(0, 10);
+        RemoteLogSegment later = segment(0, 10);
+        RemoteLogManifest v1 =
                 new RemoteLogManifest(
-                        PHYSICAL_TABLE_PATH, TABLE_BUCKET, Arrays.asList(sameRangeA, sameRangeB));
+                        PHYSICAL_TABLE_PATH, TABLE_BUCKET, Arrays.asList(earlier, later));
 
-        assertThatThrownBy(() -> RemoteLogManifestV2Migration.migrate(ambiguous, 1L))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Cannot deterministically migrate");
+        RemoteLogManifest migrated = RemoteLogManifestV2Migration.migrate(v1, 1L).resultManifest();
 
+        assertThat(migrated.getRemoteLogSegmentList()).containsExactly(later);
+        assertThat(migrated.getUnreferencedRemoteLogSegments())
+                .singleElement()
+                .satisfies(
+                        unreferenced -> {
+                            assertThat(unreferenced.remoteLogSegment()).isEqualTo(earlier);
+                            assertThat(unreferenced.replacementSegmentId())
+                                    .isEqualTo(later.remoteLogSegmentId());
+                        });
+    }
+
+    @Test
+    void testClassifyGappedV1Migration() {
         RemoteLogManifest gapped =
                 new RemoteLogManifest(
                         PHYSICAL_TABLE_PATH,

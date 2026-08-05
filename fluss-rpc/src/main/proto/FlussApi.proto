@@ -576,7 +576,8 @@ message CommitRemoteLogManifestRequest {
 
 message CommitRemoteLogManifestResponse {
   required bool commitSuccess = 1;
-  // 0 = COMMITTED, 1 = CONFLICT, 2 = FENCED, 3 = INVALID_MANIFEST.
+  // 0 = COMMITTED, 1 = CONFLICT, 2 = FENCED, 3 = INVALID_MANIFEST,
+  // 4 = V2_WRITER_DISABLED.
   // Omitted by legacy coordinators.
   optional int32 commit_result = 2;
 }

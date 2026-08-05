@@ -19,6 +19,7 @@ package org.apache.fluss.server.entity;
 
 import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.remote.RemoteLogManifest;
 import org.apache.fluss.rpc.messages.CommitRemoteLogManifestRequest;
 
 import javax.annotation.Nullable;
@@ -117,7 +118,7 @@ public class CommitRemoteLogManifestData {
         this.newManifestGeneration = newManifestGeneration;
     }
 
-    public static CommitRemoteLogManifestData v2Absent(
+    public static CommitRemoteLogManifestData v2CreateIfAbsent(
             TableBucket tableBucket,
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
@@ -134,12 +135,12 @@ public class CommitRemoteLogManifestData {
                 tieredEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
-                2,
+                RemoteLogManifest.VERSION_2,
                 null,
                 newManifestGeneration);
     }
 
-    public static CommitRemoteLogManifestData v2Present(
+    public static CommitRemoteLogManifestData v2CompareAndSet(
             TableBucket tableBucket,
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
@@ -157,7 +158,7 @@ public class CommitRemoteLogManifestData {
                 tieredEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
-                2,
+                RemoteLogManifest.VERSION_2,
                 expectedZkVersion,
                 newManifestGeneration);
     }

@@ -38,6 +38,7 @@ import org.apache.fluss.server.metrics.group.TableMetricGroup;
 import org.apache.fluss.server.replica.Replica;
 import org.apache.fluss.server.zk.ZooKeeperClient;
 import org.apache.fluss.server.zk.data.VersionedRemoteLogManifestHandle;
+import org.apache.fluss.utils.ExceptionUtils;
 import org.apache.fluss.utils.clock.Clock;
 
 import org.slf4j.Logger;
@@ -84,31 +85,9 @@ public class LogTieringTask implements Runnable {
     /** Exclusive offset from which the next remote copy should resume. */
     private volatile Long nextCopyOffset = null;
 
-    private volatile boolean cancelled = false;
+    private volatile boolean coordinatorV2WriterReady = true;
 
-    public LogTieringTask(
-            Replica replica,
-            RemoteLogTablet remoteLog,
-            RemoteLogStorage remoteLogStorage,
-            RemoteLogIndexCache remoteLogIndexCache,
-            CoordinatorGateway coordinatorGateway,
-            ZooKeeperClient zooKeeperClient,
-            Clock clock,
-            int maxUploadSegmentsPerTask,
-            boolean manifestV2WriterEnabled,
-            long manifestV2GcGracePeriodMs) {
-        this(
-                replica,
-                remoteLog,
-                remoteLogStorage,
-                remoteLogIndexCache,
-                coordinatorGateway,
-                zooKeeperClient,
-                clock,
-                maxUploadSegmentsPerTask,
-                () -> manifestV2WriterEnabled,
-                manifestV2GcGracePeriodMs);
-    }
+    private volatile boolean cancelled = false;
 
     public LogTieringTask(
             Replica replica,
@@ -179,7 +158,7 @@ public class LogTieringTask implements Runnable {
         TableMetricGroup metricGroup = replica.tableMetrics();
         maybeInitializeNextCopyOffset(logTablet);
         if (manifestV2WriterEnabledSupplier.getAsBoolean()) {
-            runOnceV2(logTablet, metricGroup, true);
+            runOnceV2(logTablet, metricGroup, true, !coordinatorV2WriterReady);
         } else {
             runOnceV1(logTablet, metricGroup);
         }
@@ -252,13 +231,16 @@ public class LogTieringTask implements Runnable {
     }
 
     private void runOnceV2(
-            LogTablet logTablet, TableMetricGroup metricGroup, boolean allowConflictReplan)
+            LogTablet logTablet,
+            TableMetricGroup metricGroup,
+            boolean allowConflictReplan,
+            boolean probeCoordinatorOnly)
             throws Exception {
-        RemoteLogManifest baseManifest = remoteLog.currentManifest();
-        VersionedRemoteLogManifestHandle baseHandle = remoteLog.currentHandle();
+        RemoteLogTablet.ManifestSnapshot baseSnapshot = remoteLog.currentManifestSnapshot();
+        RemoteLogManifest baseManifest = baseSnapshot.manifest();
+        VersionedRemoteLogManifestHandle baseHandle = baseSnapshot.handle();
 
         long now = clock.milliseconds();
-        sweepOrphanObjects(baseManifest, baseHandle, now, metricGroup);
         long targetGeneration =
                 baseHandle == null
                         ? 1L
@@ -291,6 +273,9 @@ public class LogTieringTask implements Runnable {
                             previousRemoteStartOffset);
                     return;
                 }
+                // A capability probe must not publish the empty recovery base before its active
+                // range has been rebuilt.
+                probeCoordinatorOnly = false;
                 LOG.warn(
                         "Rebuilding gapped V1 manifest for bucket {} from local log start offset {} "
                                 + "after detecting V1 gap [{}, {})",
@@ -312,11 +297,13 @@ public class LogTieringTask implements Runnable {
                         : afterGarbageCollection;
         boolean eligibilityChanged = eligibleBase != afterGarbageCollection;
         List<EnrichedLogSegment> candidates =
-                candidateToCopyLogSegments(
-                        logTablet,
-                        migrationRebuildStartOffset == null
-                                ? nextCopyOffset
-                                : migrationRebuildStartOffset);
+                probeCoordinatorOnly
+                        ? Collections.emptyList()
+                        : candidateToCopyLogSegments(
+                                logTablet,
+                                migrationRebuildStartOffset == null
+                                        ? nextCopyOffset
+                                        : migrationRebuildStartOffset);
         RemoteLogManifest resultManifest = eligibleBase;
         List<RemoteLogSegment> copiedSegments = new ArrayList<>();
         long successfulNextCopyOffset = nextCopyOffset;
@@ -389,27 +376,31 @@ public class LogTieringTask implements Runnable {
 
         CommitRemoteLogManifestData commitData =
                 createV2CommitData(baseHandle, resultManifest, manifestPath);
-        RemoteLogManifestCommitResult commitResult;
-        try {
-            commitResult =
-                    remoteLogManifestCommitter.commitAndApply(
-                            commitData, resultManifest, remoteLog);
-        } catch (Exception unknownResult) {
-            // The result is UNKNOWN or was superseded before local apply. Objects must remain
-            // untouched until a later authoritative reconciliation proves they are unreferenced.
-            throw unknownResult;
-        }
+        RemoteLogManifestCommitResult commitResult =
+                remoteLogManifestCommitter.commitAndApply(commitData, resultManifest, remoteLog);
 
         if (commitResult == RemoteLogManifestCommitResult.COMMITTED) {
+            coordinatorV2WriterReady = true;
             applyPublishedOffsets(logTablet, resultManifest);
             nextCopyOffset = successfulNextCopyOffset;
+            if (probeCoordinatorOnly) {
+                runOnceV2(logTablet, metricGroup, true, false);
+            }
             return;
         }
 
         cleanupRejectedPlan(copiedSegments, manifestPath, metricGroup, logTablet);
         if (commitResult == RemoteLogManifestCommitResult.CONFLICT && allowConflictReplan) {
+            coordinatorV2WriterReady = true;
             nextCopyOffset = findNextCopyOffset(logTablet);
-            runOnceV2(logTablet, metricGroup, false);
+            runOnceV2(logTablet, metricGroup, false, false);
+        } else if (commitResult == RemoteLogManifestCommitResult.V2_WRITER_DISABLED) {
+            coordinatorV2WriterReady = false;
+            LOG.info(
+                    "Falling back to Manifest V1 for {} because the coordinator V2 writer gate "
+                            + "is disabled.",
+                    tableBucket);
+            runOnceV1(logTablet, metricGroup);
         }
     }
 
@@ -418,7 +409,7 @@ public class LogTieringTask implements Runnable {
             RemoteLogManifest resultManifest,
             FsPath manifestPath) {
         if (baseHandle == null) {
-            return CommitRemoteLogManifestData.v2Absent(
+            return CommitRemoteLogManifestData.v2CreateIfAbsent(
                     tableBucket,
                     manifestPath,
                     resultManifest.getRemoteLogStartOffset(),
@@ -428,7 +419,7 @@ public class LogTieringTask implements Runnable {
                     replica.getCoordinatorEpoch(),
                     replica.getBucketEpoch());
         }
-        return CommitRemoteLogManifestData.v2Present(
+        return CommitRemoteLogManifestData.v2CompareAndSet(
                 tableBucket,
                 manifestPath,
                 resultManifest.getRemoteLogStartOffset(),
@@ -481,109 +472,11 @@ public class LogTieringTask implements Runnable {
                 retained);
     }
 
-    private void sweepOrphanObjects(
-            RemoteLogManifest baseManifest,
-            VersionedRemoteLogManifestHandle baseHandle,
-            long now,
-            TableMetricGroup metricGroup) {
-        try {
-            if (!authoritativeHandleUnchanged(baseHandle)) {
-                LOG.info("Skipping orphan sweep for {} because its handle changed", tableBucket);
-                return;
-            }
-            Set<UUID> referencedSegmentIds = new HashSet<>();
-            baseManifest
-                    .getRemoteLogSegmentList()
-                    .forEach(segment -> referencedSegmentIds.add(segment.remoteLogSegmentId()));
-            baseManifest
-                    .getUnreferencedRemoteLogSegments()
-                    .forEach(
-                            segment ->
-                                    referencedSegmentIds.add(
-                                            segment.remoteLogSegment().remoteLogSegmentId()));
-
-            for (RemoteLogStorageObject object :
-                    remoteLogStorage.listRemoteLogSegmentObjects(physicalTablePath, tableBucket)) {
-                UUID segmentId = UUID.fromString(object.path().getName());
-                if (!referencedSegmentIds.contains(segmentId)
-                        && orphanGracePeriodElapsed(object.modificationTimeMs(), now)
-                        && authoritativeHandleUnchanged(baseHandle)) {
-                    try {
-                        remoteLogStorage.deleteRemoteLogSegmentObject(
-                                physicalTablePath, tableBucket, segmentId);
-                        metricGroup.remoteLogDeleteRequests().inc();
-                    } catch (Exception e) {
-                        metricGroup.remoteGcFailures().inc();
-                        LOG.warn(
-                                "Failed to delete orphan segment object {} for {}",
-                                object.path(),
-                                tableBucket,
-                                e);
-                    }
-                }
-            }
-
-            FsPath authoritativeManifestPath =
-                    baseHandle == null ? null : baseHandle.handle().getRemoteLogManifestPath();
-            List<RemoteLogStorageObject> manifestSnapshots =
-                    remoteLogStorage.listRemoteLogManifestSnapshots(physicalTablePath, tableBucket);
-            for (RemoteLogStorageObject object : manifestSnapshots) {
-                if (sameStoragePath(object.path(), authoritativeManifestPath)) {
-                    continue;
-                }
-                if (orphanGracePeriodElapsed(object.modificationTimeMs(), now)
-                        && authoritativeHandleUnchanged(baseHandle)) {
-                    try {
-                        remoteLogStorage.deleteRemoteLogManifestSnapshot(object.path());
-                    } catch (Exception e) {
-                        metricGroup.remoteGcFailures().inc();
-                        LOG.warn(
-                                "Failed to delete orphan manifest snapshot {} for {}",
-                                object.path(),
-                                tableBucket,
-                                e);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            metricGroup.remoteGcFailures().inc();
-            LOG.warn("Failed to sweep orphan remote objects for {}", tableBucket, e);
-        }
-    }
-
-    private boolean authoritativeHandleUnchanged(VersionedRemoteLogManifestHandle expected)
-            throws Exception {
-        Optional<VersionedRemoteLogManifestHandle> current =
-                zooKeeperClient.getVersionedRemoteLogManifestHandle(tableBucket);
-        if (expected == null) {
-            return !current.isPresent();
-        }
-        if (!current.isPresent()) {
-            return false;
-        }
-        VersionedRemoteLogManifestHandle actual = current.get();
-        return actual.zkVersion() == expected.zkVersion()
-                && actual.handle()
-                        .getRemoteLogManifestPath()
-                        .equals(expected.handle().getRemoteLogManifestPath())
-                && actual.handle().getManifestGeneration().orElse(0L)
-                        == expected.handle().getManifestGeneration().orElse(0L);
-    }
-
     private boolean gracePeriodElapsed(long timestampMs, long now) {
         return timestampMs >= 0L
                 && timestampMs != Long.MAX_VALUE
                 && timestampMs <= now
                 && now - timestampMs >= manifestV2GcGracePeriodMs;
-    }
-
-    private boolean orphanGracePeriodElapsed(long modificationTimeMs, long now) {
-        // A zero or unavailable timestamp is not trustworthy enough for destructive orphan GC.
-        return modificationTimeMs > 0L && gracePeriodElapsed(modificationTimeMs, now);
-    }
-
-    private static boolean sameStoragePath(FsPath first, FsPath second) {
-        return first != null && second != null && first.getPath().equals(second.getPath());
     }
 
     private RemoteLogManifest normalizeV2Generation(
@@ -636,6 +529,12 @@ public class LogTieringTask implements Runnable {
             remoteLogStorage.copyLogSegmentFiles(remoteLogSegment, logSegmentFiles);
         } catch (RemoteStorageException e) {
             metricGroup.remoteLogCopyErrors().inc();
+            Optional<InterruptedException> interruption =
+                    ExceptionUtils.findThrowable(e, InterruptedException.class);
+            if (interruption.isPresent()) {
+                Thread.currentThread().interrupt();
+                throw interruption.get();
+            }
             LOG.warn(
                     "Failed to copy planned Manifest V2 segment {} for bucket {}",
                     remoteLogSegment,
