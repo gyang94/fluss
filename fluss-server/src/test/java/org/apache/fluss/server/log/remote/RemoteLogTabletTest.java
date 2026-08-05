@@ -200,6 +200,7 @@ class RemoteLogTabletTest extends RemoteLogTestBase {
                         logTablet.getTableBucket(),
                         Arrays.asList(segmentA, segmentB),
                         0L,
+                        20L,
                         Collections.emptyList());
 
         remoteLogTablet.replaceManifest(manifest);
@@ -234,6 +235,7 @@ class RemoteLogTabletTest extends RemoteLogTestBase {
                         logTablet.getTableBucket(),
                         Arrays.asList(segmentA, segmentB, segmentC),
                         0L,
+                        20L,
                         Collections.emptyList());
 
         remoteLogTablet.replaceManifest(manifest);
@@ -258,10 +260,12 @@ class RemoteLogTabletTest extends RemoteLogTestBase {
                         logTablet.getTableBucket(),
                         Collections.singletonList(segment),
                         0L,
+                        10L,
                         Collections.emptyList());
         VersionedRemoteLogManifestHandle handle =
                 new VersionedRemoteLogManifestHandle(
-                        RemoteLogManifestHandle.v2(new FsPath("file:///remote/m2"), 2L, 0L, 10L),
+                        RemoteLogManifestHandle.v2(
+                                new FsPath("file:///remote/m2"), 2L, 0L, 10L, 10L),
                         7);
 
         remoteLogTablet.replaceManifest(manifest, handle);

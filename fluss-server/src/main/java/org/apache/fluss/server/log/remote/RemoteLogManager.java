@@ -224,6 +224,7 @@ public class RemoteLogManager implements Closeable {
             remoteLog.loadRemoteLogManifest(manifest, versionedHandle);
         }
         remoteLog.getRemoteLogEndOffset().ifPresent(log::updateRemoteLogEndOffset);
+        log.updateTieredEndOffset(remoteLog.getTieredEndOffset());
         log.updateRemoteLogStartOffset(remoteLog.getRemoteLogStartOffset());
         log.updateRemoteLogSize(remoteLog.getRemoteSizeInBytes());
         // leader needs to register the remote log metrics
@@ -381,7 +382,8 @@ public class RemoteLogManager implements Closeable {
                 || !handle.getManifestGeneration().isPresent()
                 || handle.getManifestGeneration().getAsLong() != manifest.getGeneration()
                 || !startOffsetMatches
-                || handle.getRemoteLogEndOffset() != manifest.getRemoteLogEndOffset()) {
+                || handle.getRemoteLogEndOffset() != manifest.getRemoteLogEndOffset()
+                || handle.getTieredEndOffset() != manifest.getTieredEndOffset()) {
             throw new IllegalStateException(
                     "V2 remote log manifest handle hints do not match manifest content");
         }

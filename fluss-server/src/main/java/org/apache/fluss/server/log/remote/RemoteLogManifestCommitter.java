@@ -29,7 +29,6 @@ import org.apache.fluss.server.zk.data.VersionedRemoteLogManifestHandle;
 import java.util.Optional;
 
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeCommitRemoteLogManifestRequest;
-import static org.apache.fluss.utils.Preconditions.checkArgument;
 
 /** Publishes Manifest V2 handles and reconciles transport-unknown commit outcomes. */
 public final class RemoteLogManifestCommitter {
@@ -45,7 +44,6 @@ public final class RemoteLogManifestCommitter {
     }
 
     public RemoteLogManifestCommitResult commit(CommitRemoteLogManifestData data) throws Exception {
-        checkArgument(data.isV2CasCommit(), "CAS committer only accepts Manifest V2 commits");
         Exception lastTransportError = null;
         for (int attempt = 0; attempt < MAX_COMMIT_ATTEMPTS; attempt++) {
             try {
@@ -58,6 +56,9 @@ public final class RemoteLogManifestCommitter {
                             "Coordinator did not return a V2 manifest commit result");
                 }
                 return RemoteLogManifestCommitResult.fromCode(response.getCommitResult());
+            } catch (InterruptedException interruptedException) {
+                Thread.currentThread().interrupt();
+                throw interruptedException;
             } catch (Exception transportError) {
                 lastTransportError = transportError;
                 ReconciliationResult reconciliationResult = reconcile(data);
@@ -128,7 +129,8 @@ public final class RemoteLogManifestCommitter {
                 && current.getManifestGeneration().isPresent()
                 && current.getManifestGeneration().getAsLong() == data.getNewManifestGeneration()
                 && remoteLogRangeMatches(current, data)
-                && current.getRemoteLogEndOffset() == data.getRemoteLogEndOffset();
+                && current.getRemoteLogEndOffset() == data.getRemoteLogEndOffset()
+                && current.getTieredEndOffset() == data.getTieredEndOffset();
     }
 
     private static boolean remoteLogRangeMatches(

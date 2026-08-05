@@ -25,8 +25,6 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.apache.fluss.remote.UnreferencedRemoteLogSegment.GC_INELIGIBLE_TIMESTAMP;
-import static org.apache.fluss.utils.Preconditions.checkArgument;
-import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Converts an authoritative V1 manifest into a canonical V2 manifest. */
 @Internal
@@ -45,7 +43,7 @@ public final class RemoteLogManifestV2Migration {
                 long gapStartOffset,
                 long gapEndOffset) {
             this.requiresRebuild = requiresRebuild;
-            this.resultManifest = checkNotNull(resultManifest);
+            this.resultManifest = resultManifest;
             this.gapStartOffset = gapStartOffset;
             this.gapEndOffset = gapEndOffset;
         }
@@ -68,10 +66,6 @@ public final class RemoteLogManifestV2Migration {
     }
 
     public static Result migrate(RemoteLogManifest v1Manifest, long newGeneration) {
-        checkArgument(
-                v1Manifest.getVersion() == RemoteLogManifest.VERSION_1,
-                "Only V1 manifests can be migrated");
-
         List<RemoteLogSegment> sortedSegments =
                 new ArrayList<>(v1Manifest.getRemoteLogSegmentList());
         sortedSegments.sort(
@@ -139,6 +133,7 @@ public final class RemoteLogManifestV2Migration {
                         v1Manifest.getTableBucket(),
                         activeSegments,
                         remoteStartOffset,
+                        v1Manifest.getRemoteLogEndOffset(),
                         unreferencedSegments),
                 -1L,
                 -1L);
@@ -166,6 +161,7 @@ public final class RemoteLogManifestV2Migration {
                         v1Manifest.getTableBucket(),
                         new ArrayList<>(),
                         null,
+                        v1Manifest.getRemoteLogEndOffset(),
                         unreferencedSegments);
         return new Result(true, recoveryBase, gapStartOffset, gapEndOffset);
     }

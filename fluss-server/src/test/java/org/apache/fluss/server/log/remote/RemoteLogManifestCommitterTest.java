@@ -115,6 +115,26 @@ class RemoteLogManifestCommitterTest {
     }
 
     @Test
+    void testInterruptedCommitRestoresInterruptAndSkipsReconciliation() {
+        TableBucket tableBucket = new TableBucket(9L, 0);
+        CommitRemoteLogManifestData data = absentData(tableBucket, "m1");
+        TestingCoordinatorGateway gateway = testingGateway(ignored -> new CompletableFuture<>());
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(
+                            () ->
+                                    new RemoteLogManifestCommitter(gateway, zooKeeperClient)
+                                            .commit(data))
+                    .isInstanceOf(InterruptedException.class);
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+            assertThat(gateway.getCommitAttempts()).isEqualTo(1);
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
     void testLegacyBooleanResponseIsNotAcceptedAsV2Commit() throws Exception {
         TableBucket tableBucket = new TableBucket(8L, 0);
         CommitRemoteLogManifestData data = absentData(tableBucket, "m1");
@@ -145,6 +165,7 @@ class RemoteLogManifestCommitterTest {
                         tableBucket,
                         new FsPath("file:///remote/v2"),
                         0L,
+                        20L,
                         20L,
                         1L,
                         base.zkVersion(),
@@ -219,6 +240,7 @@ class RemoteLogManifestCommitterTest {
                         tableBucket,
                         Collections.singletonList(segment),
                         0L,
+                        10L,
                         Collections.emptyList());
         RemoteLogTablet tablet = new RemoteLogTablet(DATA1_PHYSICAL_TABLE_PATH, tableBucket, -1L);
         CoordinatorGateway gateway =
@@ -242,7 +264,7 @@ class RemoteLogManifestCommitterTest {
     private static CommitRemoteLogManifestData absentData(
             TableBucket tableBucket, String manifestName) {
         return CommitRemoteLogManifestData.v2Absent(
-                tableBucket, new FsPath("file:///remote/" + manifestName), 0L, 10L, 1L, 1, 1);
+                tableBucket, new FsPath("file:///remote/" + manifestName), 0L, 10L, 10L, 1L, 1, 1);
     }
 
     private static CommitRemoteLogManifestData presentData(
@@ -251,6 +273,7 @@ class RemoteLogManifestCommitterTest {
                 tableBucket,
                 new FsPath("file:///remote/" + manifestName),
                 0L,
+                20L,
                 20L,
                 1L,
                 base.zkVersion(),
@@ -263,7 +286,8 @@ class RemoteLogManifestCommitterTest {
                 data.getRemoteLogManifestPath(),
                 data.getNewManifestGeneration(),
                 data.getRemoteLogStartOffset(),
-                data.getRemoteLogEndOffset());
+                data.getRemoteLogEndOffset(),
+                data.getTieredEndOffset());
     }
 
     private static CompletableFuture<CommitRemoteLogManifestResponse> failedFuture() {

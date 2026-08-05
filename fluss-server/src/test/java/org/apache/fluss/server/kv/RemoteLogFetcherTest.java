@@ -163,6 +163,7 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
                         targetBucket,
                         Arrays.asList(oldLeaderSegment, newLeaderSegment),
                         0L,
+                        30L,
                         Collections.emptyList());
         remoteLogManager.remoteLogTablet(targetBucket).replaceManifest(manifest);
         assertThat(manifest.getRemoteLogSegmentReferences())

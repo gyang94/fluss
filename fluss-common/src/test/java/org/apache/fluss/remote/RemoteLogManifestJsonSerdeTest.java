@@ -121,6 +121,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                     TABLE_BUCKET1,
                     Arrays.asList(V2_SEGMENT_A, V2_SEGMENT_B),
                     0L,
+                    20L,
                     Collections.singletonList(
                             new UnreferencedRemoteLogSegment(
                                     V2_UNREFERENCED_SEGMENT,
@@ -128,7 +129,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                     UnreferencedRemoteLogSegment.Reason.REPLACED,
                                     V2_SEGMENT_B.remoteLogSegmentId())));
     private static final String EXPECTED_JSON_V2 =
-            "{\"version\":2,\"generation\":8,\"database\":\"db\",\"table\":\"mytable\",\"table_id\":1001,\"bucket_id\":1,\"remote_log_start_offset\":0,\"remote_log_segments\":["
+            "{\"version\":2,\"generation\":8,\"tiered_end_offset\":20,\"database\":\"db\",\"table\":\"mytable\",\"table_id\":1001,\"bucket_id\":1,\"remote_log_start_offset\":0,\"remote_log_segments\":["
                     + "{\"segment_id\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"start_offset\":0,\"end_offset\":10,\"max_timestamp\":10,\"size_in_bytes\":10},"
                     + "{\"segment_id\":\"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb\",\"start_offset\":5,\"end_offset\":20,\"max_timestamp\":20,\"size_in_bytes\":15}],"
                     + "\"unreferenced_segments\":[{\"segment\":{\"segment_id\":\"cccccccc-cccc-cccc-cccc-cccccccccccc\",\"start_offset\":5,\"end_offset\":15,\"max_timestamp\":15,\"size_in_bytes\":10},"
@@ -184,7 +185,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                 deserialize(
                                         "{\"version\":2,\"generation\":1,"
                                                 + identityFields
-                                                + ",\"remote_log_segments\":[{\"segment_id\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"start_offset\":0,\"end_offset\":10,\"max_timestamp\":10,\"size_in_bytes\":10}],\"unreferenced_segments\":[]}"))
+                                                + ",\"tiered_end_offset\":10,\"remote_log_segments\":[{\"segment_id\":\"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\",\"start_offset\":0,\"end_offset\":10,\"max_timestamp\":10,\"size_in_bytes\":10}],\"unreferenced_segments\":[]}"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must define remote log start offset");
     }

@@ -1228,6 +1228,8 @@ public class ReplicaManager implements ServerReconfigurable {
                             notifyRemoteLogOffsetsData.getRemoteLogStartOffset());
                     logTablet.updateRemoteLogEndOffset(
                             notifyRemoteLogOffsetsData.getRemoteLogEndOffset());
+                    logTablet.updateTieredEndOffset(
+                            notifyRemoteLogOffsetsData.getTieredEndOffset());
                     responseCallback.accept(new NotifyRemoteLogOffsetsResponse());
                 });
     }

@@ -52,7 +52,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
@@ -215,7 +214,7 @@ public class LogTieringTask implements Runnable {
         // local cache of remote log manifest.
         if (!copiedSegments.isEmpty() || !expiredRemoteLogSegments.isEmpty()) {
             boolean success =
-                    tryToCommitRemoteLogManifest(
+                    tryToCommitRemoteLogManifestV1(
                             remoteLog, expiredRemoteLogSegments, copiedSegments);
 
             if (success) {
@@ -424,6 +423,7 @@ public class LogTieringTask implements Runnable {
                     manifestPath,
                     resultManifest.getRemoteLogStartOffset(),
                     resultManifest.getRemoteLogEndOffset(),
+                    resultManifest.getTieredEndOffset(),
                     resultManifest.getGeneration(),
                     replica.getCoordinatorEpoch(),
                     replica.getBucketEpoch());
@@ -433,6 +433,7 @@ public class LogTieringTask implements Runnable {
                 manifestPath,
                 resultManifest.getRemoteLogStartOffset(),
                 resultManifest.getRemoteLogEndOffset(),
+                resultManifest.getTieredEndOffset(),
                 resultManifest.getGeneration(),
                 baseHandle.zkVersion(),
                 replica.getCoordinatorEpoch(),
@@ -476,6 +477,7 @@ public class LogTieringTask implements Runnable {
                 manifest.getRemoteLogSegmentList().isEmpty()
                         ? null
                         : manifest.getRemoteLogStartOffset(),
+                manifest.getTieredEndOffset(),
                 retained);
     }
 
@@ -594,6 +596,7 @@ public class LogTieringTask implements Runnable {
                 baseManifest.getRemoteLogSegmentList().isEmpty()
                         ? null
                         : baseManifest.getRemoteLogStartOffset(),
+                baseManifest.getTieredEndOffset(),
                 baseManifest.getUnreferencedRemoteLogSegments());
     }
 
@@ -692,6 +695,7 @@ public class LogTieringTask implements Runnable {
     private void applyPublishedOffsets(LogTablet logTablet, RemoteLogManifest manifest) {
         logTablet.updateRemoteLogStartOffset(manifest.getRemoteLogStartOffset());
         logTablet.updateRemoteLogEndOffset(manifest.getRemoteLogEndOffset());
+        logTablet.updateTieredEndOffset(manifest.getTieredEndOffset());
         logTablet.updateRemoteLogSize(manifest.getRemoteLogSize());
     }
 
@@ -830,7 +834,7 @@ public class LogTieringTask implements Runnable {
      *        - If commit failed, we will apply rollback action (i.e., delete the new added remote segments), and return false.
      * </pre>
      */
-    public boolean tryToCommitRemoteLogManifest(
+    private boolean tryToCommitRemoteLogManifestV1(
             RemoteLogTablet remoteLogTablet,
             List<RemoteLogSegment> expiredSegments,
             List<RemoteLogSegment> newAddedSegments) {
@@ -933,22 +937,21 @@ public class LogTieringTask implements Runnable {
     }
 
     private long findNextCopyOffset(LogTablet logTablet) {
-        OptionalLong remoteLogEndOffsetOpt = remoteLog.getRemoteLogEndOffset();
+        long tieredEndOffset = remoteLog.getTieredEndOffset();
         long nextOffset;
-        if (remoteLogEndOffsetOpt.isPresent()) {
-            long remoteLogEndOffset = remoteLogEndOffsetOpt.getAsLong();
+        if (tieredEndOffset >= 0L) {
             long localEndOffset = logTablet.localLogEndOffset();
-            if (localEndOffset <= remoteLogEndOffset) {
+            if (localEndOffset <= tieredEndOffset) {
                 LOG.warn(
-                        "Local end offset should be greater than remote end offset, "
+                        "Local end offset should be greater than tiered end offset, "
                                 + "but the offset of bucket {} is local: {} and remote: {}. "
                                 + "Reset remote end offset to local end offset.",
                         tableBucket,
                         localEndOffset,
-                        remoteLogEndOffset);
+                        tieredEndOffset);
                 nextOffset = localEndOffset;
             } else {
-                nextOffset = remoteLogEndOffset;
+                nextOffset = tieredEndOffset;
             }
         } else {
             nextOffset = 0L;

@@ -41,6 +41,7 @@ public class RemoteLogManifestHandleJsonSerde
     private static final String MANIFEST_GENERATION = "manifest_generation";
     private static final String REMOTE_LOG_START_OFFSET = "remote_log_start_offset";
     private static final String REMOTE_LOG_END_OFFSET = "remote_log_end_offset";
+    private static final String TIERED_END_OFFSET = "tiered_end_offset";
 
     @Override
     public void serialize(RemoteLogManifestHandle remoteLogManifestHandle, JsonGenerator generator)
@@ -58,6 +59,8 @@ public class RemoteLogManifestHandleJsonSerde
             generator.writeNumberField(
                     MANIFEST_GENERATION,
                     remoteLogManifestHandle.getManifestGeneration().getAsLong());
+            generator.writeNumberField(
+                    TIERED_END_OFFSET, remoteLogManifestHandle.getTieredEndOffset());
             if (remoteLogManifestHandle.getRemoteLogStartOffset().isPresent()) {
                 generator.writeNumberField(
                         REMOTE_LOG_START_OFFSET,
@@ -78,6 +81,7 @@ public class RemoteLogManifestHandleJsonSerde
                     fromRemoteLogManifestPath(remoteLogManifestPath), remoteLogEndOffset);
         }
         if (version == RemoteLogManifestHandle.VERSION_2) {
+            long tieredEndOffset = required(node, TIERED_END_OFFSET).asLong();
             JsonNode remoteLogStartOffsetNode = node.get(REMOTE_LOG_START_OFFSET);
             if (remoteLogStartOffsetNode == null || remoteLogStartOffsetNode.isNull()) {
                 if (remoteLogEndOffset != -1L) {
@@ -86,13 +90,15 @@ public class RemoteLogManifestHandleJsonSerde
                 }
                 return RemoteLogManifestHandle.v2Empty(
                         fromRemoteLogManifestPath(remoteLogManifestPath),
-                        required(node, MANIFEST_GENERATION).asLong());
+                        required(node, MANIFEST_GENERATION).asLong(),
+                        tieredEndOffset);
             }
             return RemoteLogManifestHandle.v2(
                     fromRemoteLogManifestPath(remoteLogManifestPath),
                     required(node, MANIFEST_GENERATION).asLong(),
                     remoteLogStartOffsetNode.asLong(),
-                    remoteLogEndOffset);
+                    remoteLogEndOffset,
+                    tieredEndOffset);
         }
         throw new IllegalArgumentException(
                 "Unsupported remote log manifest handle version: " + version);

@@ -124,6 +124,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                         tableBucket,
                         Collections.singletonList(segment),
                         segment.remoteLogStartOffset(),
+                        segment.remoteLogEndOffset(),
                         Collections.emptyList());
         FsPath manifestPath = new FsPath("file:///remote/m2");
 
@@ -132,7 +133,8 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                         manifestPath,
                         2L,
                         manifest.getRemoteLogStartOffset(),
-                        manifest.getRemoteLogEndOffset()),
+                        manifest.getRemoteLogEndOffset(),
+                        manifest.getTieredEndOffset()),
                 manifest);
 
         RemoteLogManifest emptyManifest =
@@ -142,9 +144,11 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                         tableBucket,
                         Collections.emptyList(),
                         null,
+                        manifest.getTieredEndOffset(),
                         Collections.emptyList());
         RemoteLogManager.validateManifestHandle(
-                RemoteLogManifestHandle.v2Empty(manifestPath, 3L), emptyManifest);
+                RemoteLogManifestHandle.v2Empty(manifestPath, 3L, manifest.getTieredEndOffset()),
+                emptyManifest);
 
         assertThatThrownBy(
                         () ->

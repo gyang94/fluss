@@ -334,6 +334,11 @@ public class RemoteLogTablet {
                 : OptionalLong.of(remoteLogEndOffset);
     }
 
+    /** Returns the persisted monotonic tiering frontier. */
+    public long getTieredEndOffset() {
+        return inReadLock(lock, () -> currentManifest.getTieredEndOffset());
+    }
+
     /**
      * Gets the snapshot of current remote log segment manifest. The snapshot including the exists
      * remoteLogSegment already committed.

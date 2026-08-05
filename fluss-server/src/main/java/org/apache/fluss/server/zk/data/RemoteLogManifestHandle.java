@@ -40,9 +40,10 @@ public class RemoteLogManifestHandle {
     private final @Nullable Long manifestGeneration;
     private final @Nullable Long remoteLogStartOffset;
     private final long remoteLogEndOffset;
+    private final long tieredEndOffset;
 
     public RemoteLogManifestHandle(FsPath remoteLogManifestPath, long remoteLogEndOffset) {
-        this(VERSION_1, remoteLogManifestPath, null, null, remoteLogEndOffset);
+        this(VERSION_1, remoteLogManifestPath, null, null, remoteLogEndOffset, remoteLogEndOffset);
     }
 
     private RemoteLogManifestHandle(
@@ -50,16 +51,9 @@ public class RemoteLogManifestHandle {
             FsPath remoteLogManifestPath,
             @Nullable Long manifestGeneration,
             @Nullable Long remoteLogStartOffset,
-            long remoteLogEndOffset) {
-        checkArgument(
-                version == VERSION_1 || version == VERSION_2,
-                "Unsupported remote log manifest handle version: %s",
-                version);
-        if (version == VERSION_1) {
-            checkArgument(
-                    manifestGeneration == null && remoteLogStartOffset == null,
-                    "V1 remote log manifest handle must not contain V2 hints");
-        } else {
+            long remoteLogEndOffset,
+            long tieredEndOffset) {
+        if (version == VERSION_2) {
             checkArgument(
                     manifestGeneration != null && manifestGeneration > 0L,
                     "V2 manifest generation must be positive");
@@ -72,12 +66,16 @@ public class RemoteLogManifestHandle {
                         remoteLogStartOffset < remoteLogEndOffset,
                         "V2 remote log offsets must form a non-empty half-open range");
             }
+            checkArgument(
+                    tieredEndOffset >= remoteLogEndOffset,
+                    "Tiered end offset must not be before the logical remote end offset");
         }
         this.version = version;
         this.remoteLogManifestPath = remoteLogManifestPath;
         this.manifestGeneration = manifestGeneration;
         this.remoteLogStartOffset = remoteLogStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
+        this.tieredEndOffset = tieredEndOffset;
     }
 
     public static RemoteLogManifestHandle v2(
@@ -85,22 +83,43 @@ public class RemoteLogManifestHandle {
             long manifestGeneration,
             long remoteLogStartOffset,
             long remoteLogEndOffset) {
+        return v2(
+                remoteLogManifestPath,
+                manifestGeneration,
+                remoteLogStartOffset,
+                remoteLogEndOffset,
+                remoteLogEndOffset);
+    }
+
+    public static RemoteLogManifestHandle v2(
+            FsPath remoteLogManifestPath,
+            long manifestGeneration,
+            long remoteLogStartOffset,
+            long remoteLogEndOffset,
+            long tieredEndOffset) {
         if (remoteLogStartOffset == Long.MAX_VALUE && remoteLogEndOffset == -1L) {
-            return v2Empty(remoteLogManifestPath, manifestGeneration);
+            return v2Empty(remoteLogManifestPath, manifestGeneration, tieredEndOffset);
         }
         return new RemoteLogManifestHandle(
                 VERSION_2,
                 remoteLogManifestPath,
                 manifestGeneration,
                 remoteLogStartOffset,
-                remoteLogEndOffset);
+                remoteLogEndOffset,
+                tieredEndOffset);
     }
 
     /** Creates a Manifest V2 handle whose authoritative snapshot has no active remote range. */
     public static RemoteLogManifestHandle v2Empty(
             FsPath remoteLogManifestPath, long manifestGeneration) {
+        return v2Empty(remoteLogManifestPath, manifestGeneration, -1L);
+    }
+
+    /** Creates an empty Manifest V2 handle while retaining its committed tiering frontier. */
+    public static RemoteLogManifestHandle v2Empty(
+            FsPath remoteLogManifestPath, long manifestGeneration, long tieredEndOffset) {
         return new RemoteLogManifestHandle(
-                VERSION_2, remoteLogManifestPath, manifestGeneration, null, -1L);
+                VERSION_2, remoteLogManifestPath, manifestGeneration, null, -1L, tieredEndOffset);
     }
 
     public static FsPath fromRemoteLogManifestPath(String remoteLogManifestPath) {
@@ -131,6 +150,10 @@ public class RemoteLogManifestHandle {
         return remoteLogEndOffset;
     }
 
+    public long getTieredEndOffset() {
+        return tieredEndOffset;
+    }
+
     /** Returns whether this is a Manifest V2 handle with no active remote range. */
     public boolean isEmptyV2() {
         return version == VERSION_2 && remoteLogStartOffset == null;
@@ -149,7 +172,8 @@ public class RemoteLogManifestHandle {
                 && remoteLogManifestPath.equals(that.remoteLogManifestPath)
                 && Objects.equals(manifestGeneration, that.manifestGeneration)
                 && Objects.equals(remoteLogStartOffset, that.remoteLogStartOffset)
-                && remoteLogEndOffset == that.remoteLogEndOffset;
+                && remoteLogEndOffset == that.remoteLogEndOffset
+                && tieredEndOffset == that.tieredEndOffset;
     }
 
     @Override
@@ -159,7 +183,8 @@ public class RemoteLogManifestHandle {
                 remoteLogManifestPath,
                 manifestGeneration,
                 remoteLogStartOffset,
-                remoteLogEndOffset);
+                remoteLogEndOffset,
+                tieredEndOffset);
     }
 
     @Override
@@ -175,6 +200,8 @@ public class RemoteLogManifestHandle {
                 + remoteLogStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
+                + ", tieredEndOffset="
+                + tieredEndOffset
                 + '}';
     }
 }

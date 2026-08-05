@@ -42,6 +42,9 @@ public class CommitRemoteLogManifestData {
     /** The end offset of the remote log. */
     private final long remoteLogEndOffset;
 
+    /** The exclusive offset through which remote tiering has been committed. */
+    private final long tieredEndOffset;
+
     /** The coordinator epoch when the snapshot is triggered. */
     private final int coordinatorEpoch;
 
@@ -64,6 +67,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
+                remoteLogEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 null,
@@ -76,24 +80,21 @@ public class CommitRemoteLogManifestData {
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
+            long tieredEndOffset,
             int coordinatorEpoch,
             int bucketLeaderEpoch,
             @Nullable Integer manifestFormatVersion,
             @Nullable Integer expectedZkVersion,
             @Nullable Long newManifestGeneration) {
-        if (manifestFormatVersion == null) {
-            checkArgument(
-                    expectedZkVersion == null && newManifestGeneration == null,
-                    "Legacy manifest commit must not contain V2 CAS fields");
-        } else {
-            checkArgument(manifestFormatVersion == 2, "Only Manifest V2 supports CAS publish");
-            checkArgument(
-                    newManifestGeneration != null && newManifestGeneration > 0L,
-                    "New manifest generation must be positive");
+        if (manifestFormatVersion != null) {
+            checkArgument(newManifestGeneration > 0L, "New manifest generation must be positive");
             checkArgument(
                     isEmptyRemoteLogRange(remoteLogStartOffset, remoteLogEndOffset)
                             || remoteLogStartOffset < remoteLogEndOffset,
                     "V2 remote log offsets must form a half-open range or the empty range");
+            checkArgument(
+                    tieredEndOffset >= remoteLogEndOffset,
+                    "Tiered end offset must not be before the logical remote end offset");
             if (expectedZkVersion == null) {
                 checkArgument(
                         newManifestGeneration == 1L, "Initial Manifest V2 generation must be 1");
@@ -108,6 +109,7 @@ public class CommitRemoteLogManifestData {
         this.remoteLogManifestPath = remoteLogManifestPath;
         this.remoteLogStartOffset = remoteLogStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
+        this.tieredEndOffset = tieredEndOffset;
         this.coordinatorEpoch = coordinatorEpoch;
         this.bucketLeaderEpoch = bucketLeaderEpoch;
         this.manifestFormatVersion = manifestFormatVersion;
@@ -120,6 +122,7 @@ public class CommitRemoteLogManifestData {
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
+            long tieredEndOffset,
             long newManifestGeneration,
             int coordinatorEpoch,
             int bucketLeaderEpoch) {
@@ -128,6 +131,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
+                tieredEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 2,
@@ -140,6 +144,7 @@ public class CommitRemoteLogManifestData {
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
+            long tieredEndOffset,
             long newManifestGeneration,
             int expectedZkVersion,
             int coordinatorEpoch,
@@ -149,6 +154,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
+                tieredEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 2,
@@ -170,6 +176,10 @@ public class CommitRemoteLogManifestData {
 
     public long getRemoteLogEndOffset() {
         return remoteLogEndOffset;
+    }
+
+    public long getTieredEndOffset() {
+        return tieredEndOffset;
     }
 
     public int getCoordinatorEpoch() {
@@ -212,6 +222,8 @@ public class CommitRemoteLogManifestData {
                 + remoteLogStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
+                + ", tieredEndOffset="
+                + tieredEndOffset
                 + ", coordinatorEpoch="
                 + coordinatorEpoch
                 + ", bucketLeaderEpoch="
@@ -238,6 +250,7 @@ public class CommitRemoteLogManifestData {
                 && Objects.equals(remoteLogManifestPath, that.remoteLogManifestPath)
                 && remoteLogStartOffset == that.remoteLogStartOffset
                 && remoteLogEndOffset == that.remoteLogEndOffset
+                && tieredEndOffset == that.tieredEndOffset
                 && coordinatorEpoch == that.coordinatorEpoch
                 && bucketLeaderEpoch == that.bucketLeaderEpoch
                 && Objects.equals(manifestFormatVersion, that.manifestFormatVersion)
@@ -252,6 +265,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
+                tieredEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 manifestFormatVersion,

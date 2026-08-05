@@ -1695,9 +1695,11 @@ public class ServerRpcMessageUtils {
                     request.getBucketLeaderEpoch());
         }
 
-        if (request.getManifestFormatVersion() != 2 || !request.hasNewManifestGeneration()) {
+        if (request.getManifestFormatVersion() != 2
+                || !request.hasNewManifestGeneration()
+                || !request.hasTieredEndOffset()) {
             throw new IllegalArgumentException(
-                    "Manifest V2 commit requires format version and generation");
+                    "Manifest V2 commit requires format version, generation, and tiered end offset");
         }
         if (!request.hasExpectedZkVersion()) {
             return CommitRemoteLogManifestData.v2Absent(
@@ -1705,6 +1707,7 @@ public class ServerRpcMessageUtils {
                     manifestPath,
                     request.getRemoteLogStartOffset(),
                     request.getRemoteLogEndOffset(),
+                    request.getTieredEndOffset(),
                     request.getNewManifestGeneration(),
                     request.getCoordinatorEpoch(),
                     request.getBucketLeaderEpoch());
@@ -1714,6 +1717,7 @@ public class ServerRpcMessageUtils {
                 manifestPath,
                 request.getRemoteLogStartOffset(),
                 request.getRemoteLogEndOffset(),
+                request.getTieredEndOffset(),
                 request.getNewManifestGeneration(),
                 request.getExpectedZkVersion(),
                 request.getCoordinatorEpoch(),
@@ -1738,7 +1742,8 @@ public class ServerRpcMessageUtils {
         if (commitRemoteLogManifestData.isV2CasCommit()) {
             request.setManifestFormatVersion(commitRemoteLogManifestData.getManifestFormatVersion())
                     .setNewManifestGeneration(
-                            commitRemoteLogManifestData.getNewManifestGeneration());
+                            commitRemoteLogManifestData.getNewManifestGeneration())
+                    .setTieredEndOffset(commitRemoteLogManifestData.getTieredEndOffset());
             if (commitRemoteLogManifestData.getExpectedZkVersion() != null) {
                 request.setExpectedZkVersion(commitRemoteLogManifestData.getExpectedZkVersion());
             }
@@ -1747,7 +1752,10 @@ public class ServerRpcMessageUtils {
     }
 
     public static NotifyRemoteLogOffsetsRequest makeNotifyRemoteLogOffsetsRequest(
-            TableBucket tableBucket, long remoteLogStartOffset, long remoteLogEndOffset) {
+            TableBucket tableBucket,
+            long remoteLogStartOffset,
+            long remoteLogEndOffset,
+            long tieredEndOffset) {
         NotifyRemoteLogOffsetsRequest request = new NotifyRemoteLogOffsetsRequest();
         if (tableBucket.getPartitionId() != null) {
             request.setPartitionId(tableBucket.getPartitionId());
@@ -1755,7 +1763,8 @@ public class ServerRpcMessageUtils {
         request.setTableId(tableBucket.getTableId())
                 .setBucketId(tableBucket.getBucket())
                 .setRemoteStartOffset(remoteLogStartOffset)
-                .setRemoteEndOffset(remoteLogEndOffset);
+                .setRemoteEndOffset(remoteLogEndOffset)
+                .setTieredEndOffset(tieredEndOffset);
         return request;
     }
 
@@ -1768,6 +1777,9 @@ public class ServerRpcMessageUtils {
                         request.getBucketId()),
                 request.getRemoteStartOffset(),
                 request.getRemoteEndOffset(),
+                request.hasTieredEndOffset()
+                        ? request.getTieredEndOffset()
+                        : request.getRemoteEndOffset(),
                 request.getCoordinatorEpoch());
     }
 

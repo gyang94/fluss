@@ -20,12 +20,16 @@ package org.apache.fluss.server.utils;
 import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.rpc.messages.CommitRemoteLogManifestRequest;
+import org.apache.fluss.rpc.messages.NotifyRemoteLogOffsetsRequest;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
+import org.apache.fluss.server.entity.NotifyRemoteLogOffsetsData;
 
 import org.junit.jupiter.api.Test;
 
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getCommitRemoteLogManifestData;
+import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getNotifyRemoteLogOffsetsData;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeCommitRemoteLogManifestRequest;
+import static org.apache.fluss.server.utils.ServerRpcMessageUtils.makeNotifyRemoteLogOffsetsRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -37,14 +41,14 @@ class ServerRpcMessageUtilsTest {
         TableBucket tableBucket = new TableBucket(1L, 0);
         CommitRemoteLogManifestData absent =
                 CommitRemoteLogManifestData.v2Absent(
-                        tableBucket, new FsPath("file:///remote/m1"), 0L, 10L, 1L, 3, 4);
+                        tableBucket, new FsPath("file:///remote/m1"), 0L, 10L, 10L, 1L, 3, 4);
         CommitRemoteLogManifestRequest absentRequest = makeCommitRemoteLogManifestRequest(absent);
         assertThat(getCommitRemoteLogManifestData(absentRequest)).isEqualTo(absent);
         assertThat(absentRequest.hasExpectedZkVersion()).isFalse();
 
         CommitRemoteLogManifestData present =
                 CommitRemoteLogManifestData.v2Present(
-                        tableBucket, new FsPath("file:///remote/m2"), 0L, 20L, 2L, 7, 3, 4);
+                        tableBucket, new FsPath("file:///remote/m2"), 0L, 20L, 20L, 2L, 7, 3, 4);
         assertThat(getCommitRemoteLogManifestData(makeCommitRemoteLogManifestRequest(present)))
                 .isEqualTo(present);
 
@@ -58,5 +62,19 @@ class ServerRpcMessageUtilsTest {
                                         absentRequest.setExpectedZkVersion(-1)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("wildcard");
+    }
+
+    @Test
+    void testRemoteLogOffsetNotificationCarriesTieredFrontier() {
+        TableBucket tableBucket = new TableBucket(1L, 0);
+        NotifyRemoteLogOffsetsRequest v2Request =
+                makeNotifyRemoteLogOffsetsRequest(tableBucket, Long.MAX_VALUE, -1L, 10L)
+                        .setCoordinatorEpoch(3);
+        NotifyRemoteLogOffsetsData v2Data = getNotifyRemoteLogOffsetsData(v2Request);
+        assertThat(v2Data.getRemoteLogEndOffset()).isEqualTo(-1L);
+        assertThat(v2Data.getTieredEndOffset()).isEqualTo(10L);
+
+        v2Request.clearTieredEndOffset().setRemoteEndOffset(8L);
+        assertThat(getNotifyRemoteLogOffsetsData(v2Request).getTieredEndOffset()).isEqualTo(8L);
     }
 }

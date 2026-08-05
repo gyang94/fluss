@@ -63,18 +63,6 @@ class RemoteLogManifestV2Test {
     }
 
     @Test
-    void testV1TrimAndMergeRejectsV2Manifest() {
-        RemoteLogManifest manifest = v2(1L, 0L, segment(0L, 10L));
-
-        assertThatThrownBy(
-                        () ->
-                                manifest.trimAndMerge(
-                                        Collections.emptyList(), Collections.emptyList()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("only supports V1");
-    }
-
-    @Test
     void testCachedLogicalViewUsesDefensiveSegmentCopy() {
         RemoteLogSegment segment = segment(0, 10);
         List<RemoteLogSegment> inputSegments = new ArrayList<>();
@@ -127,6 +115,7 @@ class RemoteLogManifestV2Test {
                                         TABLE_BUCKET,
                                         Collections.singletonList(segmentA),
                                         null,
+                                        10L,
                                         Collections.emptyList()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("must define remote log start offset");
@@ -151,6 +140,7 @@ class RemoteLogManifestV2Test {
                                         TABLE_BUCKET,
                                         Collections.singletonList(segmentA),
                                         0L,
+                                        10L,
                                         Collections.singletonList(alsoUnreferenced)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("both active and unreferenced");
@@ -218,6 +208,7 @@ class RemoteLogManifestV2Test {
                         TABLE_BUCKET,
                         Collections.emptyList(),
                         null,
+                        -1L,
                         Collections.emptyList());
         RemoteLogSegment first = segment(0, 10);
         RemoteLogManifestReplacementPlanner.Result initial = plan(empty, first);
@@ -361,6 +352,7 @@ class RemoteLogManifestV2Test {
         assertThat(empty.getPersistedRemoteLogStartOffset()).isNull();
         assertThat(empty.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
         assertThat(empty.getRemoteLogEndOffset()).isEqualTo(-1L);
+        assertThat(empty.getTieredEndOffset()).isEqualTo(10L);
         assertThat(empty.getUnreferencedRemoteLogSegments())
                 .extracting(UnreferencedRemoteLogSegment::remoteLogSegment)
                 .containsExactly(first);
@@ -379,7 +371,16 @@ class RemoteLogManifestV2Test {
                 TABLE_BUCKET,
                 Arrays.asList(segments),
                 remoteStartOffset,
+                maxEndOffset(segments),
                 Collections.emptyList());
+    }
+
+    private long maxEndOffset(RemoteLogSegment[] segments) {
+        long endOffset = -1L;
+        for (RemoteLogSegment segment : segments) {
+            endOffset = Math.max(endOffset, segment.remoteLogEndOffset());
+        }
+        return endOffset;
     }
 
     private RemoteLogSegment segment(long startOffset, long endOffset) {

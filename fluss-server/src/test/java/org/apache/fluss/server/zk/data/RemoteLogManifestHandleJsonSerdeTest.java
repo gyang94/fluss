@@ -43,9 +43,9 @@ public class RemoteLogManifestHandleJsonSerdeTest
                             "oss://test/log/testDb/testTable_150001/0/847532e6-1fec-4d7a-9b17-ce28223a6e72.manifest"),
                     100L),
             RemoteLogManifestHandle.v2(
-                    new FsPath("oss://test/log/db/table/0/v2.manifest"), 8L, 5L, 20L),
+                    new FsPath("oss://test/log/db/table/0/v2.manifest"), 8L, 5L, 20L, 25L),
             RemoteLogManifestHandle.v2Empty(
-                    new FsPath("oss://test/log/db/table/0/v2-empty.manifest"), 9L),
+                    new FsPath("oss://test/log/db/table/0/v2-empty.manifest"), 9L, 30L),
         };
     }
 
@@ -56,10 +56,10 @@ public class RemoteLogManifestHandleJsonSerdeTest
                     + "847532e6-1fec-4d7a-9b17-ce28223a6e72.manifest\",\"remote_log_end_offset\":100}",
             "{\"version\":2,\"remote_log_manifest_path\":\"oss://test/log/db/table/0/v2.manifest\","
                     + "\"remote_log_end_offset\":20,\"manifest_generation\":8,"
-                    + "\"remote_log_start_offset\":5}",
+                    + "\"tiered_end_offset\":25,\"remote_log_start_offset\":5}",
             "{\"version\":2,\"remote_log_manifest_path\":\"oss://test/log/db/table/0/"
                     + "v2-empty.manifest\",\"remote_log_end_offset\":-1,"
-                    + "\"manifest_generation\":9}"
+                    + "\"manifest_generation\":9,\"tiered_end_offset\":30}"
         };
     }
 
@@ -76,7 +76,7 @@ public class RemoteLogManifestHandleJsonSerdeTest
         assertThat(v1Handle.getRemoteLogStartOffset()).isEmpty();
         assertInvalid(
                 "{\"version\":2,\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10,"
-                        + "\"manifest_generation\":1}");
+                        + "\"manifest_generation\":1,\"tiered_end_offset\":10}");
         assertInvalid(
                 "{\"version\":3,\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10}");
     }

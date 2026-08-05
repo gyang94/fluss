@@ -2203,7 +2203,8 @@ public class CoordinatorEventProcessor implements EventProcessor {
                             manifestData.getRemoteLogManifestPath(),
                             manifestData.getNewManifestGeneration(),
                             manifestData.getRemoteLogStartOffset(),
-                            manifestData.getRemoteLogEndOffset());
+                            manifestData.getRemoteLogEndOffset(),
+                            manifestData.getTieredEndOffset());
             boolean committed;
             try {
                 if (manifestData.getExpectedZkVersion() == null) {
@@ -2266,7 +2267,8 @@ public class CoordinatorEventProcessor implements EventProcessor {
                                                         tb, leaderAndIsr.leader()),
                                                 tb,
                                                 manifestData.getRemoteLogStartOffset(),
-                                                manifestData.getRemoteLogEndOffset()));
+                                                manifestData.getRemoteLogEndOffset(),
+                                                manifestData.getTieredEndOffset()));
         coordinatorRequestBatch.sendNotifyRemoteLogOffsetsRequest(
                 coordinatorContext.getCoordinatorEpoch());
         return response;
