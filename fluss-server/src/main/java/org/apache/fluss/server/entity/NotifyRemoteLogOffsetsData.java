@@ -25,19 +25,19 @@ public class NotifyRemoteLogOffsetsData {
     private final TableBucket tableBucket;
     private final long remoteLogStartOffset;
     private final long remoteLogEndOffset;
-    private final long tieredEndOffset;
+    private final long highestCopiedEndOffset;
     private final int coordinatorEpoch;
 
     public NotifyRemoteLogOffsetsData(
             TableBucket tableBucket,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
-            long tieredEndOffset,
+            long highestCopiedEndOffset,
             int coordinatorEpoch) {
         this.tableBucket = tableBucket;
         this.remoteLogStartOffset = remoteLogStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
-        this.tieredEndOffset = tieredEndOffset;
+        this.highestCopiedEndOffset = highestCopiedEndOffset;
         this.coordinatorEpoch = coordinatorEpoch;
     }
 
@@ -53,8 +53,8 @@ public class NotifyRemoteLogOffsetsData {
         return remoteLogEndOffset;
     }
 
-    public long getTieredEndOffset() {
-        return tieredEndOffset;
+    public long getHighestCopiedEndOffset() {
+        return highestCopiedEndOffset;
     }
 
     public int getCoordinatorEpoch() {
@@ -68,8 +68,8 @@ public class NotifyRemoteLogOffsetsData {
                 + tableBucket
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
-                + ", tieredEndOffset="
-                + tieredEndOffset
+                + ", highestCopiedEndOffset="
+                + highestCopiedEndOffset
                 + ", coordinatorEpoch="
                 + coordinatorEpoch
                 + '}';

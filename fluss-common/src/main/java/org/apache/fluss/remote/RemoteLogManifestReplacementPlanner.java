@@ -126,7 +126,9 @@ public final class RemoteLogManifestReplacementPlanner {
                         manifest.getTableBucket(),
                         activeSegments,
                         remoteStartOffset,
-                        Math.max(manifest.getTieredEndOffset(), candidate.remoteLogEndOffset()),
+                        Math.max(
+                                manifest.getHighestCopiedEndOffset(),
+                                candidate.remoteLogEndOffset()),
                         unreferencedSegments);
         return new Result(planType, resultManifest);
     }
@@ -156,7 +158,9 @@ public final class RemoteLogManifestReplacementPlanner {
                         manifest.getTableBucket(),
                         Collections.singletonList(candidate),
                         logicalStartOffset,
-                        Math.max(manifest.getTieredEndOffset(), candidate.remoteLogEndOffset()),
+                        Math.max(
+                                manifest.getHighestCopiedEndOffset(),
+                                candidate.remoteLogEndOffset()),
                         manifest.getUnreferencedRemoteLogSegments());
         return new Result(PlanType.INITIAL_COPY, resultManifest);
     }
@@ -205,7 +209,9 @@ public final class RemoteLogManifestReplacementPlanner {
                         manifest.getTableBucket(),
                         Collections.singletonList(candidate),
                         newRemoteStartOffset,
-                        Math.max(manifest.getTieredEndOffset(), candidate.remoteLogEndOffset()),
+                        Math.max(
+                                manifest.getHighestCopiedEndOffset(),
+                                candidate.remoteLogEndOffset()),
                         unreferencedSegments);
         return new Result(PlanType.RESTART_AFTER_GAP, resultManifest);
     }
@@ -255,7 +261,7 @@ public final class RemoteLogManifestReplacementPlanner {
                 manifest.getTableBucket(),
                 activeSegments,
                 activeSegments.isEmpty() ? null : references.get(expireCount).logicalStartOffset(),
-                manifest.getTieredEndOffset(),
+                manifest.getHighestCopiedEndOffset(),
                 unreferencedSegments);
     }
 
@@ -296,7 +302,7 @@ public final class RemoteLogManifestReplacementPlanner {
                 manifest.getRemoteLogSegmentList().isEmpty()
                         ? null
                         : manifest.getRemoteLogStartOffset(),
-                manifest.getTieredEndOffset(),
+                manifest.getHighestCopiedEndOffset(),
                 eligibleSegments);
     }
 

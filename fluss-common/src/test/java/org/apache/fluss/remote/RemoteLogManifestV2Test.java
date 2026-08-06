@@ -363,7 +363,7 @@ class RemoteLogManifestV2Test {
         assertThat(empty.getPersistedRemoteLogStartOffset()).isNull();
         assertThat(empty.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
         assertThat(empty.getRemoteLogEndOffset()).isEqualTo(-1L);
-        assertThat(empty.getTieredEndOffset()).isEqualTo(10L);
+        assertThat(empty.getHighestCopiedEndOffset()).isEqualTo(10L);
         assertThat(empty.getUnreferencedRemoteLogSegments())
                 .extracting(UnreferencedRemoteLogSegment::remoteLogSegment)
                 .containsExactly(first);

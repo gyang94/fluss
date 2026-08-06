@@ -570,8 +570,8 @@ message CommitRemoteLogManifestRequest {
   // Omitted for create-if-absent; present for a versioned update.
   optional int32 expected_zk_version = 10;
   optional int64 new_manifest_generation = 11;
-  // Monotonic exclusive offset through which remote tiering has been committed.
-  optional int64 tiered_end_offset = 12;
+  // Highest exclusive end offset successfully copied to remote storage.
+  optional int64 highest_copied_end_offset = 12;
 }
 
 message CommitRemoteLogManifestResponse {
@@ -591,7 +591,7 @@ message NotifyRemoteLogOffsetsRequest {
   required int64 remote_start_offset = 5;
   required int64 remote_end_offset = 6;
   // Present for Manifest V2; absent means remote_end_offset for legacy V1 notifications.
-  optional int64 tiered_end_offset = 7;
+  optional int64 highest_copied_end_offset = 7;
 }
 
 message NotifyRemoteLogOffsetsResponse {

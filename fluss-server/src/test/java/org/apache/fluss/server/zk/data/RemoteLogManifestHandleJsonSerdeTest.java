@@ -56,10 +56,10 @@ public class RemoteLogManifestHandleJsonSerdeTest
                     + "847532e6-1fec-4d7a-9b17-ce28223a6e72.manifest\",\"remote_log_end_offset\":100}",
             "{\"version\":2,\"remote_log_manifest_path\":\"oss://test/log/db/table/0/v2.manifest\","
                     + "\"remote_log_end_offset\":20,\"manifest_generation\":8,"
-                    + "\"tiered_end_offset\":25,\"remote_log_start_offset\":5}",
+                    + "\"highest_copied_end_offset\":25,\"remote_log_start_offset\":5}",
             "{\"version\":2,\"remote_log_manifest_path\":\"oss://test/log/db/table/0/"
                     + "v2-empty.manifest\",\"remote_log_end_offset\":-1,"
-                    + "\"manifest_generation\":9,\"tiered_end_offset\":30}"
+                    + "\"manifest_generation\":9,\"highest_copied_end_offset\":30}"
         };
     }
 
@@ -76,7 +76,7 @@ public class RemoteLogManifestHandleJsonSerdeTest
         assertThat(v1Handle.getRemoteLogStartOffset()).isEmpty();
         assertInvalid(
                 "{\"version\":2,\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10,"
-                        + "\"manifest_generation\":1,\"tiered_end_offset\":10}");
+                        + "\"manifest_generation\":1,\"highest_copied_end_offset\":10}");
         assertInvalid(
                 "{\"version\":3,\"remote_log_manifest_path\":\"x\",\"remote_log_end_offset\":10}");
     }

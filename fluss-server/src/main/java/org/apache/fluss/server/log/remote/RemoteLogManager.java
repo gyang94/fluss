@@ -29,6 +29,7 @@ import org.apache.fluss.remote.RemoteLogManifest;
 import org.apache.fluss.remote.RemoteLogSegment;
 import org.apache.fluss.remote.RemoteLogSegmentReference;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
+import org.apache.fluss.server.config.RemoteManifestV2WriterGate;
 import org.apache.fluss.server.log.LogManager;
 import org.apache.fluss.server.log.LogTablet;
 import org.apache.fluss.server.replica.Replica;
@@ -98,7 +99,8 @@ public class RemoteLogManager implements Closeable {
             LocalDiskManager localDiskManager,
             LogManager logManager,
             Clock clock,
-            ExecutorService ioExecutor)
+            ExecutorService ioExecutor,
+            RemoteManifestV2WriterGate manifestV2WriterGate)
             throws IOException {
         this(
                 conf,
@@ -111,7 +113,7 @@ public class RemoteLogManager implements Closeable {
                         conf.getInt(ConfigOptions.REMOTE_LOG_MANAGER_THREAD_POOL_SIZE),
                         new ExecutorThreadFactory(RLM_SCHEDULED_THREAD_PREFIX)),
                 clock,
-                () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED));
+                manifestV2WriterGate::isEnabled);
     }
 
     @VisibleForTesting
@@ -180,7 +182,7 @@ public class RemoteLogManager implements Closeable {
             remoteLog.loadRemoteLogManifest(manifest, versionedHandle);
         }
         remoteLog.getRemoteLogEndOffset().ifPresent(log::updateRemoteLogEndOffset);
-        log.updateTieredEndOffset(remoteLog.getTieredEndOffset());
+        log.updateHighestCopiedEndOffset(remoteLog.getHighestCopiedEndOffset());
         log.updateRemoteLogStartOffset(remoteLog.getRemoteLogStartOffset());
         log.updateRemoteLogSize(remoteLog.getRemoteSizeInBytes());
         // leader needs to register the remote log metrics
@@ -339,7 +341,7 @@ public class RemoteLogManager implements Closeable {
                 || handle.getManifestGeneration().getAsLong() != manifest.getGeneration()
                 || !startOffsetMatches
                 || handle.getRemoteLogEndOffset() != manifest.getRemoteLogEndOffset()
-                || handle.getTieredEndOffset() != manifest.getTieredEndOffset()) {
+                || handle.getHighestCopiedEndOffset() != manifest.getHighestCopiedEndOffset()) {
             throw new IllegalStateException(
                     "V2 remote log manifest handle hints do not match manifest content");
         }

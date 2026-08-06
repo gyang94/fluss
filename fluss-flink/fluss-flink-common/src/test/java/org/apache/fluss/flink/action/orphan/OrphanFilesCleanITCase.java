@@ -189,6 +189,7 @@ abstract class OrphanFilesCleanITCase extends AbstractTestBase {
         String manifestContent =
                 "{\"version\":2,"
                         + "\"generation\":1,"
+                        + "\"highest_copied_end_offset\":200,"
                         + "\"database\":\"db\","
                         + "\"table\":\"t\","
                         + "\"table_id\":0,"

@@ -287,7 +287,7 @@ class RemoteLogManifestCommitterTest {
                 data.getNewManifestGeneration(),
                 data.getRemoteLogStartOffset(),
                 data.getRemoteLogEndOffset(),
-                data.getTieredEndOffset());
+                data.getHighestCopiedEndOffset());
     }
 
     private static CompletableFuture<CommitRemoteLogManifestResponse> failedFuture() {

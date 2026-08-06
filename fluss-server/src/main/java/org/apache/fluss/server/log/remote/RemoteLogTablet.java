@@ -356,9 +356,9 @@ public class RemoteLogTablet {
                 : OptionalLong.of(remoteLogEndOffset);
     }
 
-    /** Returns the persisted monotonic tiering frontier. */
-    public long getTieredEndOffset() {
-        return inReadLock(lock, () -> currentManifest.getTieredEndOffset());
+    /** Returns the persisted highest copied end offset. */
+    public long getHighestCopiedEndOffset() {
+        return inReadLock(lock, () -> currentManifest.getHighestCopiedEndOffset());
     }
 
     /**

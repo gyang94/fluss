@@ -72,9 +72,10 @@ class ServerRpcMessageUtilsTest {
                         .setCoordinatorEpoch(3);
         NotifyRemoteLogOffsetsData v2Data = getNotifyRemoteLogOffsetsData(v2Request);
         assertThat(v2Data.getRemoteLogEndOffset()).isEqualTo(-1L);
-        assertThat(v2Data.getTieredEndOffset()).isEqualTo(10L);
+        assertThat(v2Data.getHighestCopiedEndOffset()).isEqualTo(10L);
 
-        v2Request.clearTieredEndOffset().setRemoteEndOffset(8L);
-        assertThat(getNotifyRemoteLogOffsetsData(v2Request).getTieredEndOffset()).isEqualTo(8L);
+        v2Request.clearHighestCopiedEndOffset().setRemoteEndOffset(8L);
+        assertThat(getNotifyRemoteLogOffsetsData(v2Request).getHighestCopiedEndOffset())
+                .isEqualTo(8L);
     }
 }

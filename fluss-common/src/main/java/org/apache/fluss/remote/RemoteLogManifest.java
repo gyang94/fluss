@@ -48,7 +48,7 @@ public final class RemoteLogManifest {
     private final TableBucket tableBucket;
     private final List<RemoteLogSegment> remoteLogSegmentList;
     private final @Nullable Long persistedRemoteLogStartOffset;
-    private final long tieredEndOffset;
+    private final long highestCopiedEndOffset;
     private final List<UnreferencedRemoteLogSegment> unreferencedRemoteLogSegments;
     private final List<RemoteLogSegmentReference> activeReferences;
     private final long logicalRemoteLogStartOffset;
@@ -76,7 +76,7 @@ public final class RemoteLogManifest {
             TableBucket tableBucket,
             List<RemoteLogSegment> remoteLogSegmentList,
             @Nullable Long remoteLogStartOffset,
-            long tieredEndOffset,
+            long highestCopiedEndOffset,
             List<UnreferencedRemoteLogSegment> unreferencedRemoteLogSegments) {
         this.version = version;
         this.generation = generation;
@@ -85,7 +85,7 @@ public final class RemoteLogManifest {
         this.remoteLogSegmentList =
                 Collections.unmodifiableList(new ArrayList<>(remoteLogSegmentList));
         this.persistedRemoteLogStartOffset = remoteLogStartOffset;
-        this.tieredEndOffset = tieredEndOffset;
+        this.highestCopiedEndOffset = highestCopiedEndOffset;
         this.unreferencedRemoteLogSegments =
                 Collections.unmodifiableList(new ArrayList<>(unreferencedRemoteLogSegments));
 
@@ -105,7 +105,7 @@ public final class RemoteLogManifest {
             TableBucket tableBucket,
             List<RemoteLogSegment> remoteLogSegmentList,
             @Nullable Long remoteLogStartOffset,
-            long tieredEndOffset,
+            long highestCopiedEndOffset,
             List<UnreferencedRemoteLogSegment> unreferencedRemoteLogSegments) {
         return new RemoteLogManifest(
                 VERSION_2,
@@ -114,7 +114,7 @@ public final class RemoteLogManifest {
                 tableBucket,
                 remoteLogSegmentList,
                 remoteLogStartOffset,
-                tieredEndOffset,
+                highestCopiedEndOffset,
                 unreferencedRemoteLogSegments);
     }
 
@@ -214,16 +214,17 @@ public final class RemoteLogManifest {
                             persistedSegmentEndOffset,
                             segment.remoteLogSegment().remoteLogEndOffset());
         }
-        if (tieredEndOffset < persistedSegmentEndOffset) {
+        if (highestCopiedEndOffset < persistedSegmentEndOffset) {
             throw new IllegalArgumentException(
-                    "Tiered end offset "
-                            + tieredEndOffset
+                    "Highest copied end offset "
+                            + highestCopiedEndOffset
                             + " is before persisted segment end offset "
                             + persistedSegmentEndOffset);
         }
-        if (tieredEndOffset < -1L) {
+        if (highestCopiedEndOffset < -1L) {
             throw new IllegalArgumentException(
-                    "Tiered end offset must be -1 or non-negative: " + tieredEndOffset);
+                    "Highest copied end offset must be -1 or non-negative: "
+                            + highestCopiedEndOffset);
         }
     }
 
@@ -315,9 +316,9 @@ public final class RemoteLogManifest {
         return logicalRemoteLogEndOffset;
     }
 
-    /** Returns the exclusive offset through which remote tiering has been committed. */
-    public long getTieredEndOffset() {
-        return tieredEndOffset;
+    /** Returns the highest exclusive end offset successfully copied to remote storage. */
+    public long getHighestCopiedEndOffset() {
+        return highestCopiedEndOffset;
     }
 
     public long getRemoteLogSize() {
@@ -382,7 +383,7 @@ public final class RemoteLogManifest {
         RemoteLogManifest that = (RemoteLogManifest) o;
         return version == that.version
                 && generation == that.generation
-                && tieredEndOffset == that.tieredEndOffset
+                && highestCopiedEndOffset == that.highestCopiedEndOffset
                 && Objects.equals(physicalTablePath, that.physicalTablePath)
                 && Objects.equals(tableBucket, that.tableBucket)
                 && Objects.equals(remoteLogSegmentList, that.remoteLogSegmentList)
@@ -400,7 +401,7 @@ public final class RemoteLogManifest {
                 tableBucket,
                 remoteLogSegmentList,
                 persistedRemoteLogStartOffset,
-                tieredEndOffset,
+                highestCopiedEndOffset,
                 unreferencedRemoteLogSegments);
     }
 
@@ -415,8 +416,8 @@ public final class RemoteLogManifest {
                 + remoteLogSegmentList
                 + ", persistedRemoteLogStartOffset="
                 + persistedRemoteLogStartOffset
-                + ", tieredEndOffset="
-                + tieredEndOffset
+                + ", highestCopiedEndOffset="
+                + highestCopiedEndOffset
                 + ", unreferencedRemoteLogSegments="
                 + unreferencedRemoteLogSegments
                 + '}';

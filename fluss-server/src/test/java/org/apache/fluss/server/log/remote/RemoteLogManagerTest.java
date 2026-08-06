@@ -134,7 +134,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                         2L,
                         manifest.getRemoteLogStartOffset(),
                         manifest.getRemoteLogEndOffset(),
-                        manifest.getTieredEndOffset()),
+                        manifest.getHighestCopiedEndOffset()),
                 manifest);
 
         RemoteLogManifest emptyManifest =
@@ -144,10 +144,11 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                         tableBucket,
                         Collections.emptyList(),
                         null,
-                        manifest.getTieredEndOffset(),
+                        manifest.getHighestCopiedEndOffset(),
                         Collections.emptyList());
         RemoteLogManager.validateManifestHandle(
-                RemoteLogManifestHandle.v2Empty(manifestPath, 3L, manifest.getTieredEndOffset()),
+                RemoteLogManifestHandle.v2Empty(
+                        manifestPath, 3L, manifest.getHighestCopiedEndOffset()),
                 emptyManifest);
 
         assertThatThrownBy(

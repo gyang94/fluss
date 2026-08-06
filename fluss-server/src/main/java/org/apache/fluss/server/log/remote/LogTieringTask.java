@@ -414,7 +414,7 @@ public class LogTieringTask implements Runnable {
                     manifestPath,
                     resultManifest.getRemoteLogStartOffset(),
                     resultManifest.getRemoteLogEndOffset(),
-                    resultManifest.getTieredEndOffset(),
+                    resultManifest.getHighestCopiedEndOffset(),
                     resultManifest.getGeneration(),
                     replica.getCoordinatorEpoch(),
                     replica.getBucketEpoch());
@@ -424,7 +424,7 @@ public class LogTieringTask implements Runnable {
                 manifestPath,
                 resultManifest.getRemoteLogStartOffset(),
                 resultManifest.getRemoteLogEndOffset(),
-                resultManifest.getTieredEndOffset(),
+                resultManifest.getHighestCopiedEndOffset(),
                 resultManifest.getGeneration(),
                 baseHandle.zkVersion(),
                 replica.getCoordinatorEpoch(),
@@ -468,7 +468,7 @@ public class LogTieringTask implements Runnable {
                 manifest.getRemoteLogSegmentList().isEmpty()
                         ? null
                         : manifest.getRemoteLogStartOffset(),
-                manifest.getTieredEndOffset(),
+                manifest.getHighestCopiedEndOffset(),
                 retained);
     }
 
@@ -489,7 +489,7 @@ public class LogTieringTask implements Runnable {
                 baseManifest.getRemoteLogSegmentList().isEmpty()
                         ? null
                         : baseManifest.getRemoteLogStartOffset(),
-                baseManifest.getTieredEndOffset(),
+                baseManifest.getHighestCopiedEndOffset(),
                 baseManifest.getUnreferencedRemoteLogSegments());
     }
 
@@ -594,7 +594,7 @@ public class LogTieringTask implements Runnable {
     private void applyPublishedOffsets(LogTablet logTablet, RemoteLogManifest manifest) {
         logTablet.updateRemoteLogStartOffset(manifest.getRemoteLogStartOffset());
         logTablet.updateRemoteLogEndOffset(manifest.getRemoteLogEndOffset());
-        logTablet.updateTieredEndOffset(manifest.getTieredEndOffset());
+        logTablet.updateHighestCopiedEndOffset(manifest.getHighestCopiedEndOffset());
         logTablet.updateRemoteLogSize(manifest.getRemoteLogSize());
     }
 
@@ -836,21 +836,21 @@ public class LogTieringTask implements Runnable {
     }
 
     private long findNextCopyOffset(LogTablet logTablet) {
-        long tieredEndOffset = remoteLog.getTieredEndOffset();
+        long highestCopiedEndOffset = remoteLog.getHighestCopiedEndOffset();
         long nextOffset;
-        if (tieredEndOffset >= 0L) {
+        if (highestCopiedEndOffset >= 0L) {
             long localEndOffset = logTablet.localLogEndOffset();
-            if (localEndOffset <= tieredEndOffset) {
+            if (localEndOffset <= highestCopiedEndOffset) {
                 LOG.warn(
-                        "Local end offset should be greater than tiered end offset, "
+                        "Local end offset should be greater than highest copied end offset, "
                                 + "but the offset of bucket {} is local: {} and remote: {}. "
                                 + "Reset remote end offset to local end offset.",
                         tableBucket,
                         localEndOffset,
-                        tieredEndOffset);
+                        highestCopiedEndOffset);
                 nextOffset = localEndOffset;
             } else {
-                nextOffset = tieredEndOffset;
+                nextOffset = highestCopiedEndOffset;
             }
         } else {
             nextOffset = 0L;

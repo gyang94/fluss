@@ -369,6 +369,7 @@ class ActiveRefsFetcherTest {
     private static String manifestV2Json(String activeSegmentId, String unreferencedSegmentId) {
         return "{\"version\":2,"
                 + "\"generation\":1,"
+                + "\"highest_copied_end_offset\":200,"
                 + "\"database\":\"db\","
                 + "\"table\":\"t\","
                 + "\"table_id\":7,"

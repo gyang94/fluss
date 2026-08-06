@@ -40,7 +40,7 @@ public class RemoteLogManifestHandle {
     private final @Nullable Long manifestGeneration;
     private final @Nullable Long remoteLogStartOffset;
     private final long remoteLogEndOffset;
-    private final long tieredEndOffset;
+    private final long highestCopiedEndOffset;
 
     public RemoteLogManifestHandle(FsPath remoteLogManifestPath, long remoteLogEndOffset) {
         this(VERSION_1, remoteLogManifestPath, null, null, remoteLogEndOffset, remoteLogEndOffset);
@@ -52,7 +52,7 @@ public class RemoteLogManifestHandle {
             @Nullable Long manifestGeneration,
             @Nullable Long remoteLogStartOffset,
             long remoteLogEndOffset,
-            long tieredEndOffset) {
+            long highestCopiedEndOffset) {
         if (version == VERSION_2) {
             checkArgument(
                     manifestGeneration != null && manifestGeneration > 0L,
@@ -67,15 +67,15 @@ public class RemoteLogManifestHandle {
                         "V2 remote log offsets must form a non-empty half-open range");
             }
             checkArgument(
-                    tieredEndOffset >= remoteLogEndOffset,
-                    "Tiered end offset must not be before the logical remote end offset");
+                    highestCopiedEndOffset >= remoteLogEndOffset,
+                    "Highest copied end offset must not be before the logical remote end offset");
         }
         this.version = version;
         this.remoteLogManifestPath = remoteLogManifestPath;
         this.manifestGeneration = manifestGeneration;
         this.remoteLogStartOffset = remoteLogStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
-        this.tieredEndOffset = tieredEndOffset;
+        this.highestCopiedEndOffset = highestCopiedEndOffset;
     }
 
     public static RemoteLogManifestHandle v2(
@@ -96,9 +96,9 @@ public class RemoteLogManifestHandle {
             long manifestGeneration,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
-            long tieredEndOffset) {
+            long highestCopiedEndOffset) {
         if (remoteLogStartOffset == Long.MAX_VALUE && remoteLogEndOffset == -1L) {
-            return v2Empty(remoteLogManifestPath, manifestGeneration, tieredEndOffset);
+            return v2Empty(remoteLogManifestPath, manifestGeneration, highestCopiedEndOffset);
         }
         return new RemoteLogManifestHandle(
                 VERSION_2,
@@ -106,7 +106,7 @@ public class RemoteLogManifestHandle {
                 manifestGeneration,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
-                tieredEndOffset);
+                highestCopiedEndOffset);
     }
 
     /** Creates a Manifest V2 handle whose authoritative snapshot has no active remote range. */
@@ -115,11 +115,16 @@ public class RemoteLogManifestHandle {
         return v2Empty(remoteLogManifestPath, manifestGeneration, -1L);
     }
 
-    /** Creates an empty Manifest V2 handle while retaining its committed tiering frontier. */
+    /** Creates an empty Manifest V2 handle while retaining its highest copied end offset. */
     public static RemoteLogManifestHandle v2Empty(
-            FsPath remoteLogManifestPath, long manifestGeneration, long tieredEndOffset) {
+            FsPath remoteLogManifestPath, long manifestGeneration, long highestCopiedEndOffset) {
         return new RemoteLogManifestHandle(
-                VERSION_2, remoteLogManifestPath, manifestGeneration, null, -1L, tieredEndOffset);
+                VERSION_2,
+                remoteLogManifestPath,
+                manifestGeneration,
+                null,
+                -1L,
+                highestCopiedEndOffset);
     }
 
     public static FsPath fromRemoteLogManifestPath(String remoteLogManifestPath) {
@@ -150,8 +155,8 @@ public class RemoteLogManifestHandle {
         return remoteLogEndOffset;
     }
 
-    public long getTieredEndOffset() {
-        return tieredEndOffset;
+    public long getHighestCopiedEndOffset() {
+        return highestCopiedEndOffset;
     }
 
     /** Returns whether this is a Manifest V2 handle with no active remote range. */
@@ -173,7 +178,7 @@ public class RemoteLogManifestHandle {
                 && Objects.equals(manifestGeneration, that.manifestGeneration)
                 && Objects.equals(remoteLogStartOffset, that.remoteLogStartOffset)
                 && remoteLogEndOffset == that.remoteLogEndOffset
-                && tieredEndOffset == that.tieredEndOffset;
+                && highestCopiedEndOffset == that.highestCopiedEndOffset;
     }
 
     @Override
@@ -184,7 +189,7 @@ public class RemoteLogManifestHandle {
                 manifestGeneration,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
-                tieredEndOffset);
+                highestCopiedEndOffset);
     }
 
     @Override
@@ -200,8 +205,8 @@ public class RemoteLogManifestHandle {
                 + remoteLogStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
-                + ", tieredEndOffset="
-                + tieredEndOffset
+                + ", highestCopiedEndOffset="
+                + highestCopiedEndOffset
                 + '}';
     }
 }

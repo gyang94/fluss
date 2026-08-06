@@ -45,7 +45,7 @@ public class RemoteLogManifestJsonSerde
     private static final String MANIFEST_ENTRIES_FIELD = "remote_log_segments";
     private static final String GENERATION_FIELD = "generation";
     private static final String REMOTE_LOG_START_OFFSET_FIELD = "remote_log_start_offset";
-    private static final String TIERED_END_OFFSET_FIELD = "tiered_end_offset";
+    private static final String HIGHEST_COPIED_END_OFFSET_FIELD = "highest_copied_end_offset";
     private static final String UNREFERENCED_SEGMENTS_FIELD = "unreferenced_segments";
     private static final String SEGMENT_FIELD = "segment";
     private static final String UNREFERENCED_AT_MS_FIELD = "unreferenced_at_ms";
@@ -63,7 +63,8 @@ public class RemoteLogManifestJsonSerde
         generator.writeNumberField(VERSION_KEY, manifest.getVersion());
         if (manifest.getVersion() == RemoteLogManifest.VERSION_2) {
             generator.writeNumberField(GENERATION_FIELD, manifest.getGeneration());
-            generator.writeNumberField(TIERED_END_OFFSET_FIELD, manifest.getTieredEndOffset());
+            generator.writeNumberField(
+                    HIGHEST_COPIED_END_OFFSET_FIELD, manifest.getHighestCopiedEndOffset());
         }
 
         PhysicalTablePath physicalTablePath = manifest.getPhysicalTablePath();
@@ -153,7 +154,7 @@ public class RemoteLogManifestJsonSerde
         }
 
         long generation = required(node, GENERATION_FIELD).asLong();
-        long tieredEndOffset = required(node, TIERED_END_OFFSET_FIELD).asLong();
+        long highestCopiedEndOffset = required(node, HIGHEST_COPIED_END_OFFSET_FIELD).asLong();
         JsonNode remoteStartNode = node.get(REMOTE_LOG_START_OFFSET_FIELD);
         Long remoteStartOffset = remoteStartNode == null ? null : remoteStartNode.asLong();
 
@@ -188,7 +189,7 @@ public class RemoteLogManifestJsonSerde
                 tableBucket,
                 activeSegments,
                 remoteStartOffset,
-                tieredEndOffset,
+                highestCopiedEndOffset,
                 unreferencedSegments);
     }
 

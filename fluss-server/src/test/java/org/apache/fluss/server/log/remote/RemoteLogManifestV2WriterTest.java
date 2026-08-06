@@ -437,7 +437,7 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
         RemoteLogManifest beforeExpiration =
                 remoteLogManager.remoteLogTablet(tableBucket).currentManifest();
         assertThat(beforeExpiration.getRemoteLogSegmentList()).hasSize(1);
-        long tieredEndOffset = beforeExpiration.getTieredEndOffset();
+        long highestCopiedEndOffset = beforeExpiration.getHighestCopiedEndOffset();
 
         manualClock.advanceTime(Duration.ofDays(8));
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
@@ -447,7 +447,7 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
         assertThat(emptyManifest.getRemoteLogSegmentList()).isEmpty();
         assertThat(emptyManifest.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
         assertThat(emptyManifest.getRemoteLogEndOffset()).isEqualTo(-1L);
-        assertThat(emptyManifest.getTieredEndOffset()).isEqualTo(tieredEndOffset);
+        assertThat(emptyManifest.getHighestCopiedEndOffset()).isEqualTo(highestCopiedEndOffset);
         assertThat(emptyManifest.getUnreferencedRemoteLogSegments()).hasSize(1);
         assertThat(remoteLogTablet.currentHandle()).isNotNull();
         assertThat(remoteLogTablet.currentHandle().handle().isEmptyV2()).isTrue();
@@ -460,7 +460,7 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
         RemoteLogManifest eligibleManifest = remoteLogTablet.currentManifest();
         assertThat(eligibleManifest.getUnreferencedRemoteLogSegments())
                 .allMatch(UnreferencedRemoteLogSegment::isGcEligible);
-        assertThat(eligibleManifest.getTieredEndOffset()).isEqualTo(tieredEndOffset);
+        assertThat(eligibleManifest.getHighestCopiedEndOffset()).isEqualTo(highestCopiedEndOffset);
         assertThat(listRemoteLogFiles(tableBucket)).isNotEmpty();
 
         manualClock.advanceTime(Duration.ofHours(1));
@@ -469,7 +469,7 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
         RemoteLogManifest afterGc = remoteLogTablet.currentManifest();
         assertThat(afterGc.getRemoteLogSegmentList()).isEmpty();
         assertThat(afterGc.getUnreferencedRemoteLogSegments()).isEmpty();
-        assertThat(afterGc.getTieredEndOffset()).isEqualTo(tieredEndOffset);
+        assertThat(afterGc.getHighestCopiedEndOffset()).isEqualTo(highestCopiedEndOffset);
         assertThat(listRemoteLogFiles(tableBucket)).isEmpty();
 
         addMultiSegmentsToLogTablet(logTablet, 2, false);
@@ -482,7 +482,8 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
     }
 
     @Test
-    void testAlreadyExpiredRolledSegmentAdvancesPersistentTieredEndOffset() throws Exception {
+    void testAlreadyExpiredRolledSegmentAdvancesPersistentHighestCopiedEndOffset()
+            throws Exception {
         TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
         makeLogTableAsLeader(tableBucket, false);
         LogTablet logTablet = replicaManager.getReplicaOrException(tableBucket).getLogTablet();
@@ -503,8 +504,9 @@ class RemoteLogManifestV2WriterTest extends RemoteLogTestBase {
         assertThat(manifest.getRemoteLogSegmentList()).isEmpty();
         assertThat(manifest.getUnreferencedRemoteLogSegments()).hasSize(1);
         assertThat(manifest.getRemoteLogEndOffset()).isEqualTo(-1L);
-        assertThat(manifest.getTieredEndOffset()).isEqualTo(10L);
-        assertThat(remoteLogTablet.currentHandle().handle().getTieredEndOffset()).isEqualTo(10L);
+        assertThat(manifest.getHighestCopiedEndOffset()).isEqualTo(10L);
+        assertThat(remoteLogTablet.currentHandle().handle().getHighestCopiedEndOffset())
+                .isEqualTo(10L);
         assertThat(logTablet.getSegments()).hasSize(1);
         assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(10L);
     }

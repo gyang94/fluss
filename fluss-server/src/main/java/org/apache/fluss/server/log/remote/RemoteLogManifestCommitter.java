@@ -130,7 +130,7 @@ public final class RemoteLogManifestCommitter {
                 && current.getManifestGeneration().getAsLong() == data.getNewManifestGeneration()
                 && remoteLogRangeMatches(current, data)
                 && current.getRemoteLogEndOffset() == data.getRemoteLogEndOffset()
-                && current.getTieredEndOffset() == data.getTieredEndOffset();
+                && current.getHighestCopiedEndOffset() == data.getHighestCopiedEndOffset();
     }
 
     private static boolean remoteLogRangeMatches(

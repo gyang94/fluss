@@ -396,7 +396,7 @@ public class TestCoordinatorGateway implements CoordinatorGateway {
                                 commitRemoteLogManifestData.getNewManifestGeneration(),
                                 commitRemoteLogManifestData.getRemoteLogStartOffset(),
                                 commitRemoteLogManifestData.getRemoteLogEndOffset(),
-                                commitRemoteLogManifestData.getTieredEndOffset());
+                                commitRemoteLogManifestData.getHighestCopiedEndOffset());
                 boolean committed;
                 if (commitRemoteLogManifestData.getExpectedZkVersion() == null) {
                     committed =

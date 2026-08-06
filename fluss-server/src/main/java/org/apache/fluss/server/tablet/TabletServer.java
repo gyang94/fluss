@@ -308,8 +308,8 @@ public class TabletServer extends ServerBase {
                             clock,
                             ioExecutor,
                             localDiskManager,
-                            pluginManager,
-                            remoteManifestV2WriterGate::isEnabled);
+                            remoteManifestV2WriterGate,
+                            pluginManager);
             replicaManager.startup();
 
             this.tabletService =

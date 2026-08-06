@@ -43,8 +43,8 @@ public class CommitRemoteLogManifestData {
     /** The end offset of the remote log. */
     private final long remoteLogEndOffset;
 
-    /** The exclusive offset through which remote tiering has been committed. */
-    private final long tieredEndOffset;
+    /** The highest exclusive end offset successfully copied to remote storage. */
+    private final long highestCopiedEndOffset;
 
     /** The coordinator epoch when the snapshot is triggered. */
     private final int coordinatorEpoch;
@@ -81,7 +81,7 @@ public class CommitRemoteLogManifestData {
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
-            long tieredEndOffset,
+            long highestCopiedEndOffset,
             int coordinatorEpoch,
             int bucketLeaderEpoch,
             @Nullable Integer manifestFormatVersion,
@@ -94,8 +94,8 @@ public class CommitRemoteLogManifestData {
                             || remoteLogStartOffset < remoteLogEndOffset,
                     "V2 remote log offsets must form a half-open range or the empty range");
             checkArgument(
-                    tieredEndOffset >= remoteLogEndOffset,
-                    "Tiered end offset must not be before the logical remote end offset");
+                    highestCopiedEndOffset >= remoteLogEndOffset,
+                    "Highest copied end offset must not be before the logical remote end offset");
             if (expectedZkVersion == null) {
                 checkArgument(
                         newManifestGeneration == 1L, "Initial Manifest V2 generation must be 1");
@@ -110,7 +110,7 @@ public class CommitRemoteLogManifestData {
         this.remoteLogManifestPath = remoteLogManifestPath;
         this.remoteLogStartOffset = remoteLogStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
-        this.tieredEndOffset = tieredEndOffset;
+        this.highestCopiedEndOffset = highestCopiedEndOffset;
         this.coordinatorEpoch = coordinatorEpoch;
         this.bucketLeaderEpoch = bucketLeaderEpoch;
         this.manifestFormatVersion = manifestFormatVersion;
@@ -123,7 +123,7 @@ public class CommitRemoteLogManifestData {
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
-            long tieredEndOffset,
+            long highestCopiedEndOffset,
             long newManifestGeneration,
             int coordinatorEpoch,
             int bucketLeaderEpoch) {
@@ -132,7 +132,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
-                tieredEndOffset,
+                highestCopiedEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 RemoteLogManifest.VERSION_2,
@@ -145,7 +145,7 @@ public class CommitRemoteLogManifestData {
             FsPath remoteLogManifestPath,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
-            long tieredEndOffset,
+            long highestCopiedEndOffset,
             long newManifestGeneration,
             int expectedZkVersion,
             int coordinatorEpoch,
@@ -155,7 +155,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
-                tieredEndOffset,
+                highestCopiedEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 RemoteLogManifest.VERSION_2,
@@ -179,8 +179,8 @@ public class CommitRemoteLogManifestData {
         return remoteLogEndOffset;
     }
 
-    public long getTieredEndOffset() {
-        return tieredEndOffset;
+    public long getHighestCopiedEndOffset() {
+        return highestCopiedEndOffset;
     }
 
     public int getCoordinatorEpoch() {
@@ -223,8 +223,8 @@ public class CommitRemoteLogManifestData {
                 + remoteLogStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
-                + ", tieredEndOffset="
-                + tieredEndOffset
+                + ", highestCopiedEndOffset="
+                + highestCopiedEndOffset
                 + ", coordinatorEpoch="
                 + coordinatorEpoch
                 + ", bucketLeaderEpoch="
@@ -251,7 +251,7 @@ public class CommitRemoteLogManifestData {
                 && Objects.equals(remoteLogManifestPath, that.remoteLogManifestPath)
                 && remoteLogStartOffset == that.remoteLogStartOffset
                 && remoteLogEndOffset == that.remoteLogEndOffset
-                && tieredEndOffset == that.tieredEndOffset
+                && highestCopiedEndOffset == that.highestCopiedEndOffset
                 && coordinatorEpoch == that.coordinatorEpoch
                 && bucketLeaderEpoch == that.bucketLeaderEpoch
                 && Objects.equals(manifestFormatVersion, that.manifestFormatVersion)
@@ -266,7 +266,7 @@ public class CommitRemoteLogManifestData {
                 remoteLogManifestPath,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
-                tieredEndOffset,
+                highestCopiedEndOffset,
                 coordinatorEpoch,
                 bucketLeaderEpoch,
                 manifestFormatVersion,
