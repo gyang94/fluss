@@ -21,16 +21,17 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.metadata.PhysicalTablePath;
 import org.apache.fluss.metadata.TableBucket;
 
+import javax.annotation.Nullable;
+
 import java.util.Objects;
 import java.util.UUID;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
- * Describes the metadata for a table bucket's physical remote log segment.
- *
- * <p>The segment contains offsets in the half-open range {@code [remoteLogStartOffset,
- * remoteLogEndOffset)} and is uniquely identified by {@code remoteLogSegmentId}.
+ * Describes one physical remote log object and the logical range for which the current manifest
+ * references it. The physical range identifies bytes in remote storage, while the logical range may
+ * be clipped when a newer segment overlaps this object.
  */
 @Internal
 public class RemoteLogSegment {
@@ -47,6 +48,12 @@ public class RemoteLogSegment {
     /** Exclusive physical end offset of this segment. */
     private final long remoteLogEndOffset;
 
+    /** Inclusive logical start offset exposed by the current manifest. */
+    private final long logicalStartOffset;
+
+    /** Exclusive logical end offset exposed by the current manifest. */
+    private final long logicalEndOffset;
+
     /** Max timestamp of this segment. */
     private final long maxTimestamp;
 
@@ -58,6 +65,8 @@ public class RemoteLogSegment {
             UUID remoteLogSegmentId,
             long remoteLogStartOffset,
             long remoteLogEndOffset,
+            @Nullable Long logicalStartOffset,
+            @Nullable Long logicalEndOffset,
             long maxTimestamp,
             int segmentSizeInBytes) {
         this.physicalTablePath = checkNotNull(physicalTablePath);
@@ -81,6 +90,21 @@ public class RemoteLogSegment {
                             + remoteLogStartOffset);
         }
         this.remoteLogEndOffset = remoteLogEndOffset;
+        this.logicalStartOffset =
+                logicalStartOffset == null ? remoteLogStartOffset : logicalStartOffset;
+        this.logicalEndOffset = logicalEndOffset == null ? remoteLogEndOffset : logicalEndOffset;
+        if (this.logicalStartOffset < remoteLogStartOffset
+                || this.logicalStartOffset >= this.logicalEndOffset
+                || this.logicalEndOffset > remoteLogEndOffset) {
+            throw new IllegalArgumentException(
+                    String.format(
+                            "Logical range [%s, %s) must be a non-empty subset of physical range "
+                                    + "[%s, %s)",
+                            this.logicalStartOffset,
+                            this.logicalEndOffset,
+                            remoteLogStartOffset,
+                            remoteLogEndOffset));
+        }
         this.maxTimestamp = maxTimestamp;
         this.segmentSizeInBytes = segmentSizeInBytes;
     }
@@ -98,17 +122,46 @@ public class RemoteLogSegment {
     }
 
     /**
-     * @return inclusive physical start offset of this segment
+     * @return physical start offset of this segment (inclusive)
      */
     public long remoteLogStartOffset() {
         return remoteLogStartOffset;
     }
 
     /**
-     * @return exclusive physical end offset of this segment
+     * @return physical end offset of this segment (exclusive)
      */
     public long remoteLogEndOffset() {
         return remoteLogEndOffset;
+    }
+
+    /** Returns the inclusive logical start offset exposed by the current manifest. */
+    public long logicalStartOffset() {
+        return logicalStartOffset;
+    }
+
+    /** Returns the exclusive logical end offset exposed by the current manifest. */
+    public long logicalEndOffset() {
+        return logicalEndOffset;
+    }
+
+    /** Returns whether the logical view hides a suffix of this physical segment. */
+    public boolean isEndOffsetClipped() {
+        return logicalEndOffset < remoteLogEndOffset;
+    }
+
+    /** Returns metadata for the same physical object with a different logical range. */
+    public RemoteLogSegment withLogicalRange(long logicalStartOffset, long logicalEndOffset) {
+        return new RemoteLogSegment(
+                physicalTablePath,
+                tableBucket,
+                remoteLogSegmentId,
+                remoteLogStartOffset,
+                remoteLogEndOffset,
+                logicalStartOffset,
+                logicalEndOffset,
+                maxTimestamp,
+                segmentSizeInBytes);
     }
 
     public long maxTimestamp() {
@@ -130,6 +183,8 @@ public class RemoteLogSegment {
         RemoteLogSegment that = (RemoteLogSegment) o;
         return remoteLogStartOffset == that.remoteLogStartOffset
                 && remoteLogEndOffset == that.remoteLogEndOffset
+                && logicalStartOffset == that.logicalStartOffset
+                && logicalEndOffset == that.logicalEndOffset
                 && segmentSizeInBytes == that.segmentSizeInBytes
                 && maxTimestamp == that.maxTimestamp
                 && Objects.equals(remoteLogSegmentId, that.remoteLogSegmentId)
@@ -145,6 +200,8 @@ public class RemoteLogSegment {
                 remoteLogSegmentId,
                 remoteLogStartOffset,
                 remoteLogEndOffset,
+                logicalStartOffset,
+                logicalEndOffset,
                 maxTimestamp,
                 segmentSizeInBytes);
     }
@@ -162,6 +219,10 @@ public class RemoteLogSegment {
                 + remoteLogStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
+                + ", logicalStartOffset="
+                + logicalStartOffset
+                + ", logicalEndOffset="
+                + logicalEndOffset
                 + ", maxTimestamp="
                 + maxTimestamp
                 + ", segmentSizeInBytes="
@@ -176,6 +237,8 @@ public class RemoteLogSegment {
         private UUID remoteLogSegmentId;
         private long remoteLogStartOffset;
         private long remoteLogEndOffset;
+        private @Nullable Long logicalStartOffset;
+        private @Nullable Long logicalEndOffset;
         private long maxTimestamp;
         private int segmentSizeInBytes;
 
@@ -188,13 +251,23 @@ public class RemoteLogSegment {
             return this;
         }
 
-        public Builder remoteLogStartOffset(long startOffsetInclusive) {
-            this.remoteLogStartOffset = startOffsetInclusive;
+        public Builder remoteLogStartOffset(long startOffset) {
+            this.remoteLogStartOffset = startOffset;
             return this;
         }
 
-        public Builder remoteLogEndOffset(long endOffsetExclusive) {
-            this.remoteLogEndOffset = endOffsetExclusive;
+        public Builder remoteLogEndOffset(long endOffset) {
+            this.remoteLogEndOffset = endOffset;
+            return this;
+        }
+
+        public Builder logicalStartOffset(long logicalStartOffset) {
+            this.logicalStartOffset = logicalStartOffset;
+            return this;
+        }
+
+        public Builder logicalEndOffset(long logicalEndOffset) {
+            this.logicalEndOffset = logicalEndOffset;
             return this;
         }
 
@@ -225,6 +298,8 @@ public class RemoteLogSegment {
                     remoteLogSegmentId,
                     remoteLogStartOffset,
                     remoteLogEndOffset,
+                    logicalStartOffset,
+                    logicalEndOffset,
                     maxTimestamp,
                     segmentSizeInBytes);
         }

@@ -24,7 +24,6 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.RpcClient;
 import org.apache.fluss.rpc.metrics.TestingClientMetricGroup;
-import org.apache.fluss.server.config.RemoteManifestV2WriterGate;
 import org.apache.fluss.server.coordinator.AutoPartitionManager;
 import org.apache.fluss.server.coordinator.CoordinatorChannelManager;
 import org.apache.fluss.server.coordinator.CoordinatorContext;
@@ -324,7 +323,6 @@ class TableBucketStateMachineTest {
         // case5: new to online, but the leader and the follower fail, should elect a new leader
         // we need to create the state machine with an event manager so that the fail request
         // will be handled by which will then cause electing a new leader
-        Configuration coordinatorConf = new Configuration();
         CoordinatorEventProcessor coordinatorEventProcessor =
                 new CoordinatorEventProcessor(
                         zookeeperClient,
@@ -338,7 +336,7 @@ class TableBucketStateMachineTest {
                         autoPartitionManager,
                         lakeTableTieringManager,
                         TestingMetricGroups.COORDINATOR_METRICS,
-                        coordinatorConf,
+                        new Configuration(),
                         Executors.newFixedThreadPool(
                                 1, new ExecutorThreadFactory("test-coordinator-io")),
                         new MetadataManager(
@@ -347,8 +345,7 @@ class TableBucketStateMachineTest {
                                 new LakeCatalogDynamicLoader(new Configuration(), null, true)),
                         kvSnapshotLeaseManager,
                         scheduler,
-                        SystemClock.getInstance(),
-                        new RemoteManifestV2WriterGate(coordinatorConf));
+                        SystemClock.getInstance());
         CoordinatorEventManager eventManager =
                 new CoordinatorEventManager(
                         coordinatorEventProcessor, TestingMetricGroups.COORDINATOR_METRICS);

@@ -94,7 +94,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import static org.apache.fluss.record.TestData.DATA1;
@@ -167,10 +166,6 @@ public class ReplicaTestBase {
         Configuration conf = new Configuration();
         conf.set(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION, Duration.ofMillis(0L));
         return conf;
-    }
-
-    protected BooleanSupplier manifestV2WriterEnabledSupplier() {
-        return () -> conf.getBoolean(ConfigOptions.REMOTE_LOG_MANIFEST_V2_WRITER_ENABLED);
     }
 
     /**
@@ -577,8 +572,7 @@ public class ReplicaTestBase {
                         logManager,
                         remoteLogStorage,
                         remoteLogTaskScheduler,
-                        manualClock,
-                        manifestV2WriterEnabledSupplier());
+                        manualClock);
     }
 
     protected void addMultiSegmentsToLogTablet(LogTablet logTablet, int numSegments)

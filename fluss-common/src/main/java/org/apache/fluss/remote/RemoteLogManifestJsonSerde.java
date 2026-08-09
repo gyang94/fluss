@@ -27,6 +27,7 @@ import org.apache.fluss.utils.json.JsonSerializer;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 
@@ -42,31 +43,25 @@ public class RemoteLogManifestJsonSerde
     private static final String TABLE_ID_FIELD = "table_id";
     private static final String PARTITION_ID_FIELD = "partition_id";
     private static final String BUCKET_ID_FIELD = "bucket_id";
-    private static final String MANIFEST_ENTRIES_FIELD = "remote_log_segments";
-    private static final String GENERATION_FIELD = "generation";
-    private static final String REMOTE_LOG_START_OFFSET_FIELD = "remote_log_start_offset";
-    private static final String HIGHEST_COPIED_END_OFFSET_FIELD = "highest_copied_end_offset";
-    private static final String UNREFERENCED_SEGMENTS_FIELD = "unreferenced_segments";
-    private static final String SEGMENT_FIELD = "segment";
-    private static final String UNREFERENCED_AT_MS_FIELD = "unreferenced_at_ms";
-    private static final String REASON_FIELD = "reason";
-    private static final String REPLACEMENT_SEGMENT_ID_FIELD = "replacement_segment_id";
+    private static final String MANIFEST_ENTRIES_FILED = "remote_log_segments";
     private static final String REMOTE_LOG_SEGMENT_ID_FIELD = "segment_id";
     private static final String START_OFFSET_FIELD = "start_offset";
     private static final String END_OFFSET_FIELD = "end_offset";
+    private static final String LOGICAL_START_OFFSET_FIELD = "logical_start_offset";
+    private static final String LOGICAL_END_OFFSET_FIELD = "logical_end_offset";
     private static final String MAX_TIMESTAMP_FIELD = "max_timestamp";
     private static final String SEGMENT_SIZE_IN_BYTES_FIELD = "size_in_bytes";
+    private static final String HIGHEST_COPIED_END_OFFSET_FIELD = "highest_copied_end_offset";
+    private static final int SNAPSHOT_VERSION = 1;
 
     @Override
     public void serialize(RemoteLogManifest manifest, JsonGenerator generator) throws IOException {
         generator.writeStartObject();
-        generator.writeNumberField(VERSION_KEY, manifest.getVersion());
-        if (manifest.getVersion() == RemoteLogManifest.VERSION_2) {
-            generator.writeNumberField(GENERATION_FIELD, manifest.getGeneration());
-            generator.writeNumberField(
-                    HIGHEST_COPIED_END_OFFSET_FIELD, manifest.getHighestCopiedEndOffset());
-        }
 
+        // serialize data version.
+        generator.writeNumberField(VERSION_KEY, SNAPSHOT_VERSION);
+
+        // serialize metadata
         PhysicalTablePath physicalTablePath = manifest.getPhysicalTablePath();
         generator.writeStringField(DATABASE_NAME_FIELD, physicalTablePath.getDatabaseName());
         generator.writeStringField(TABLE_NAME_FIELD, physicalTablePath.getTableName());
@@ -80,51 +75,40 @@ public class RemoteLogManifestJsonSerde
             generator.writeNumberField(PARTITION_ID_FIELD, tb.getPartitionId());
         }
         generator.writeNumberField(BUCKET_ID_FIELD, tb.getBucket());
-
-        if (manifest.getVersion() == RemoteLogManifest.VERSION_2
-                && manifest.getPersistedRemoteLogStartOffset() != null) {
+        if (manifest.getHighestCopiedEndOffset() != manifest.getRemoteLogEndOffset()) {
             generator.writeNumberField(
-                    REMOTE_LOG_START_OFFSET_FIELD, manifest.getPersistedRemoteLogStartOffset());
+                    HIGHEST_COPIED_END_OFFSET_FIELD, manifest.getHighestCopiedEndOffset());
         }
 
-        generator.writeArrayFieldStart(MANIFEST_ENTRIES_FIELD);
+        // serialize writer id entries.
+        generator.writeArrayFieldStart(MANIFEST_ENTRIES_FILED);
         for (RemoteLogSegment remoteLogSegment : manifest.getRemoteLogSegmentList()) {
-            serializeSegment(remoteLogSegment, generator);
+            generator.writeStartObject();
+            generator.writeStringField(
+                    REMOTE_LOG_SEGMENT_ID_FIELD, remoteLogSegment.remoteLogSegmentId().toString());
+            generator.writeNumberField(START_OFFSET_FIELD, remoteLogSegment.remoteLogStartOffset());
+            generator.writeNumberField(END_OFFSET_FIELD, remoteLogSegment.remoteLogEndOffset());
+            if (remoteLogSegment.logicalStartOffset() != remoteLogSegment.remoteLogStartOffset()) {
+                generator.writeNumberField(
+                        LOGICAL_START_OFFSET_FIELD, remoteLogSegment.logicalStartOffset());
+            }
+            if (remoteLogSegment.logicalEndOffset() != remoteLogSegment.remoteLogEndOffset()) {
+                generator.writeNumberField(
+                        LOGICAL_END_OFFSET_FIELD, remoteLogSegment.logicalEndOffset());
+            }
+            generator.writeNumberField(MAX_TIMESTAMP_FIELD, remoteLogSegment.maxTimestamp());
+            generator.writeNumberField(
+                    SEGMENT_SIZE_IN_BYTES_FIELD, remoteLogSegment.segmentSizeInBytes());
+            generator.writeEndObject();
         }
         generator.writeEndArray();
-
-        if (manifest.getVersion() == RemoteLogManifest.VERSION_2) {
-            generator.writeArrayFieldStart(UNREFERENCED_SEGMENTS_FIELD);
-            for (UnreferencedRemoteLogSegment unreferencedSegment :
-                    manifest.getUnreferencedRemoteLogSegments()) {
-                generator.writeStartObject();
-                generator.writeFieldName(SEGMENT_FIELD);
-                serializeSegment(unreferencedSegment.remoteLogSegment(), generator);
-                generator.writeNumberField(
-                        UNREFERENCED_AT_MS_FIELD, unreferencedSegment.unreferencedAtMs());
-                generator.writeStringField(REASON_FIELD, unreferencedSegment.reason().name());
-                if (unreferencedSegment.replacementSegmentId() != null) {
-                    generator.writeStringField(
-                            REPLACEMENT_SEGMENT_ID_FIELD,
-                            unreferencedSegment.replacementSegmentId().toString());
-                }
-                generator.writeEndObject();
-            }
-            generator.writeEndArray();
-        }
         generator.writeEndObject();
     }
 
     @Override
     public RemoteLogManifest deserialize(JsonNode node) {
-        int version = required(node, VERSION_KEY).asInt();
-        if (version != RemoteLogManifest.VERSION_1 && version != RemoteLogManifest.VERSION_2) {
-            throw new IllegalArgumentException(
-                    "Unsupported remote log manifest version: " + version);
-        }
-
-        String databaseName = required(node, DATABASE_NAME_FIELD).asText();
-        String tableName = required(node, TABLE_NAME_FIELD).asText();
+        String databaseName = node.get(DATABASE_NAME_FIELD).asText();
+        String tableName = node.get(TABLE_NAME_FIELD).asText();
         JsonNode partitionNameNode = node.get(PARTITION_NAME_FIELD);
         PhysicalTablePath physicalTablePath;
         if (partitionNameNode == null) {
@@ -134,97 +118,50 @@ public class RemoteLogManifestJsonSerde
                     PhysicalTablePath.of(databaseName, tableName, partitionNameNode.asText());
         }
 
-        long tableId = required(node, TABLE_ID_FIELD).asLong();
+        long tableId = node.get(TABLE_ID_FIELD).asLong();
         JsonNode partitionIdNode = node.get(PARTITION_ID_FIELD);
         Long partitionId = partitionIdNode == null ? null : partitionIdNode.asLong();
-        int bucketId = required(node, BUCKET_ID_FIELD).asInt();
+        int bucketId = node.get(BUCKET_ID_FIELD).asInt();
         TableBucket tableBucket = new TableBucket(tableId, partitionId, bucketId);
 
-        JsonNode entriesNode = required(node, MANIFEST_ENTRIES_FIELD);
-        if (!entriesNode.isArray()) {
-            throw new IllegalArgumentException(MANIFEST_ENTRIES_FIELD + " must be an array");
-        }
-        List<RemoteLogSegment> activeSegments = new ArrayList<>();
-        for (JsonNode entryJson : entriesNode) {
-            activeSegments.add(parseSegment(entryJson, physicalTablePath, tableBucket));
-        }
-
-        if (version == RemoteLogManifest.VERSION_1) {
-            return new RemoteLogManifest(physicalTablePath, tableBucket, activeSegments);
-        }
-
-        long generation = required(node, GENERATION_FIELD).asLong();
-        long highestCopiedEndOffset = required(node, HIGHEST_COPIED_END_OFFSET_FIELD).asLong();
-        JsonNode remoteStartNode = node.get(REMOTE_LOG_START_OFFSET_FIELD);
-        Long remoteStartOffset = remoteStartNode == null ? null : remoteStartNode.asLong();
-
-        JsonNode unreferencedNode = required(node, UNREFERENCED_SEGMENTS_FIELD);
-        if (!unreferencedNode.isArray()) {
-            throw new IllegalArgumentException(UNREFERENCED_SEGMENTS_FIELD + " must be an array");
-        }
-        List<UnreferencedRemoteLogSegment> unreferencedSegments = new ArrayList<>();
-        for (JsonNode entryJson : unreferencedNode) {
-            RemoteLogSegment segment =
-                    parseSegment(
-                            required(entryJson, SEGMENT_FIELD), physicalTablePath, tableBucket);
-            long unreferencedAtMs = required(entryJson, UNREFERENCED_AT_MS_FIELD).asLong();
-            UnreferencedRemoteLogSegment.Reason reason;
-            try {
-                reason =
-                        UnreferencedRemoteLogSegment.Reason.valueOf(
-                                required(entryJson, REASON_FIELD).asText());
-            } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException("Unsupported unreferenced segment reason", e);
+        Iterator<JsonNode> entriesJson = node.get(MANIFEST_ENTRIES_FILED).elements();
+        List<RemoteLogSegment> snapshotEntries = new ArrayList<>();
+        while (entriesJson.hasNext()) {
+            JsonNode entryJson = entriesJson.next();
+            String remoteLogSegmentId = entryJson.get(REMOTE_LOG_SEGMENT_ID_FIELD).asText();
+            long startOffset = entryJson.get(START_OFFSET_FIELD).asLong();
+            long endOffset = entryJson.get(END_OFFSET_FIELD).asLong();
+            JsonNode logicalStartOffsetNode = entryJson.get(LOGICAL_START_OFFSET_FIELD);
+            JsonNode logicalEndOffsetNode = entryJson.get(LOGICAL_END_OFFSET_FIELD);
+            long maxTimestamp = entryJson.get(MAX_TIMESTAMP_FIELD).asLong();
+            int segmentSizeInBytes = entryJson.get(SEGMENT_SIZE_IN_BYTES_FIELD).asInt();
+            RemoteLogSegment.Builder segmentBuilder =
+                    RemoteLogSegment.Builder.builder()
+                            .physicalTablePath(physicalTablePath)
+                            .tableBucket(tableBucket)
+                            .remoteLogSegmentId(UUID.fromString(remoteLogSegmentId))
+                            .remoteLogStartOffset(startOffset)
+                            .remoteLogEndOffset(endOffset)
+                            .maxTimestamp(maxTimestamp)
+                            .segmentSizeInBytes(segmentSizeInBytes);
+            if (logicalStartOffsetNode != null) {
+                segmentBuilder.logicalStartOffset(logicalStartOffsetNode.asLong());
             }
-            JsonNode replacementIdNode = entryJson.get(REPLACEMENT_SEGMENT_ID_FIELD);
-            UUID replacementSegmentId =
-                    replacementIdNode == null ? null : UUID.fromString(replacementIdNode.asText());
-            unreferencedSegments.add(
-                    new UnreferencedRemoteLogSegment(
-                            segment, unreferencedAtMs, reason, replacementSegmentId));
+            if (logicalEndOffsetNode != null) {
+                segmentBuilder.logicalEndOffset(logicalEndOffsetNode.asLong());
+            }
+            snapshotEntries.add(segmentBuilder.build());
         }
-        return RemoteLogManifest.createV2(
-                generation,
+
+        JsonNode highestCopiedEndOffsetNode = node.get(HIGHEST_COPIED_END_OFFSET_FIELD);
+        if (highestCopiedEndOffsetNode == null) {
+            return new RemoteLogManifest(physicalTablePath, tableBucket, snapshotEntries);
+        }
+        return new RemoteLogManifest(
                 physicalTablePath,
                 tableBucket,
-                activeSegments,
-                remoteStartOffset,
-                highestCopiedEndOffset,
-                unreferencedSegments);
-    }
-
-    private static void serializeSegment(RemoteLogSegment segment, JsonGenerator generator)
-            throws IOException {
-        generator.writeStartObject();
-        generator.writeStringField(
-                REMOTE_LOG_SEGMENT_ID_FIELD, segment.remoteLogSegmentId().toString());
-        generator.writeNumberField(START_OFFSET_FIELD, segment.remoteLogStartOffset());
-        generator.writeNumberField(END_OFFSET_FIELD, segment.remoteLogEndOffset());
-        generator.writeNumberField(MAX_TIMESTAMP_FIELD, segment.maxTimestamp());
-        generator.writeNumberField(SEGMENT_SIZE_IN_BYTES_FIELD, segment.segmentSizeInBytes());
-        generator.writeEndObject();
-    }
-
-    private static RemoteLogSegment parseSegment(
-            JsonNode node, PhysicalTablePath physicalTablePath, TableBucket tableBucket) {
-        return RemoteLogSegment.Builder.builder()
-                .physicalTablePath(physicalTablePath)
-                .tableBucket(tableBucket)
-                .remoteLogSegmentId(
-                        UUID.fromString(required(node, REMOTE_LOG_SEGMENT_ID_FIELD).asText()))
-                .remoteLogStartOffset(required(node, START_OFFSET_FIELD).asLong())
-                .remoteLogEndOffset(required(node, END_OFFSET_FIELD).asLong())
-                .maxTimestamp(required(node, MAX_TIMESTAMP_FIELD).asLong())
-                .segmentSizeInBytes(required(node, SEGMENT_SIZE_IN_BYTES_FIELD).asInt())
-                .build();
-    }
-
-    private static JsonNode required(JsonNode node, String fieldName) {
-        JsonNode field = node.get(fieldName);
-        if (field == null || field.isNull()) {
-            throw new IllegalArgumentException("Missing required field: " + fieldName);
-        }
-        return field;
+                snapshotEntries,
+                highestCopiedEndOffsetNode.asLong());
     }
 
     public static RemoteLogManifest fromJson(byte[] json) {

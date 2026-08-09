@@ -1025,11 +1025,20 @@ public class ServerRpcMessageUtils {
                         .setLogStartOffset(0L);
 
                 if (bucketResult.fetchFromRemote()) {
+                    // set remote log fetch info.
                     RemoteLogFetchInfo rlfInfo = bucketResult.remoteLogFetchInfo();
                     checkNotNull(rlfInfo, "Remote log fetch info is null.");
                     List<PbRemoteLogSegment> remoteLogSegmentList = new ArrayList<>();
                     for (RemoteLogSegment logSegment : rlfInfo.remoteLogSegmentList()) {
-                        remoteLogSegmentList.add(toPbRemoteLogSegment(logSegment));
+                        PbRemoteLogSegment pbRemoteLogSegment =
+                                new PbRemoteLogSegment()
+                                        .setRemoteLogStartOffset(logSegment.remoteLogStartOffset())
+                                        .setRemoteLogSegmentId(
+                                                logSegment.remoteLogSegmentId().toString())
+                                        .setRemoteLogEndOffset(logSegment.remoteLogEndOffset())
+                                        .setSegmentSizeInBytes(logSegment.segmentSizeInBytes())
+                                        .setMaxTimestamp(logSegment.maxTimestamp());
+                        remoteLogSegmentList.add(pbRemoteLogSegment);
                     }
                     fetchLogRespForBucket
                             .setRemoteLogFetchInfo()
@@ -1090,15 +1099,6 @@ public class ServerRpcMessageUtils {
         FetchLogResponse fetchLogResponse = new FetchLogResponse();
         fetchLogResponse.addAllTablesResps(fetchLogRespForTables);
         return fetchLogResponse;
-    }
-
-    private static PbRemoteLogSegment toPbRemoteLogSegment(RemoteLogSegment logSegment) {
-        return new PbRemoteLogSegment()
-                .setRemoteLogStartOffset(logSegment.remoteLogStartOffset())
-                .setRemoteLogSegmentId(logSegment.remoteLogSegmentId().toString())
-                .setRemoteLogEndOffset(logSegment.remoteLogEndOffset())
-                .setSegmentSizeInBytes(logSegment.segmentSizeInBytes())
-                .setMaxTimestamp(logSegment.maxTimestamp());
     }
 
     public static Map<TableBucket, KvRecordBatch> getPutKvData(PutKvRequest putKvRequest) {
@@ -1676,50 +1676,17 @@ public class ServerRpcMessageUtils {
 
     public static CommitRemoteLogManifestData getCommitRemoteLogManifestData(
             CommitRemoteLogManifestRequest request) {
-        TableBucket tableBucket =
+        return new CommitRemoteLogManifestData(
                 new TableBucket(
                         request.getTableId(),
                         request.hasPartitionId() ? request.getPartitionId() : null,
-                        request.getBucketId());
-        FsPath manifestPath = new FsPath(request.getRemoteLogManifestPath());
-        if (!request.hasManifestFormatVersion()) {
-            if (request.hasExpectedZkVersion() || request.hasNewManifestGeneration()) {
-                throw new IllegalArgumentException("Legacy manifest commit contains V2 CAS fields");
-            }
-            return new CommitRemoteLogManifestData(
-                    tableBucket,
-                    manifestPath,
-                    request.getRemoteLogStartOffset(),
-                    request.getRemoteLogEndOffset(),
-                    request.getCoordinatorEpoch(),
-                    request.getBucketLeaderEpoch());
-        }
-
-        if (request.getManifestFormatVersion() != 2
-                || !request.hasNewManifestGeneration()
-                || !request.hasHighestCopiedEndOffset()) {
-            throw new IllegalArgumentException(
-                    "Manifest V2 commit requires format version, generation, and highest copied end offset");
-        }
-        if (!request.hasExpectedZkVersion()) {
-            return CommitRemoteLogManifestData.v2CreateIfAbsent(
-                    tableBucket,
-                    manifestPath,
-                    request.getRemoteLogStartOffset(),
-                    request.getRemoteLogEndOffset(),
-                    request.getHighestCopiedEndOffset(),
-                    request.getNewManifestGeneration(),
-                    request.getCoordinatorEpoch(),
-                    request.getBucketLeaderEpoch());
-        }
-        return CommitRemoteLogManifestData.v2CompareAndSet(
-                tableBucket,
-                manifestPath,
+                        request.getBucketId()),
+                new FsPath(request.getRemoteLogManifestPath()),
                 request.getRemoteLogStartOffset(),
                 request.getRemoteLogEndOffset(),
-                request.getHighestCopiedEndOffset(),
-                request.getNewManifestGeneration(),
-                request.getExpectedZkVersion(),
+                request.hasHighestCopiedEndOffset()
+                        ? request.getHighestCopiedEndOffset()
+                        : request.getRemoteLogEndOffset(),
                 request.getCoordinatorEpoch(),
                 request.getBucketLeaderEpoch());
     }
@@ -1737,19 +1704,16 @@ public class ServerRpcMessageUtils {
                         commitRemoteLogManifestData.getRemoteLogManifestPath().toString())
                 .setRemoteLogStartOffset(commitRemoteLogManifestData.getRemoteLogStartOffset())
                 .setRemoteLogEndOffset(commitRemoteLogManifestData.getRemoteLogEndOffset())
+                .setHighestCopiedEndOffset(commitRemoteLogManifestData.getHighestCopiedEndOffset())
                 .setCoordinatorEpoch(commitRemoteLogManifestData.getCoordinatorEpoch())
                 .setBucketLeaderEpoch(commitRemoteLogManifestData.getBucketLeaderEpoch());
-        if (commitRemoteLogManifestData.isV2CasCommit()) {
-            request.setManifestFormatVersion(commitRemoteLogManifestData.getManifestFormatVersion())
-                    .setNewManifestGeneration(
-                            commitRemoteLogManifestData.getNewManifestGeneration())
-                    .setHighestCopiedEndOffset(
-                            commitRemoteLogManifestData.getHighestCopiedEndOffset());
-            if (commitRemoteLogManifestData.getExpectedZkVersion() != null) {
-                request.setExpectedZkVersion(commitRemoteLogManifestData.getExpectedZkVersion());
-            }
-        }
         return request;
+    }
+
+    public static NotifyRemoteLogOffsetsRequest makeNotifyRemoteLogOffsetsRequest(
+            TableBucket tableBucket, long remoteLogStartOffset, long remoteLogEndOffset) {
+        return makeNotifyRemoteLogOffsetsRequest(
+                tableBucket, remoteLogStartOffset, remoteLogEndOffset, remoteLogEndOffset);
     }
 
     public static NotifyRemoteLogOffsetsRequest makeNotifyRemoteLogOffsetsRequest(

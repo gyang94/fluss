@@ -32,7 +32,6 @@ import org.apache.fluss.server.DynamicConfigManager;
 import org.apache.fluss.server.ServerBase;
 import org.apache.fluss.server.authorizer.Authorizer;
 import org.apache.fluss.server.authorizer.AuthorizerLoader;
-import org.apache.fluss.server.config.RemoteManifestV2WriterGate;
 import org.apache.fluss.server.coordinator.lease.KvSnapshotLeaseManager;
 import org.apache.fluss.server.coordinator.rebalance.RebalanceManager;
 import org.apache.fluss.server.coordinator.remote.RemoteDirDynamicLoader;
@@ -155,9 +154,6 @@ public class CoordinatorServer extends ServerBase {
     private DynamicConfigManager dynamicConfigManager;
 
     @GuardedBy("lock")
-    private RemoteManifestV2WriterGate remoteManifestV2WriterGate;
-
-    @GuardedBy("lock")
     private LakeCatalogDynamicLoader lakeCatalogDynamicLoader;
 
     @GuardedBy("lock")
@@ -252,7 +248,6 @@ public class CoordinatorServer extends ServerBase {
                     new ReplicaCapacityController(conf, metadataCache, serverMetricGroup);
 
             this.dynamicConfigManager = new DynamicConfigManager(zkClient, conf);
-            this.remoteManifestV2WriterGate = new RemoteManifestV2WriterGate(conf);
 
             this.authorizer = AuthorizerLoader.createAuthorizer(conf, zkClient, pluginManager);
             if (authorizer != null) {
@@ -310,8 +305,6 @@ public class CoordinatorServer extends ServerBase {
             dynamicConfigManager.register(lakeCatalogDynamicLoader);
             dynamicConfigManager.register(remoteDirDynamicLoader);
             dynamicConfigManager.register(replicaCapacityController);
-            dynamicConfigManager.register(remoteManifestV2WriterGate);
-            dynamicConfigManager.registerValidator(remoteManifestV2WriterGate);
             // Register stateless validators for coordinator-side upfront validation
             dynamicConfigManager.register(new DiskWriteLimitConfigValidator());
             rpcServer.getServerReconfigurables().forEach(dynamicConfigManager::register);
@@ -365,8 +358,7 @@ public class CoordinatorServer extends ServerBase {
                             metadataManager,
                             kvSnapshotLeaseManager,
                             scheduler,
-                            clock,
-                            remoteManifestV2WriterGate);
+                            clock);
             coordinatorEventProcessor.startup();
 
             // As the active leader, this server is the sole writer of dynamic configs and holds the

@@ -23,7 +23,6 @@ import org.apache.fluss.record.LogRecordBatch;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.remote.RemoteLogManifest;
 import org.apache.fluss.remote.RemoteLogSegment;
-import org.apache.fluss.remote.RemoteLogSegmentReference;
 import org.apache.fluss.server.log.LogSegment;
 import org.apache.fluss.server.log.LogTablet;
 import org.apache.fluss.server.log.remote.LogSegmentFiles;
@@ -37,7 +36,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -118,7 +116,7 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
     }
 
     @Test
-    void testFetchOverlappingV2SegmentsFromReplicasWithDifferentBoundaries() throws Exception {
+    void testFetchOverlappingSegmentsFromReplicasWithDifferentBoundaries() throws Exception {
         TableBucket targetBucket = new TableBucket(DATA1_TABLE_ID, 0);
         TableBucket sourceBucket = new TableBucket(DATA1_TABLE_ID, 1);
         makeLogTableAsLeader(targetBucket, false);
@@ -126,8 +124,7 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
         LogTablet oldLeaderLog = replicaManager.getReplicaOrException(targetBucket).getLogTablet();
         LogTablet newLeaderLog = replicaManager.getReplicaOrException(sourceBucket).getLogTablet();
 
-        // Both logs append the exact same record batches. They only roll at different batch
-        // boundaries: the old leader rolls at 20, while the future leader rolls at 10 and 30.
+        // Both replicas contain the same record batches but roll at different offsets.
         for (int offset = 0; offset < 30; offset++) {
             MemoryLogRecords records =
                     genMemoryLogRecordsWithWriterId(
@@ -157,19 +154,20 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
         assertThat(newLeaderSegment.remoteLogEndOffset()).isEqualTo(30L);
 
         RemoteLogManifest manifest =
-                RemoteLogManifest.createV2(
-                        1L,
-                        oldLeaderLog.getPhysicalTablePath(),
-                        targetBucket,
-                        Arrays.asList(oldLeaderSegment, newLeaderSegment),
-                        0L,
-                        30L,
-                        Collections.emptyList());
-        remoteLogManager.remoteLogTablet(targetBucket).replaceManifest(manifest);
-        assertThat(manifest.getRemoteLogSegmentReferences())
-                .containsExactly(
-                        new RemoteLogSegmentReference(oldLeaderSegment, 0L, 10L),
-                        new RemoteLogSegmentReference(newLeaderSegment, 10L, 30L));
+                new RemoteLogManifest(
+                                oldLeaderLog.getPhysicalTablePath(),
+                                targetBucket,
+                                Collections.singletonList(oldLeaderSegment))
+                        .trimAndMerge(
+                                Collections.emptyList(),
+                                Collections.singletonList(newLeaderSegment));
+        remoteLogManager.remoteLogTablet(targetBucket).loadRemoteLogManifest(manifest);
+        assertThat(manifest.getRemoteLogSegmentList())
+                .extracting(RemoteLogSegment::logicalStartOffset)
+                .containsExactly(0L, 10L);
+        assertThat(manifest.getRemoteLogSegmentList())
+                .extracting(RemoteLogSegment::logicalEndOffset)
+                .containsExactly(10L, 30L);
 
         List<LogRecordBatch> fetchedBatches = new ArrayList<>();
         try (RemoteLogFetcher fetcher = newFetcher(targetBucket, oldLeaderLog.getLogDir())) {
@@ -932,6 +930,28 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
         }
     }
 
+    private static void waitUntilLogFileCountAtLeast(Path dir, int expectedCount) throws Exception {
+        long deadline = System.currentTimeMillis() + 5_000L;
+        while (System.currentTimeMillis() < deadline) {
+            if (Files.exists(dir) && countLogFiles(dir) >= expectedCount) {
+                return;
+            }
+            Thread.sleep(50L);
+        }
+
+        assertThat(countLogFiles(dir)).isGreaterThanOrEqualTo(expectedCount);
+    }
+
+    private static long countLogFiles(Path dir) throws IOException {
+        if (!Files.exists(dir)) {
+            return 0L;
+        }
+
+        try (java.util.stream.Stream<Path> paths = Files.list(dir)) {
+            return paths.filter(path -> path.getFileName().toString().endsWith(".log")).count();
+        }
+    }
+
     private RemoteLogSegment copySegmentToRemoteForBucket(
             LogTablet sourceLog, int segmentIndex, TableBucket targetBucket) throws Exception {
         List<LogSegment> segments = sourceLog.getSegments();
@@ -956,27 +976,5 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
                         .build();
         remoteLogStorage.copyLogSegmentFiles(remoteSegment, files);
         return remoteSegment;
-    }
-
-    private static void waitUntilLogFileCountAtLeast(Path dir, int expectedCount) throws Exception {
-        long deadline = System.currentTimeMillis() + 5_000L;
-        while (System.currentTimeMillis() < deadline) {
-            if (Files.exists(dir) && countLogFiles(dir) >= expectedCount) {
-                return;
-            }
-            Thread.sleep(50L);
-        }
-
-        assertThat(countLogFiles(dir)).isGreaterThanOrEqualTo(expectedCount);
-    }
-
-    private static long countLogFiles(Path dir) throws IOException {
-        if (!Files.exists(dir)) {
-            return 0L;
-        }
-
-        try (java.util.stream.Stream<Path> paths = Files.list(dir)) {
-            return paths.filter(path -> path.getFileName().toString().endsWith(".log")).count();
-        }
     }
 }

@@ -72,7 +72,6 @@ import org.apache.fluss.rpc.protocol.ApiError;
 import org.apache.fluss.rpc.protocol.ApiKeys;
 import org.apache.fluss.rpc.protocol.Errors;
 import org.apache.fluss.rpc.protocol.MergeMode;
-import org.apache.fluss.server.config.RemoteManifestV2WriterGate;
 import org.apache.fluss.server.coordinator.CoordinatorContext;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.entity.LakeBucketOffset;
@@ -257,7 +256,6 @@ public class ReplicaManager implements ServerReconfigurable {
             Clock clock,
             ExecutorService ioExecutor,
             LocalDiskManager localDiskManager,
-            RemoteManifestV2WriterGate manifestV2WriterGate,
             @Nullable PluginManager pluginManager)
             throws IOException {
         this(
@@ -281,8 +279,7 @@ public class ReplicaManager implements ServerReconfigurable {
                         localDiskManager,
                         logManager,
                         clock,
-                        ioExecutor,
-                        manifestV2WriterGate),
+                        ioExecutor),
                 scannerManager,
                 clock,
                 ioExecutor,
@@ -1182,12 +1179,12 @@ public class ReplicaManager implements ServerReconfigurable {
                     // remote.
                     TableBucket tb = notifyRemoteLogOffsetsData.getTableBucket();
                     LogTablet logTablet = getReplicaOrException(tb).getLogTablet();
+                    logTablet.updateHighestCopiedEndOffset(
+                            notifyRemoteLogOffsetsData.getHighestCopiedEndOffset());
                     logTablet.updateRemoteLogStartOffset(
                             notifyRemoteLogOffsetsData.getRemoteLogStartOffset());
                     logTablet.updateRemoteLogEndOffset(
                             notifyRemoteLogOffsetsData.getRemoteLogEndOffset());
-                    logTablet.updateHighestCopiedEndOffset(
-                            notifyRemoteLogOffsetsData.getHighestCopiedEndOffset());
                     responseCallback.accept(new NotifyRemoteLogOffsetsResponse());
                 });
     }

@@ -23,7 +23,6 @@ import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.record.FileLogRecords;
 import org.apache.fluss.record.LogRecordBatch;
 import org.apache.fluss.remote.RemoteLogSegment;
-import org.apache.fluss.remote.RemoteLogSegmentReference;
 import org.apache.fluss.server.log.remote.RemoteLogManager;
 import org.apache.fluss.server.log.remote.RemoteLogStorage;
 import org.apache.fluss.utils.ExponentialBackoff;
@@ -162,9 +161,9 @@ public class RemoteLogFetcher implements Closeable {
             prev.close();
         }
 
-        List<RemoteLogSegmentReference> references =
-                remoteLogManager.relevantRemoteLogSegmentReferences(tableBucket, startOffset);
-        if (references.isEmpty()) {
+        List<RemoteLogSegment> segments =
+                remoteLogManager.relevantRemoteLogSegments(tableBucket, startOffset);
+        if (segments.isEmpty()) {
             throw new RemoteStorageException(
                     String.format(
                             "No remote log segments found for table bucket %s at offset %d",
@@ -174,7 +173,7 @@ public class RemoteLogFetcher implements Closeable {
         LOG.info(
                 "Found {} remote log segments for table bucket {} from offset {} to localLogStartOffset {} "
                         + "(prefetchNum={}, downloadThreads={})",
-                references.size(),
+                segments.size(),
                 tableBucket,
                 startOffset,
                 localLogStartOffset,
@@ -182,7 +181,7 @@ public class RemoteLogFetcher implements Closeable {
                 ((java.util.concurrent.ThreadPoolExecutor) downloadExecutor).getCorePoolSize());
 
         RemoteLogBatchIterator iterator =
-                new RemoteLogBatchIterator(references, startOffset, localLogStartOffset);
+                new RemoteLogBatchIterator(segments, startOffset, localLogStartOffset);
         this.activeIterator = iterator;
         // Kick off the initial prefetch window so downloads start before the first advance().
         iterator.fillPrefetchWindow();
@@ -364,20 +363,18 @@ public class RemoteLogFetcher implements Closeable {
      * within [startOffset, localLogStartOffset).
      */
     private class RemoteLogBatchIterator implements Iterator<LogRecordBatch> {
-        private final List<RemoteLogSegmentReference> references;
+        private final List<RemoteLogSegment> segments;
         private final long localLogStartOffset;
 
         /** Tracks the current read offset, advancing as batches are consumed. */
         private long currentOffset;
 
+        /** Exclusive logical end of the physical segment currently being consumed. */
+        private long currentSegmentLogicalEndOffset = -1L;
+
         private int currentSegmentIndex = 0;
         private FileLogRecords currentFileLogRecords;
         private Iterator<LogRecordBatch> currentBatchIterator;
-        /**
-         * Exclusive logical boundary of the current physical segment. The boundary is required to
-         * align with a record-batch boundary; crossing it fails closed in {@link #advance()}.
-         */
-        private long currentReferenceLogicalEndOffset;
 
         /**
          * Ring of in-flight prefetch futures, indexed by {@code seq % prefetchNum}. A non-null slot
@@ -414,10 +411,8 @@ public class RemoteLogFetcher implements Closeable {
         private boolean closed = false;
 
         RemoteLogBatchIterator(
-                List<RemoteLogSegmentReference> references,
-                long startOffset,
-                long localLogStartOffset) {
-            this.references = references;
+                List<RemoteLogSegment> segments, long startOffset, long localLogStartOffset) {
+            this.segments = segments;
             this.currentOffset = startOffset;
             this.localLogStartOffset = localLogStartOffset;
             @SuppressWarnings({"unchecked", "rawtypes"})
@@ -483,18 +478,17 @@ public class RemoteLogFetcher implements Closeable {
                     if (batch.nextLogOffset() <= currentOffset) {
                         continue;
                     }
-                    if (batch.baseLogOffset() >= currentReferenceLogicalEndOffset) {
+                    if (batch.baseLogOffset() >= currentSegmentLogicalEndOffset) {
                         closeCurrentFileLogRecords();
                         continue;
                     }
-                    if (batch.nextLogOffset() > currentReferenceLogicalEndOffset) {
+                    if (batch.nextLogOffset() > currentSegmentLogicalEndOffset) {
                         throw new IllegalStateException(
-                                "Remote log batch ["
-                                        + batch.baseLogOffset()
-                                        + ", "
-                                        + batch.nextLogOffset()
-                                        + ") crosses logical reference end "
-                                        + currentReferenceLogicalEndOffset);
+                                String.format(
+                                        "Logical boundary %s cuts record batch [%s, %s)",
+                                        currentSegmentLogicalEndOffset,
+                                        batch.baseLogOffset(),
+                                        batch.nextLogOffset()));
                     }
                     // stop if we've reached localLogStartOffset
                     if (batch.baseLogOffset() >= localLogStartOffset) {
@@ -512,23 +506,22 @@ public class RemoteLogFetcher implements Closeable {
                 closeCurrentFileLogRecords();
 
                 // move to next segment
-                if (currentSegmentIndex >= references.size()) {
+                if (currentSegmentIndex >= segments.size()) {
                     finished = true;
                     return;
                 }
 
-                RemoteLogSegmentReference reference = references.get(currentSegmentIndex++);
-                RemoteLogSegment segment = reference.remoteLogSegment();
-                if (reference.logicalEndOffset() <= currentOffset) {
+                RemoteLogSegment segment = segments.get(currentSegmentIndex++);
+                if (segment.logicalEndOffset() <= currentOffset) {
                     continue;
                 }
                 // skip segments that start at or after localLogStartOffset
-                if (reference.logicalStartOffset() >= localLogStartOffset) {
+                if (segment.logicalStartOffset() >= localLogStartOffset) {
                     finished = true;
                     return;
                 }
-                currentOffset = Math.max(currentOffset, reference.logicalStartOffset());
-                currentReferenceLogicalEndOffset = reference.logicalEndOffset();
+                currentOffset = Math.max(currentOffset, segment.logicalStartOffset());
+                currentSegmentLogicalEndOffset = segment.logicalEndOffset();
 
                 try {
                     File localFile = fetchSegmentFile(segment);
@@ -640,17 +633,16 @@ public class RemoteLogFetcher implements Closeable {
                 return;
             }
 
-            while (nextPrefetchIndex < references.size()) {
-                RemoteLogSegmentReference reference = references.get(nextPrefetchIndex);
-                RemoteLogSegment segment = reference.remoteLogSegment();
+            while (nextPrefetchIndex < segments.size()) {
+                RemoteLogSegment segment = segments.get(nextPrefetchIndex);
 
                 // segment entirely before currentOffset — skip and advance index.
-                if (reference.logicalEndOffset() <= currentOffset) {
+                if (segment.logicalEndOffset() <= currentOffset) {
                     nextPrefetchIndex++;
                     continue;
                 }
                 // segment starts at or beyond localLogStartOffset — nothing more to prefetch.
-                if (reference.logicalStartOffset() >= localLogStartOffset) {
+                if (segment.logicalStartOffset() >= localLogStartOffset) {
                     return;
                 }
 

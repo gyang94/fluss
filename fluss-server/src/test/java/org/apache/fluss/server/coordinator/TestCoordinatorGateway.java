@@ -121,7 +121,6 @@ import org.apache.fluss.rpc.messages.TableExistsResponse;
 import org.apache.fluss.rpc.protocol.ApiError;
 import org.apache.fluss.server.entity.AdjustIsrResultForBucket;
 import org.apache.fluss.server.entity.CommitRemoteLogManifestData;
-import org.apache.fluss.server.entity.RemoteLogManifestCommitResult;
 import org.apache.fluss.server.zk.ZooKeeperClient;
 import org.apache.fluss.server.zk.data.LeaderAndIsr;
 import org.apache.fluss.server.zk.data.RemoteLogManifestHandle;
@@ -137,7 +136,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getAdjustIsrData;
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.getCommitRemoteLogManifestData;
@@ -149,9 +147,6 @@ public class TestCoordinatorGateway implements CoordinatorGateway {
 
     private final @Nullable ZooKeeperClient zkClient;
     public final AtomicBoolean commitRemoteLogManifestFail = new AtomicBoolean(false);
-    public final AtomicBoolean commitRemoteLogManifestConflictOnce = new AtomicBoolean(false);
-    public final AtomicReference<RemoteLogManifestCommitResult> commitRemoteLogManifestResultOnce =
-            new AtomicReference<>();
     public final Map<TableBucket, Integer> currentLeaderEpoch = new HashMap<>();
     private Set<Integer> shutdownTabletServers;
     private boolean networkIssueEnable = false;
@@ -374,49 +369,7 @@ public class TestCoordinatorGateway implements CoordinatorGateway {
         CommitRemoteLogManifestData commitRemoteLogManifestData =
                 getCommitRemoteLogManifestData(request);
         CommitRemoteLogManifestResponse response = new CommitRemoteLogManifestResponse();
-        RemoteLogManifestCommitResult injectedResult =
-                commitRemoteLogManifestResultOnce.getAndSet(null);
-        if (commitRemoteLogManifestData.isV2CasCommit() && injectedResult != null) {
-            return CompletableFuture.completedFuture(
-                    response.setCommitSuccess(
-                                    injectedResult == RemoteLogManifestCommitResult.COMMITTED)
-                            .setCommitResult(injectedResult.code()));
-        }
-        if (commitRemoteLogManifestData.isV2CasCommit()
-                && commitRemoteLogManifestConflictOnce.getAndSet(false)) {
-            return CompletableFuture.completedFuture(
-                    response.setCommitSuccess(false)
-                            .setCommitResult(RemoteLogManifestCommitResult.CONFLICT.code()));
-        }
         try {
-            if (commitRemoteLogManifestData.isV2CasCommit()) {
-                RemoteLogManifestHandle newHandle =
-                        RemoteLogManifestHandle.v2(
-                                commitRemoteLogManifestData.getRemoteLogManifestPath(),
-                                commitRemoteLogManifestData.getNewManifestGeneration(),
-                                commitRemoteLogManifestData.getRemoteLogStartOffset(),
-                                commitRemoteLogManifestData.getRemoteLogEndOffset(),
-                                commitRemoteLogManifestData.getHighestCopiedEndOffset());
-                boolean committed;
-                if (commitRemoteLogManifestData.getExpectedZkVersion() == null) {
-                    committed =
-                            zkClient.createRemoteLogManifestHandleIfAbsent(
-                                    commitRemoteLogManifestData.getTableBucket(), newHandle);
-                } else {
-                    committed =
-                            zkClient.compareAndSetRemoteLogManifestHandle(
-                                    commitRemoteLogManifestData.getTableBucket(),
-                                    commitRemoteLogManifestData.getExpectedZkVersion(),
-                                    newHandle);
-                }
-                return CompletableFuture.completedFuture(
-                        response.setCommitSuccess(committed)
-                                .setCommitResult(
-                                        (committed
-                                                        ? RemoteLogManifestCommitResult.COMMITTED
-                                                        : RemoteLogManifestCommitResult.CONFLICT)
-                                                .code()));
-            }
             zkClient.upsertRemoteLogManifestHandle(
                     commitRemoteLogManifestData.getTableBucket(),
                     new RemoteLogManifestHandle(
