@@ -110,7 +110,7 @@ public final class LogTablet {
     private final boolean isChangeLog;
 
     private final AtomicBoolean rollExpiredActiveSegmentEnabled;
-    private final long localLogTtlMs;
+    private volatile long localLogTtlMs;
 
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
@@ -684,6 +684,16 @@ public final class LogTablet {
 
     public int getTieredLogLocalSegments() {
         return tieredLogLocalSegments;
+    }
+
+    /** Updates the TTL used by local log segment cleanup. */
+    public void updateLocalLogTtlMs(long localLogTtlMs) {
+        this.localLogTtlMs = localLogTtlMs;
+    }
+
+    /** Returns the TTL used by local log segment cleanup, in milliseconds. */
+    public long getLocalLogTtlMs() {
+        return localLogTtlMs;
     }
 
     public void updateLakeTableSnapshotId(long snapshotId) {

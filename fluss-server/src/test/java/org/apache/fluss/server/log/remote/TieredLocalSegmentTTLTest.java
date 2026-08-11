@@ -23,6 +23,7 @@ import org.apache.fluss.server.log.LogSegment;
 import org.apache.fluss.server.log.LogTablet;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -185,5 +186,27 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
         assertThat(logTablet.getSegments()).hasSize(2);
         assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
         assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(50L);
+    }
+
+    @Test
+    void testUpdatedLocalTtlTakesEffectImmediately() throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tableBucket, false);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tableBucket).getLogTablet();
+        logTablet.updateTieredLogLocalSegments(5);
+
+        addMultiSegmentsToLogTablet(logTablet, 5);
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        logTablet.updateLocalLogTtlMs(Duration.ofHours(2).toMillis());
+        assertThat(logTablet.getLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
+
+        manualClock.advanceTime(Duration.ofMinutes(90));
+        logManager.cleanupExpiredLocalLogSegments();
+        assertThat(logTablet.getSegments()).hasSize(5);
+
+        logTablet.updateLocalLogTtlMs(Duration.ofHours(1).toMillis());
+        logManager.cleanupExpiredLocalLogSegments();
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
     }
 }

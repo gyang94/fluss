@@ -2474,6 +2474,51 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
     }
 
     @Test
+    void testAlterTableLocalLogTtl() throws Exception {
+        TablePath tablePath = TablePath.of("test_db", "test_alter_local_log_ttl");
+        TableDescriptor tableDescriptor =
+                TableDescriptor.builder()
+                        .schema(DEFAULT_SCHEMA)
+                        .distributedBy(3)
+                        .property(ConfigOptions.TABLE_LOG_TTL.key(), "7d")
+                        .property(ConfigOptions.TABLE_LOG_LOCAL_TTL.key(), "2h")
+                        .build();
+
+        admin.createTable(tablePath, tableDescriptor, false).get();
+        TableInfo tableInfo = admin.getTableInfo(tablePath).get();
+        TableBucket tableBucket = new TableBucket(tableInfo.getTableId(), 0);
+        LogTablet logTablet =
+                FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tableBucket).getLogTablet();
+        assertThat(logTablet.getLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
+
+        admin.alterTable(
+                        tablePath,
+                        Collections.singletonList(
+                                TableChange.set(ConfigOptions.TABLE_LOG_LOCAL_TTL.key(), "3h")),
+                        false)
+                .get();
+        assertThat(admin.getTableInfo(tablePath).get().getTableConfig().getLocalLogTTLMs())
+                .isEqualTo(Duration.ofHours(3).toMillis());
+        waitUntil(
+                () -> logTablet.getLocalLogTtlMs() == Duration.ofHours(3).toMillis(),
+                Duration.ofSeconds(30),
+                "Waiting for local log TTL to propagate to TabletServer");
+
+        admin.alterTable(
+                        tablePath,
+                        Collections.singletonList(
+                                TableChange.reset(ConfigOptions.TABLE_LOG_LOCAL_TTL.key())),
+                        false)
+                .get();
+        waitUntil(
+                () -> logTablet.getLocalLogTtlMs() == Duration.ofDays(1).toMillis(),
+                Duration.ofSeconds(30),
+                "Waiting for local log TTL reset to propagate to TabletServer");
+
+        admin.dropTable(tablePath, false).get();
+    }
+
+    @Test
     public void testCreateTableWithInvalidAggFunctionDataType() throws Exception {
         TablePath tablePath =
                 TablePath.of(

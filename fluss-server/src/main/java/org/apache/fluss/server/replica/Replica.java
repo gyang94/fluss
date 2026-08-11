@@ -703,6 +703,27 @@ public final class Replica {
                 tieredLogLocalSegments);
     }
 
+    /**
+     * Updates the TTL of local log segments. This method is called when the table configuration is
+     * altered.
+     *
+     * @param localLogTtlMs the new local log TTL in milliseconds
+     */
+    public void updateLocalLogTtlMs(long localLogTtlMs) {
+        long oldValue = logTablet.getLocalLogTtlMs();
+        if (oldValue == localLogTtlMs) {
+            return;
+        }
+
+        logTablet.updateLocalLogTtlMs(localLogTtlMs);
+
+        LOG.info(
+                "Replica for {} localLogTtlMs changed from {} to {}",
+                tableBucket,
+                oldValue,
+                localLogTtlMs);
+    }
+
     private void createKv() {
         try {
             // create a closeable registry for the closable related to kv
