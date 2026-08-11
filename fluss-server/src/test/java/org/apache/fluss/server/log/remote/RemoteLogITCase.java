@@ -253,7 +253,7 @@ public class RemoteLogITCase {
         RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
 
         assertThat(remoteLogTablet.allRemoteLogSegments().size()).isGreaterThan(0);
-        assertThat(remoteLogTablet.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLogTablet.getLogicalStartOffset()).isEqualTo(0L);
 
         Replica leaderReplica = FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tb);
         LogTablet logTablet = leaderReplica.getLogTablet();
@@ -267,7 +267,7 @@ public class RemoteLogITCase {
                 Duration.ofMinutes(2),
                 () -> {
                     assertThat(remoteLogTablet.allRemoteLogSegments()).isEmpty();
-                    assertThat(remoteLogTablet.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
+                    assertThat(remoteLogTablet.getLogicalStartOffset()).isEqualTo(Long.MAX_VALUE);
                 });
 
         // ==================== Stage B: Dynamic Enable & Retention ====================
@@ -316,8 +316,8 @@ public class RemoteLogITCase {
         logTablet.updateLakeLogEndOffset(partialLakeOffset);
 
         final int expectedRemainingSegments = sortedSegments.size() - midIndex - 1;
-        // The new remoteLogStartOffset should be the start offset of the first remaining segment
-        final long expectedNewStartOffset = sortedSegments.get(midIndex + 1).remoteLogStartOffset();
+        // The new logical start offset should be the start offset of the first remaining segment
+        final long expectedNewStartOffset = sortedSegments.get(midIndex + 1).physicalStartOffset();
 
         // Wait for partial cleanup - only segments that have been tiered should be deleted
         retry(
@@ -326,9 +326,8 @@ public class RemoteLogITCase {
                     // Some segments should be deleted (those with endOffset <= partialLakeOffset)
                     int currentSegmentCount = remoteLogTablet.allRemoteLogSegments().size();
                     assertThat(currentSegmentCount).isEqualTo(expectedRemainingSegments);
-                    // Remote log start offset should be updated to the first remaining segment's
-                    // start
-                    assertThat(remoteLogTablet.getRemoteLogStartOffset())
+                    // Logical start offset should be updated to the first remaining segment's start
+                    assertThat(remoteLogTablet.getLogicalStartOffset())
                             .isEqualTo(expectedNewStartOffset);
                     // Remaining segments should have remoteLogEndOffset > partialLakeOffset
                     assertThat(remoteLogTablet.allRemoteLogSegments())
@@ -346,7 +345,7 @@ public class RemoteLogITCase {
                 Duration.ofMinutes(2),
                 () -> {
                     assertThat(remoteLogTablet.allRemoteLogSegments()).isEmpty();
-                    assertThat(remoteLogTablet.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
+                    assertThat(remoteLogTablet.getLogicalStartOffset()).isEqualTo(Long.MAX_VALUE);
                 });
 
         // ==================== Stage D: Dynamic Disable ====================
@@ -378,7 +377,7 @@ public class RemoteLogITCase {
                 Duration.ofMinutes(2),
                 () -> {
                     assertThat(remoteLogTablet.allRemoteLogSegments()).isEmpty();
-                    assertThat(remoteLogTablet.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
+                    assertThat(remoteLogTablet.getLogicalStartOffset()).isEqualTo(Long.MAX_VALUE);
                 });
     }
 

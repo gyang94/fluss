@@ -298,7 +298,7 @@ public class LogTieringTask implements Runnable {
                             .physicalTablePath(physicalTablePath)
                             .tableBucket(tableBucket)
                             .remoteLogSegmentId(remoteLogSegmentId)
-                            .remoteLogStartOffset(segment.getBaseOffset())
+                            .physicalStartOffset(segment.getBaseOffset())
                             .remoteLogEndOffset(segmentEndOffset)
                             .maxTimestamp(segment.maxTimestampSoFar())
                             .segmentSizeInBytes(sizeInBytes)
@@ -360,7 +360,7 @@ public class LogTieringTask implements Runnable {
 
         // 2. sending the CommitRemoteLogManifestRequest to coordinator server
         // to try to commit this snapshot.
-        long newRemoteLogStartOffset = newRemoteLogManifest.getRemoteLogStartOffset();
+        long newLogicalStartOffset = newRemoteLogManifest.getLogicalStartOffset();
         long newRemoteLogEndOffset = newRemoteLogManifest.getRemoteLogEndOffset();
         long newRemoteLogSize = newRemoteLogManifest.getRemoteLogSize();
         int retrySendCommitTimes = 1;
@@ -371,7 +371,7 @@ public class LogTieringTask implements Runnable {
                                 new CommitRemoteLogManifestData(
                                         tableBucket,
                                         remoteLogManifestPath,
-                                        newRemoteLogStartOffset,
+                                        newLogicalStartOffset,
                                         newRemoteLogEndOffset,
                                         newRemoteLogManifest.getHighestCopiedEndOffset(),
                                         // TODO: manifest snapshot should include the epoch info,
@@ -395,7 +395,7 @@ public class LogTieringTask implements Runnable {
                     // TODO: commit with version to avoid the manifest has been updated
                     remoteLogTablet.loadRemoteLogManifest(newRemoteLogManifest);
                     LogTablet logTablet = replica.getLogTablet();
-                    logTablet.updateRemoteLogStartOffset(newRemoteLogStartOffset);
+                    logTablet.updateRemoteLogLogicalStartOffset(newLogicalStartOffset);
                     logTablet.updateHighestCopiedEndOffset(
                             newRemoteLogManifest.getHighestCopiedEndOffset());
                     // make the local log cleaner clean log segments that are committed to remote.

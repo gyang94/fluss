@@ -359,7 +359,7 @@ public class CoordinatorRequestBatch {
     public void addNotifyRemoteLogOffsetsRequestForTabletServers(
             List<Integer> tabletServers,
             TableBucket tableBucket,
-            long remoteLogStartOffset,
+            long logicalStartOffset,
             long remoteLogEndOffset,
             long highestCopiedEndOffset) {
         tabletServers.stream()
@@ -370,7 +370,7 @@ public class CoordinatorRequestBatch {
                                         id,
                                         makeNotifyRemoteLogOffsetsRequest(
                                                 tableBucket,
-                                                remoteLogStartOffset,
+                                                logicalStartOffset,
                                                 remoteLogEndOffset,
                                                 highestCopiedEndOffset)));
     }

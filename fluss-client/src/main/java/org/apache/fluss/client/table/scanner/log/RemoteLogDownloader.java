@@ -312,7 +312,7 @@ public class RemoteLogDownloader implements Closeable {
         FsPath remotePath =
                 remoteLogSegmentFile(
                         remoteLogSegmentDir(remoteLogTabletDir, segment.remoteLogSegmentId()),
-                        segment.remoteLogStartOffset());
+                        segment.physicalStartOffset());
         return new FsPathAndFileName(remotePath, getLocalFileNameOfRemoteSegment(segment));
     }
 
@@ -328,7 +328,7 @@ public class RemoteLogDownloader implements Closeable {
     private static String getLocalFileNameOfRemoteSegment(RemoteLogSegment segment) {
         return segment.remoteLogSegmentId()
                 + "_"
-                + FlussPaths.filenamePrefixFromOffset(segment.remoteLogStartOffset())
+                + FlussPaths.filenamePrefixFromOffset(segment.physicalStartOffset())
                 + LOG_FILE_SUFFIX;
     }
 
@@ -371,8 +371,7 @@ public class RemoteLogDownloader implements Closeable {
         public int compareTo(RemoteLogDownloadRequest o) {
             if (segment.tableBucket().equals(o.segment.tableBucket())) {
                 // strictly download in the offset order if they belong to the same bucket
-                return Long.compare(
-                        segment.remoteLogStartOffset(), o.segment.remoteLogStartOffset());
+                return Long.compare(segment.physicalStartOffset(), o.segment.physicalStartOffset());
             } else {
                 // download segment from old to new across buckets
                 return Long.compare(segment.maxTimestamp(), o.segment.maxTimestamp());

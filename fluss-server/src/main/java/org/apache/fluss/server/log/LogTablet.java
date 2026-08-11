@@ -120,8 +120,8 @@ public final class LogTablet {
     // The minimum offset that should be retained in the local log. This is used to ensure that,
     // the offset of kv snapshot should be retained, otherwise, kv recovery will fail.
     private volatile long minRetainOffset;
-    // tracking the log start offset in remote storage
-    private volatile long remoteLogStartOffset = Long.MAX_VALUE;
+    // tracking the logical start offset exposed by the current remote log manifest
+    private volatile long remoteLogLogicalStartOffset = Long.MAX_VALUE;
     // tracking the log end offset in remote storage
     private volatile long remoteLogEndOffset = -1L;
     // tracking the highest exclusive offset successfully copied to remote storage
@@ -216,12 +216,13 @@ public final class LogTablet {
     }
 
     public boolean canFetchFromRemoteLog(long fetchOffset) {
-        return remoteLogStartOffset <= fetchOffset && fetchOffset < remoteLogEndOffset;
+        return remoteLogLogicalStartOffset <= fetchOffset && fetchOffset < remoteLogEndOffset;
     }
 
     /** The available start offset of the log tablet, maybe on local log or remote log. */
     public long logStartOffset() {
-        return Math.min(Math.min(localLogStartOffset(), remoteLogStartOffset), lakeLogStartOffset);
+        return Math.min(
+                Math.min(localLogStartOffset(), remoteLogLogicalStartOffset), lakeLogStartOffset);
     }
 
     public long localLogStartOffset() {
@@ -625,10 +626,11 @@ public final class LogTablet {
         return findOffset;
     }
 
-    public void updateRemoteLogStartOffset(long remoteLogStartOffset) {
-        long prev = this.remoteLogStartOffset;
-        if (prev == Long.MAX_VALUE || remoteLogStartOffset > prev) {
-            this.remoteLogStartOffset = remoteLogStartOffset;
+    public void updateRemoteLogLogicalStartOffset(long logicalStartOffset) {
+        long previousLogicalStartOffset = this.remoteLogLogicalStartOffset;
+        if (previousLogicalStartOffset == Long.MAX_VALUE
+                || logicalStartOffset > previousLogicalStartOffset) {
+            this.remoteLogLogicalStartOffset = logicalStartOffset;
         }
     }
 

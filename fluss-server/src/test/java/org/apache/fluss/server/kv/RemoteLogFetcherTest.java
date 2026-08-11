@@ -148,9 +148,9 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
                 copyLogSegmentToRemote(oldLeaderLog, remoteLogStorage, 0);
         RemoteLogSegment newLeaderSegment =
                 copySegmentToRemoteForBucket(newLeaderLog, 1, targetBucket);
-        assertThat(oldLeaderSegment.remoteLogStartOffset()).isZero();
+        assertThat(oldLeaderSegment.physicalStartOffset()).isZero();
         assertThat(oldLeaderSegment.remoteLogEndOffset()).isEqualTo(20L);
-        assertThat(newLeaderSegment.remoteLogStartOffset()).isEqualTo(10L);
+        assertThat(newLeaderSegment.physicalStartOffset()).isEqualTo(10L);
         assertThat(newLeaderSegment.remoteLogEndOffset()).isEqualTo(30L);
 
         RemoteLogManifest manifest =
@@ -232,7 +232,7 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
         assertThat(segments).hasSizeGreaterThanOrEqualTo(2);
 
         // Use the start offset of the second segment as localLogStartOffset.
-        long localLogStartOffset = segments.get(1).remoteLogStartOffset();
+        long localLogStartOffset = segments.get(1).physicalStartOffset();
 
         File logTabletDir = logTablet.getLogDir();
         try (RemoteLogFetcher fetcher = newFetcher(tb, logTabletDir)) {
@@ -368,7 +368,7 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
         assertThat(segments).isNotEmpty();
 
         // Empty range [x, x) — guards against advance() >= being changed to >.
-        long sameOffset = segments.get(0).remoteLogStartOffset();
+        long sameOffset = segments.get(0).physicalStartOffset();
 
         File logTabletDir = logTablet.getLogDir();
         try (RemoteLogFetcher fetcher = newFetcher(tb, logTabletDir)) {
@@ -967,7 +967,7 @@ class RemoteLogFetcherTest extends RemoteLogTestBase {
         RemoteLogSegment remoteSegment =
                 RemoteLogSegment.Builder.builder()
                         .remoteLogSegmentId(UUID.randomUUID())
-                        .remoteLogStartOffset(sourceSegment.getBaseOffset())
+                        .physicalStartOffset(sourceSegment.getBaseOffset())
                         .remoteLogEndOffset(nextOffset)
                         .maxTimestamp(sourceSegment.maxTimestampSoFar())
                         .segmentSizeInBytes(sourceSegment.getFileLogRecords().sizeInBytes())

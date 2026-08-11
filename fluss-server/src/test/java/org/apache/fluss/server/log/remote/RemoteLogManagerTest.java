@@ -91,7 +91,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         RemoteLogTablet remoteLogTablet = remoteLogManager.remoteLogTablet(tb);
         assertThat(remoteLogTablet).isNotNull();
         assertThat(remoteLogTablet.allRemoteLogSegments()).isEmpty();
-        assertThat(remoteLogTablet.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
+        assertThat(remoteLogTablet.getLogicalStartOffset()).isEqualTo(Long.MAX_VALUE);
         assertThat(remoteLogTablet.getRemoteLogEndOffset()).isNotPresent();
 
         // verify upload log segment to remote.
@@ -247,7 +247,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         assertThat(remoteLogSegments)
                 .hasSize(4)
                 .allSatisfy(s -> assertThat(s.maxTimestamp()).isEqualTo(ts1));
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(40L);
         // check remote storage has the files
         assertThat(listRemoteLogFiles(tb))
@@ -263,7 +263,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
 
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
         assertThat(remoteLog.allRemoteLogSegments()).isEqualTo(remoteLogSegments);
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(40L);
         // remote storage should not delete files
         assertThat(listRemoteLogFiles(tb))
@@ -290,7 +290,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
         assertThat(remoteLogSegments)
                 .hasSize(4)
                 .allSatisfy(s -> assertThat(s.maxTimestamp()).isEqualTo(ts1));
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(40L);
         // check remote storage has the files
         assertThat(listRemoteLogFiles(tb))
@@ -306,7 +306,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
 
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
         assertThat(remoteLog.allRemoteLogSegments()).isEqualTo(remoteLogSegments);
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(40L);
         // remote storage should not delete files
         assertThat(listRemoteLogFiles(tb))
@@ -705,7 +705,7 @@ class RemoteLogManagerTest extends RemoteLogTestBase {
                                                 remoteLogManager.lookupOffsetForTimestamp(
                                                         tb, remoteLogSegment.maxTimestamp()))
                                         .isLessThan(remoteLogSegment.remoteLogEndOffset())
-                                        .isGreaterThan(remoteLogSegment.remoteLogStartOffset()));
+                                        .isGreaterThan(remoteLogSegment.physicalStartOffset()));
         assertThat(remoteLogManager.lookupOffsetForTimestamp(tb, startTimestamp + 5000))
                 .isEqualTo(-1L);
     }

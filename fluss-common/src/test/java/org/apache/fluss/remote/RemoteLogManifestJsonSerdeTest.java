@@ -45,7 +45,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                     .tableBucket(TABLE_BUCKET1)
                                     .remoteLogSegmentId(
                                             UUID.fromString("a4421366-4a1d-4c3b-a0f8-0be2e77b1368"))
-                                    .remoteLogStartOffset(0)
+                                    .physicalStartOffset(0)
                                     .remoteLogEndOffset(9)
                                     .maxTimestamp(1722225103853L)
                                     .segmentSizeInBytes(2850)
@@ -55,7 +55,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                     .tableBucket(TABLE_BUCKET1)
                                     .remoteLogSegmentId(
                                             UUID.fromString("dbfd0ade-23d9-411a-ac05-81e5fe1cabd5"))
-                                    .remoteLogStartOffset(100023)
+                                    .physicalStartOffset(100023)
                                     .remoteLogEndOffset(Long.MAX_VALUE)
                                     .maxTimestamp(Long.MAX_VALUE)
                                     .segmentSizeInBytes(Integer.MAX_VALUE)
@@ -75,7 +75,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                     .tableBucket(TABLE_BUCKET2)
                                     .remoteLogSegmentId(
                                             UUID.fromString("6e94fbd1-c056-446e-859c-77345dddcd96"))
-                                    .remoteLogStartOffset(10)
+                                    .physicalStartOffset(10)
                                     .remoteLogEndOffset(20)
                                     .maxTimestamp(1722225103853L)
                                     .segmentSizeInBytes(2850)
@@ -85,7 +85,7 @@ class RemoteLogManifestJsonSerdeTest extends JsonSerdeTestBase<RemoteLogManifest
                                     .tableBucket(TABLE_BUCKET2)
                                     .remoteLogSegmentId(
                                             UUID.fromString("22901b01-250f-4114-9b01-1a840dd28f4f"))
-                                    .remoteLogStartOffset(200023)
+                                    .physicalStartOffset(200023)
                                     .remoteLogEndOffset(Long.MAX_VALUE)
                                     .maxTimestamp(Long.MAX_VALUE)
                                     .segmentSizeInBytes(Integer.MAX_VALUE)

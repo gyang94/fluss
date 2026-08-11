@@ -104,15 +104,15 @@ class RemoteLogTabletTest extends RemoteLogTestBase {
                         createLogSegmentWithMaxTimestamp(logTablet, 40, 30, 40),
                         createLogSegmentWithMaxTimestamp(logTablet, 50, 40, 50)));
 
-        assertThat(remoteLogTablet.findSegmentsByTimestamp(0L).get(0).remoteLogStartOffset())
+        assertThat(remoteLogTablet.findSegmentsByTimestamp(0L).get(0).physicalStartOffset())
                 .isEqualTo(0L);
-        assertThat(remoteLogTablet.findSegmentsByTimestamp(1L).get(0).remoteLogStartOffset())
+        assertThat(remoteLogTablet.findSegmentsByTimestamp(1L).get(0).physicalStartOffset())
                 .isEqualTo(0L);
-        assertThat(remoteLogTablet.findSegmentsByTimestamp(10L).get(0).remoteLogStartOffset())
+        assertThat(remoteLogTablet.findSegmentsByTimestamp(10L).get(0).physicalStartOffset())
                 .isEqualTo(0L);
-        assertThat(remoteLogTablet.findSegmentsByTimestamp(40L).get(0).remoteLogStartOffset())
+        assertThat(remoteLogTablet.findSegmentsByTimestamp(40L).get(0).physicalStartOffset())
                 .isEqualTo(30L);
-        assertThat(remoteLogTablet.findSegmentsByTimestamp(50L).get(0).remoteLogStartOffset())
+        assertThat(remoteLogTablet.findSegmentsByTimestamp(50L).get(0).physicalStartOffset())
                 .isEqualTo(40L);
         assertThat(remoteLogTablet.findSegmentsByTimestamp(51L)).isEmpty();
     }
@@ -151,11 +151,11 @@ class RemoteLogTabletTest extends RemoteLogTestBase {
     RemoteLogSegment createLogSegmentWithMaxTimestamp(
             LogTablet logTablet,
             long timestamp,
-            long remoteLogStartOffset,
+            long physicalStartOffset,
             long remoteLogEndOffset) {
         return RemoteLogSegment.Builder.builder()
                 .remoteLogSegmentId(UUID.randomUUID())
-                .remoteLogStartOffset(remoteLogStartOffset)
+                .physicalStartOffset(physicalStartOffset)
                 .remoteLogEndOffset(remoteLogEndOffset)
                 .maxTimestamp(timestamp)
                 .segmentSizeInBytes(1000)

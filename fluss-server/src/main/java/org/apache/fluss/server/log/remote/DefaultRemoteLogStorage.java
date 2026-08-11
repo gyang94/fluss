@@ -143,7 +143,7 @@ public class DefaultRemoteLogStorage implements RemoteLogStorage {
         LOG.debug("Deleting log segment and indexes for : {}", remoteLogSegment);
         try {
             FsPath segmentDir = remoteLogSegmentDir(remoteLogDir, remoteLogSegment);
-            long baseOffset = remoteLogSegment.remoteLogStartOffset();
+            long baseOffset = remoteLogSegment.physicalStartOffset();
             FsPath logFile = remoteLogSegmentFile(segmentDir, baseOffset);
             FsPath offsetIndex = remoteLogIndexFile(segmentDir, baseOffset, INDEX_FILE_SUFFIX);
             FsPath timeIndex = remoteLogIndexFile(segmentDir, baseOffset, TIME_INDEX_FILE_SUFFIX);
@@ -194,7 +194,7 @@ public class DefaultRemoteLogStorage implements RemoteLogStorage {
     public InputStream fetchLogData(RemoteLogSegment remoteLogSegment)
             throws RemoteStorageException {
         FsPath segmentDir = remoteLogSegmentDir(remoteLogDir, remoteLogSegment);
-        FsPath logFile = remoteLogSegmentFile(segmentDir, remoteLogSegment.remoteLogStartOffset());
+        FsPath logFile = remoteLogSegmentFile(segmentDir, remoteLogSegment.physicalStartOffset());
         try {
             return fileSystem.open(logFile);
         } catch (IOException e) {

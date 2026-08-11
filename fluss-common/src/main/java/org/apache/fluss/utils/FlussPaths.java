@@ -371,7 +371,7 @@ public class FlussPaths {
      * @param segment the remote log segment for the offset index.
      */
     public static File remoteOffsetIndexCacheFile(File cacheDir, RemoteLogSegment segment) {
-        String prefix = segment.remoteLogStartOffset() + "_" + segment.remoteLogSegmentId();
+        String prefix = segment.physicalStartOffset() + "_" + segment.remoteLogSegmentId();
         return new File(cacheDir, prefix + INDEX_FILE_SUFFIX);
     }
 
@@ -388,7 +388,7 @@ public class FlussPaths {
      * @param segment the remote log segment for the offset index.
      */
     public static File remoteTimeIndexCacheFile(File cacheDir, RemoteLogSegment segment) {
-        String prefix = segment.remoteLogStartOffset() + "_" + segment.remoteLogSegmentId();
+        String prefix = segment.physicalStartOffset() + "_" + segment.remoteLogSegmentId();
         return new File(cacheDir, prefix + TIME_INDEX_FILE_SUFFIX);
     }
 
@@ -522,7 +522,7 @@ public class FlussPaths {
                                 remoteLogSegment.physicalTablePath(),
                                 remoteLogSegment.tableBucket()),
                         remoteLogSegment.remoteLogSegmentId()),
-                remoteLogSegment.remoteLogStartOffset(),
+                remoteLogSegment.physicalStartOffset(),
                 indexSuffix);
     }
 

@@ -112,7 +112,7 @@ final class LogTabletTest extends LogTestBase {
 
     @Test
     void testRemoteLogEndOffsetCanReset() {
-        logTablet.updateRemoteLogStartOffset(0L);
+        logTablet.updateRemoteLogLogicalStartOffset(0L);
         logTablet.updateRemoteLogEndOffset(10L);
         assertThat(logTablet.canFetchFromRemoteLog(0L)).isTrue();
 

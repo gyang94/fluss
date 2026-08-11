@@ -180,7 +180,7 @@ public class CommonRpcMessageUtils {
                                             UUID.fromString(
                                                     pbRemoteLogSegment.getRemoteLogSegmentId()))
                                     .remoteLogEndOffset(pbRemoteLogSegment.getRemoteLogEndOffset())
-                                    .remoteLogStartOffset(
+                                    .physicalStartOffset(
                                             pbRemoteLogSegment.getRemoteLogStartOffset())
                                     .segmentSizeInBytes(pbRemoteLogSegment.getSegmentSizeInBytes())
                                     .maxTimestamp(maxTimestamp)

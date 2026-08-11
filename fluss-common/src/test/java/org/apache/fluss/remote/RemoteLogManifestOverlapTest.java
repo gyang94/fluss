@@ -88,7 +88,7 @@ class RemoteLogManifestOverlapTest {
                 .extracting(
                         segment ->
                                 Arrays.asList(
-                                        segment.remoteLogStartOffset(),
+                                        segment.physicalStartOffset(),
                                         segment.remoteLogEndOffset(),
                                         segment.logicalStartOffset(),
                                         segment.logicalEndOffset()))
@@ -153,7 +153,7 @@ class RemoteLogManifestOverlapTest {
 
         assertThat(result.getRemoteLogSegmentList())
                 .containsExactly(replacement.withLogicalRange(10L, 25L));
-        assertThat(result.getRemoteLogStartOffset()).isEqualTo(5L);
+        assertThat(result.getLogicalStartOffset()).isEqualTo(10L);
         assertThat(result.getRemoteLogEndOffset()).isEqualTo(25L);
     }
 
@@ -201,7 +201,7 @@ class RemoteLogManifestOverlapTest {
                 .physicalTablePath(TABLE_PATH)
                 .tableBucket(TABLE_BUCKET)
                 .remoteLogSegmentId(UUID.randomUUID())
-                .remoteLogStartOffset(startOffset)
+                .physicalStartOffset(startOffset)
                 .remoteLogEndOffset(endOffset)
                 .maxTimestamp(1L)
                 .segmentSizeInBytes(10)

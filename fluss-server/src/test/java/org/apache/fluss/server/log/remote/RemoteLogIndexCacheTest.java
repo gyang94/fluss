@@ -64,12 +64,12 @@ class RemoteLogIndexCacheTest extends RemoteLogTestBase {
         Path offsetIndexPath = entry.offsetIndex().file().toPath();
         Path timeIndexPath = entry.timeIndex().file().toPath();
         String expectedOffsetIndexFileName =
-                remoteLogSegment.remoteLogStartOffset()
+                remoteLogSegment.physicalStartOffset()
                         + "_"
                         + remoteLogSegment.remoteLogSegmentId()
                         + ".index";
         String expectedTimestampFileName =
-                remoteLogSegment.remoteLogStartOffset()
+                remoteLogSegment.physicalStartOffset()
                         + "_"
                         + remoteLogSegment.remoteLogSegmentId()
                         + ".timeindex";

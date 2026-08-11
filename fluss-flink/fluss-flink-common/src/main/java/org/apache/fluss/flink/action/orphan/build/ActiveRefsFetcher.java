@@ -306,7 +306,7 @@ public final class ActiveRefsFetcher {
         Set<String> relativePaths = new HashSet<>();
         for (RemoteLogSegment segment : manifest.getRemoteLogSegmentList()) {
             String segmentId = segment.remoteLogSegmentId().toString();
-            long startOffset = segment.remoteLogStartOffset();
+            long startOffset = segment.physicalStartOffset();
             long endOffset = segment.remoteLogEndOffset();
             String baseOffset = FlussPaths.filenamePrefixFromOffset(startOffset);
             String writerOffset = FlussPaths.filenamePrefixFromOffset(endOffset);

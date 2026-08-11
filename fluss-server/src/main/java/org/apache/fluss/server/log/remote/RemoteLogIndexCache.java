@@ -189,7 +189,7 @@ public class RemoteLogIndexCache implements Closeable {
     /**
      * Get the base offset of the given timestamp and startingOffset in the remote log segment. If
      * the timestamp lower than the smallest commit timestamp in this segment, return the
-     * remoteLogStartOffset.
+     * physicalStartOffset.
      */
     public long lookupOffsetForTimestamp(RemoteLogSegment remoteLogSegment, long timestamp) {
         return inReadLock(
@@ -223,7 +223,7 @@ public class RemoteLogIndexCache implements Closeable {
     }
 
     private Entry createCacheEntry(RemoteLogSegment remoteLogSegment) {
-        long startOffset = remoteLogSegment.remoteLogStartOffset();
+        long startOffset = remoteLogSegment.physicalStartOffset();
         try {
             File offsetIndexFile = remoteOffsetIndexCacheFile(cacheDir, remoteLogSegment);
             OffsetIndex offsetIndex =

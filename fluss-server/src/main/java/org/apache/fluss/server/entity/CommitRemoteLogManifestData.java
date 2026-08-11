@@ -32,8 +32,8 @@ public class CommitRemoteLogManifestData {
     /** The location where the remote log manifest is stored in remote storage. */
     private final FsPath remoteLogManifestPath;
 
-    /** The start offset of the remote log. */
-    private final long remoteLogStartOffset;
+    /** The first offset exposed by the manifest's logical segment ranges. */
+    private final long remoteLogLogicalStartOffset;
 
     /** The end offset of the remote log. */
     private final long remoteLogEndOffset;
@@ -50,14 +50,14 @@ public class CommitRemoteLogManifestData {
     public CommitRemoteLogManifestData(
             TableBucket tableBucket,
             FsPath remoteLogManifestPath,
-            long remoteLogStartOffset,
+            long remoteLogLogicalStartOffset,
             long remoteLogEndOffset,
             int coordinatorEpoch,
             int bucketLeaderEpoch) {
         this(
                 tableBucket,
                 remoteLogManifestPath,
-                remoteLogStartOffset,
+                remoteLogLogicalStartOffset,
                 remoteLogEndOffset,
                 remoteLogEndOffset,
                 coordinatorEpoch,
@@ -67,14 +67,14 @@ public class CommitRemoteLogManifestData {
     public CommitRemoteLogManifestData(
             TableBucket tableBucket,
             FsPath remoteLogManifestPath,
-            long remoteLogStartOffset,
+            long remoteLogLogicalStartOffset,
             long remoteLogEndOffset,
             long highestCopiedEndOffset,
             int coordinatorEpoch,
             int bucketLeaderEpoch) {
         this.tableBucket = tableBucket;
         this.remoteLogManifestPath = remoteLogManifestPath;
-        this.remoteLogStartOffset = remoteLogStartOffset;
+        this.remoteLogLogicalStartOffset = remoteLogLogicalStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
         this.highestCopiedEndOffset = highestCopiedEndOffset;
         this.coordinatorEpoch = coordinatorEpoch;
@@ -89,8 +89,8 @@ public class CommitRemoteLogManifestData {
         return remoteLogManifestPath;
     }
 
-    public long getRemoteLogStartOffset() {
-        return remoteLogStartOffset;
+    public long getRemoteLogLogicalStartOffset() {
+        return remoteLogLogicalStartOffset;
     }
 
     public long getRemoteLogEndOffset() {

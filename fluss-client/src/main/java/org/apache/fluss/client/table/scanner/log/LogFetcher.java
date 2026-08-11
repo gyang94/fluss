@@ -541,7 +541,7 @@ public class LogFetcher implements Closeable {
             RemoteLogSegment segment = remoteLogSegments.get(i);
             if (i > 0) {
                 posInLogSegment = 0;
-                fetchOffset = segment.remoteLogStartOffset();
+                fetchOffset = segment.physicalStartOffset();
             }
             RemoteLogDownloadFuture downloadFuture =
                     remoteLogDownloader.requestRemoteLog(remoteLogTabletDir, segment);

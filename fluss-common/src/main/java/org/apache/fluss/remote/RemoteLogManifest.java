@@ -96,7 +96,7 @@ public class RemoteLogManifest {
         newSegments.sort(Comparator.comparingLong(RemoteLogSegment::logicalStartOffset));
 
         List<RemoteLogSegment> sortedAddedSegments = new ArrayList<>(addedSegments);
-        sortedAddedSegments.sort(Comparator.comparingLong(RemoteLogSegment::remoteLogStartOffset));
+        sortedAddedSegments.sort(Comparator.comparingLong(RemoteLogSegment::physicalStartOffset));
         long newHighestCopiedEndOffset = highestCopiedEndOffset;
         for (RemoteLogSegment addedSegment : sortedAddedSegments) {
             newHighestCopiedEndOffset =
@@ -111,17 +111,16 @@ public class RemoteLogManifest {
             if (addedSegment.remoteLogEndOffset() <= currentEndOffset) {
                 continue;
             }
-            if (addedSegment.remoteLogStartOffset() > currentEndOffset) {
+            if (addedSegment.physicalStartOffset() > currentEndOffset) {
                 throw new IllegalArgumentException(
                         String.format(
                                 "Remote log segment [%s, %s) introduces a gap after logical end %s",
-                                addedSegment.remoteLogStartOffset(),
+                                addedSegment.physicalStartOffset(),
                                 addedSegment.remoteLogEndOffset(),
                                 currentEndOffset));
             }
 
-            long insertionOffset =
-                    Math.max(addedSegment.remoteLogStartOffset(), currentStartOffset);
+            long insertionOffset = Math.max(addedSegment.physicalStartOffset(), currentStartOffset);
             List<RemoteLogSegment> mergedSegments = new ArrayList<>();
             for (RemoteLogSegment currentSegment : newSegments) {
                 if (currentSegment.logicalEndOffset() <= insertionOffset) {
@@ -142,11 +141,12 @@ public class RemoteLogManifest {
                 physicalTablePath, tableBucket, newSegments, newHighestCopiedEndOffset);
     }
 
-    public long getRemoteLogStartOffset() {
+    /** Returns the first offset exposed by the manifest's logical segment ranges. */
+    public long getLogicalStartOffset() {
         long startOffset = Long.MAX_VALUE;
         for (RemoteLogSegment remoteLogSegment : remoteLogSegmentList) {
-            if (remoteLogSegment.remoteLogStartOffset() < startOffset) {
-                startOffset = remoteLogSegment.remoteLogStartOffset();
+            if (remoteLogSegment.logicalStartOffset() < startOffset) {
+                startOffset = remoteLogSegment.logicalStartOffset();
             }
         }
         return startOffset;

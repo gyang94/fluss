@@ -120,7 +120,7 @@ public class RemoteLogTestBase extends ReplicaTestBase {
         RemoteLogSegment remoteLogSegment =
                 RemoteLogSegment.Builder.builder()
                         .remoteLogSegmentId(remoteLogSegmentId)
-                        .remoteLogStartOffset(segment.getBaseOffset())
+                        .physicalStartOffset(segment.getBaseOffset())
                         .remoteLogEndOffset(nextOffset)
                         .maxTimestamp(segment.maxTimestampSoFar())
                         .segmentSizeInBytes(segment.getFileLogRecords().sizeInBytes())
@@ -146,7 +146,7 @@ public class RemoteLogTestBase extends ReplicaTestBase {
                             try {
                                 return RemoteLogSegment.Builder.builder()
                                         .remoteLogSegmentId(UUID.randomUUID())
-                                        .remoteLogStartOffset(segment.getBaseOffset())
+                                        .physicalStartOffset(segment.getBaseOffset())
                                         .remoteLogEndOffset(segment.getBaseOffset() + DATA1.size())
                                         .maxTimestamp(segment.maxTimestampSoFar())
                                         .segmentSizeInBytes(

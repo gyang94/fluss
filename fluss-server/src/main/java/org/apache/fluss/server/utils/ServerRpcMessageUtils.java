@@ -1032,7 +1032,7 @@ public class ServerRpcMessageUtils {
                     for (RemoteLogSegment logSegment : rlfInfo.remoteLogSegmentList()) {
                         PbRemoteLogSegment pbRemoteLogSegment =
                                 new PbRemoteLogSegment()
-                                        .setRemoteLogStartOffset(logSegment.remoteLogStartOffset())
+                                        .setRemoteLogStartOffset(logSegment.physicalStartOffset())
                                         .setRemoteLogSegmentId(
                                                 logSegment.remoteLogSegmentId().toString())
                                         .setRemoteLogEndOffset(logSegment.remoteLogEndOffset())
@@ -1702,7 +1702,8 @@ public class ServerRpcMessageUtils {
                 .setBucketId(tb.getBucket())
                 .setRemoteLogManifestPath(
                         commitRemoteLogManifestData.getRemoteLogManifestPath().toString())
-                .setRemoteLogStartOffset(commitRemoteLogManifestData.getRemoteLogStartOffset())
+                .setRemoteLogStartOffset(
+                        commitRemoteLogManifestData.getRemoteLogLogicalStartOffset())
                 .setRemoteLogEndOffset(commitRemoteLogManifestData.getRemoteLogEndOffset())
                 .setHighestCopiedEndOffset(commitRemoteLogManifestData.getHighestCopiedEndOffset())
                 .setCoordinatorEpoch(commitRemoteLogManifestData.getCoordinatorEpoch())
@@ -1711,14 +1712,14 @@ public class ServerRpcMessageUtils {
     }
 
     public static NotifyRemoteLogOffsetsRequest makeNotifyRemoteLogOffsetsRequest(
-            TableBucket tableBucket, long remoteLogStartOffset, long remoteLogEndOffset) {
+            TableBucket tableBucket, long logicalStartOffset, long remoteLogEndOffset) {
         return makeNotifyRemoteLogOffsetsRequest(
-                tableBucket, remoteLogStartOffset, remoteLogEndOffset, remoteLogEndOffset);
+                tableBucket, logicalStartOffset, remoteLogEndOffset, remoteLogEndOffset);
     }
 
     public static NotifyRemoteLogOffsetsRequest makeNotifyRemoteLogOffsetsRequest(
             TableBucket tableBucket,
-            long remoteLogStartOffset,
+            long logicalStartOffset,
             long remoteLogEndOffset,
             long highestCopiedEndOffset) {
         NotifyRemoteLogOffsetsRequest request = new NotifyRemoteLogOffsetsRequest();
@@ -1727,7 +1728,7 @@ public class ServerRpcMessageUtils {
         }
         request.setTableId(tableBucket.getTableId())
                 .setBucketId(tableBucket.getBucket())
-                .setRemoteStartOffset(remoteLogStartOffset)
+                .setRemoteStartOffset(logicalStartOffset)
                 .setRemoteEndOffset(remoteLogEndOffset)
                 .setHighestCopiedEndOffset(highestCopiedEndOffset);
         return request;

@@ -43,7 +43,7 @@ public class RemoteLogSegment {
     private final UUID remoteLogSegmentId;
 
     /** Inclusive physical start offset of this segment. */
-    private final long remoteLogStartOffset;
+    private final long physicalStartOffset;
 
     /** Exclusive physical end offset of this segment. */
     private final long remoteLogEndOffset;
@@ -63,7 +63,7 @@ public class RemoteLogSegment {
             PhysicalTablePath physicalTablePath,
             TableBucket tableBucket,
             UUID remoteLogSegmentId,
-            long remoteLogStartOffset,
+            long physicalStartOffset,
             long remoteLogEndOffset,
             @Nullable Long logicalStartOffset,
             @Nullable Long logicalEndOffset,
@@ -73,27 +73,27 @@ public class RemoteLogSegment {
         this.tableBucket = checkNotNull(tableBucket);
         this.remoteLogSegmentId = checkNotNull(remoteLogSegmentId);
 
-        if (remoteLogStartOffset < 0) {
+        if (physicalStartOffset < 0) {
             throw new IllegalArgumentException(
                     "Unexpected start offset: "
-                            + remoteLogStartOffset
+                            + physicalStartOffset
                             + ". StartOffset for a tiered segment cannot be negative");
         }
-        this.remoteLogStartOffset = remoteLogStartOffset;
+        this.physicalStartOffset = physicalStartOffset;
 
-        if (remoteLogEndOffset <= remoteLogStartOffset) {
+        if (remoteLogEndOffset <= physicalStartOffset) {
             throw new IllegalArgumentException(
                     "Unexpected remote log end offset: "
                             + remoteLogEndOffset
                             + ". The exclusive end offset for a remote segment must be greater "
                             + "than its start offset: "
-                            + remoteLogStartOffset);
+                            + physicalStartOffset);
         }
         this.remoteLogEndOffset = remoteLogEndOffset;
         this.logicalStartOffset =
-                logicalStartOffset == null ? remoteLogStartOffset : logicalStartOffset;
+                logicalStartOffset == null ? physicalStartOffset : logicalStartOffset;
         this.logicalEndOffset = logicalEndOffset == null ? remoteLogEndOffset : logicalEndOffset;
-        if (this.logicalStartOffset < remoteLogStartOffset
+        if (this.logicalStartOffset < physicalStartOffset
                 || this.logicalStartOffset >= this.logicalEndOffset
                 || this.logicalEndOffset > remoteLogEndOffset) {
             throw new IllegalArgumentException(
@@ -102,7 +102,7 @@ public class RemoteLogSegment {
                                     + "[%s, %s)",
                             this.logicalStartOffset,
                             this.logicalEndOffset,
-                            remoteLogStartOffset,
+                            physicalStartOffset,
                             remoteLogEndOffset));
         }
         this.maxTimestamp = maxTimestamp;
@@ -124,8 +124,8 @@ public class RemoteLogSegment {
     /**
      * @return physical start offset of this segment (inclusive)
      */
-    public long remoteLogStartOffset() {
-        return remoteLogStartOffset;
+    public long physicalStartOffset() {
+        return physicalStartOffset;
     }
 
     /**
@@ -156,7 +156,7 @@ public class RemoteLogSegment {
                 physicalTablePath,
                 tableBucket,
                 remoteLogSegmentId,
-                remoteLogStartOffset,
+                physicalStartOffset,
                 remoteLogEndOffset,
                 logicalStartOffset,
                 logicalEndOffset,
@@ -181,7 +181,7 @@ public class RemoteLogSegment {
             return false;
         }
         RemoteLogSegment that = (RemoteLogSegment) o;
-        return remoteLogStartOffset == that.remoteLogStartOffset
+        return physicalStartOffset == that.physicalStartOffset
                 && remoteLogEndOffset == that.remoteLogEndOffset
                 && logicalStartOffset == that.logicalStartOffset
                 && logicalEndOffset == that.logicalEndOffset
@@ -198,7 +198,7 @@ public class RemoteLogSegment {
                 physicalTablePath,
                 tableBucket,
                 remoteLogSegmentId,
-                remoteLogStartOffset,
+                physicalStartOffset,
                 remoteLogEndOffset,
                 logicalStartOffset,
                 logicalEndOffset,
@@ -215,8 +215,8 @@ public class RemoteLogSegment {
                 + tableBucket
                 + ", remoteLogSegmentId="
                 + remoteLogSegmentId
-                + ", remoteLogStartOffset="
-                + remoteLogStartOffset
+                + ", physicalStartOffset="
+                + physicalStartOffset
                 + ", remoteLogEndOffset="
                 + remoteLogEndOffset
                 + ", logicalStartOffset="
@@ -235,7 +235,7 @@ public class RemoteLogSegment {
         private PhysicalTablePath physicalTablePath;
         private TableBucket tableBucket;
         private UUID remoteLogSegmentId;
-        private long remoteLogStartOffset;
+        private long physicalStartOffset;
         private long remoteLogEndOffset;
         private @Nullable Long logicalStartOffset;
         private @Nullable Long logicalEndOffset;
@@ -251,8 +251,8 @@ public class RemoteLogSegment {
             return this;
         }
 
-        public Builder remoteLogStartOffset(long startOffset) {
-            this.remoteLogStartOffset = startOffset;
+        public Builder physicalStartOffset(long physicalStartOffset) {
+            this.physicalStartOffset = physicalStartOffset;
             return this;
         }
 
@@ -296,7 +296,7 @@ public class RemoteLogSegment {
                     physicalTablePath,
                     tableBucket,
                     remoteLogSegmentId,
-                    remoteLogStartOffset,
+                    physicalStartOffset,
                     remoteLogEndOffset,
                     logicalStartOffset,
                     logicalEndOffset,

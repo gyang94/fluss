@@ -23,19 +23,19 @@ import org.apache.fluss.rpc.messages.NotifyRemoteLogOffsetsRequest;
 /** The data for request {@link NotifyRemoteLogOffsetsRequest}. */
 public class NotifyRemoteLogOffsetsData {
     private final TableBucket tableBucket;
-    private final long remoteLogStartOffset;
+    private final long remoteLogLogicalStartOffset;
     private final long remoteLogEndOffset;
     private final long highestCopiedEndOffset;
     private final int coordinatorEpoch;
 
     public NotifyRemoteLogOffsetsData(
             TableBucket tableBucket,
-            long remoteLogStartOffset,
+            long remoteLogLogicalStartOffset,
             long remoteLogEndOffset,
             int coordinatorEpoch) {
         this(
                 tableBucket,
-                remoteLogStartOffset,
+                remoteLogLogicalStartOffset,
                 remoteLogEndOffset,
                 remoteLogEndOffset,
                 coordinatorEpoch);
@@ -43,12 +43,12 @@ public class NotifyRemoteLogOffsetsData {
 
     public NotifyRemoteLogOffsetsData(
             TableBucket tableBucket,
-            long remoteLogStartOffset,
+            long remoteLogLogicalStartOffset,
             long remoteLogEndOffset,
             long highestCopiedEndOffset,
             int coordinatorEpoch) {
         this.tableBucket = tableBucket;
-        this.remoteLogStartOffset = remoteLogStartOffset;
+        this.remoteLogLogicalStartOffset = remoteLogLogicalStartOffset;
         this.remoteLogEndOffset = remoteLogEndOffset;
         this.highestCopiedEndOffset = highestCopiedEndOffset;
         this.coordinatorEpoch = coordinatorEpoch;
@@ -58,8 +58,8 @@ public class NotifyRemoteLogOffsetsData {
         return tableBucket;
     }
 
-    public long getRemoteLogStartOffset() {
-        return remoteLogStartOffset;
+    public long getRemoteLogLogicalStartOffset() {
+        return remoteLogLogicalStartOffset;
     }
 
     public long getRemoteLogEndOffset() {

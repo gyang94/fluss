@@ -281,7 +281,7 @@ class RemoteCompletedFetchTest {
                         .tableBucket(tableBucket)
                         .physicalTablePath(physicalTablePath)
                         .remoteLogSegmentId(segmentId)
-                        .remoteLogStartOffset(0L)
+                        .physicalStartOffset(0L)
                         .remoteLogEndOffset(9L)
                         .segmentSizeInBytes(Integer.MAX_VALUE)
                         .build();

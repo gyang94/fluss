@@ -68,7 +68,7 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
         RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
         assertThat(remoteLog.relevantRemoteLogSegments(0L).size()).isEqualTo(4);
         assertThat(remoteLog.allRemoteLogSegments().size()).isEqualTo(4);
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(40L);
 
         // Materialize the index cache entries for all remote log segments.
@@ -76,17 +76,17 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
                 remoteLogManager.getRemoteLogIndexCache(logTablet.getDataDir());
         for (RemoteLogSegment remoteLogSegment : remoteLog.allRemoteLogSegments()) {
             remoteLogManager.lookupPositionForOffset(
-                    remoteLogSegment, remoteLogSegment.remoteLogStartOffset());
+                    remoteLogSegment, remoteLogSegment.physicalStartOffset());
         }
         assertThat(indexCache.getInternalCache().asMap()).hasSize(4);
         RemoteLogSegment expiredSegment =
                 remoteLog.allRemoteLogSegments().stream()
-                        .filter(segment -> segment.remoteLogStartOffset() < 20L)
+                        .filter(segment -> segment.physicalStartOffset() < 20L)
                         .findFirst()
                         .get();
         RemoteLogSegment retainedSegment =
                 remoteLog.allRemoteLogSegments().stream()
-                        .filter(segment -> segment.remoteLogStartOffset() >= 20L)
+                        .filter(segment -> segment.physicalStartOffset() >= 20L)
                         .findFirst()
                         .get();
         Entry expiredIndexEntry =
@@ -103,7 +103,7 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
         // the expired segments should not be deleted.
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
         assertThat(remoteLog.allRemoteLogSegments()).hasSize(4);
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
 
         // set lake log end offset to 20, meaning only the first 2 segments
         // ([0,10) and [10,20)) have been tiered to lake
@@ -115,13 +115,13 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
         // only segments with remoteLogEndOffset <= 20 should be deleted (first 2 segments)
         // remaining segments: [20,30) and [30,40)
         assertThat(remoteLog.allRemoteLogSegments()).hasSize(2);
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(20L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(20L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(40L);
         // verify remaining segments have the expected offsets
         assertThat(remoteLog.allRemoteLogSegments())
                 .allSatisfy(
                         segment ->
-                                assertThat(segment.remoteLogStartOffset())
+                                assertThat(segment.physicalStartOffset())
                                         .isGreaterThanOrEqualTo(20L));
         assertThat(indexCache.getInternalCache().asMap())
                 .hasSize(2)
@@ -137,13 +137,13 @@ final class RemoteLogTTLTest extends RemoteLogTestBase {
         // trigger again, remaining expired segments should now be deleted
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
         assertThat(remoteLog.allRemoteLogSegments()).isEmpty();
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(Long.MAX_VALUE);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(Long.MAX_VALUE);
         assertThat(remoteLog.getHighestCopiedEndOffset()).isEqualTo(40L);
 
         // Fetch records from remote.
         // mock to update remote log end offset and remote log start offset as
         // NotifyRemoteLogOffsetsRequest do.
-        logTablet.updateRemoteLogStartOffset(40L);
+        logTablet.updateRemoteLogLogicalStartOffset(40L);
         logTablet.updateRemoteLogEndOffset(40L);
         CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> future =
                 new CompletableFuture<>();

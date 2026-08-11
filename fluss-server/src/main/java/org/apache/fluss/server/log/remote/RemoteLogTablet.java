@@ -49,7 +49,7 @@ import static org.apache.fluss.utils.concurrent.LockUtils.inWriteLock;
 /** This class provides an in-memory cache of remote log manifest for each table bucket . */
 @ThreadSafe
 public class RemoteLogTablet {
-    private static final long INIT_REMOTE_LOG_START_OFFSET = Long.MAX_VALUE;
+    private static final long INIT_LOGICAL_START_OFFSET = Long.MAX_VALUE;
     private static final long INIT_REMOTE_LOG_END_OFFSET = -1L;
 
     /**
@@ -82,10 +82,8 @@ public class RemoteLogTablet {
 
     private volatile int numRemoteLogSegments;
 
-    /**
-     * It represents the remote log start offset of the segments that have copied to remote storage.
-     */
-    private volatile long remoteLogStartOffset;
+    /** The first offset exposed by the current manifest's logical segment ranges. */
+    private volatile long logicalStartOffset;
 
     /**
      * It represents the remote log end offset of the segments that have copied to remote storage.
@@ -115,10 +113,10 @@ public class RemoteLogTablet {
                     metricGroup.gauge(
                             MetricNames.LOG_START_OFFSET,
                             () -> {
-                                if (remoteLogStartOffset == INIT_REMOTE_LOG_START_OFFSET) {
+                                if (logicalStartOffset == INIT_LOGICAL_START_OFFSET) {
                                     return -1L;
                                 }
-                                return remoteLogStartOffset;
+                                return logicalStartOffset;
                             });
                     metricGroup.gauge(MetricNames.LOG_END_OFFSET, () -> remoteLogEndOffset);
                     metricGroup.gauge(MetricNames.REMOTE_LOG_SIZE, this::getRemoteSizeInBytes);
@@ -274,7 +272,7 @@ public class RemoteLogTablet {
         long previousPhysicalEndOffset = -1L;
         for (RemoteLogSegment segment : relevantSegments) {
             if (!contiguousPrefix.isEmpty()
-                    && segment.remoteLogStartOffset() != previousPhysicalEndOffset) {
+                    && segment.physicalStartOffset() != previousPhysicalEndOffset) {
                 break;
             }
             contiguousPrefix.add(segment);
@@ -283,8 +281,8 @@ public class RemoteLogTablet {
         return contiguousPrefix;
     }
 
-    public long getRemoteLogStartOffset() {
-        return remoteLogStartOffset;
+    public long getLogicalStartOffset() {
+        return logicalStartOffset;
     }
 
     public OptionalLong getRemoteLogEndOffset() {
@@ -318,7 +316,7 @@ public class RemoteLogTablet {
                     }
                     remoteSizeInBytes = manifestSnapshot.getRemoteLogSize();
                     numRemoteLogSegments = manifestSnapshot.getRemoteLogSegmentList().size();
-                    remoteLogStartOffset = manifestSnapshot.getRemoteLogStartOffset();
+                    logicalStartOffset = manifestSnapshot.getLogicalStartOffset();
                     remoteLogEndOffset = manifestSnapshot.getRemoteLogEndOffset();
                     currentManifest = manifestSnapshot;
                 });
@@ -346,7 +344,7 @@ public class RemoteLogTablet {
         timestampToRemoteLogSegmentId.clear();
         remoteSizeInBytes = 0L;
         numRemoteLogSegments = 0;
-        remoteLogStartOffset = INIT_REMOTE_LOG_START_OFFSET;
+        logicalStartOffset = INIT_LOGICAL_START_OFFSET;
         remoteLogEndOffset = INIT_REMOTE_LOG_END_OFFSET;
     }
 

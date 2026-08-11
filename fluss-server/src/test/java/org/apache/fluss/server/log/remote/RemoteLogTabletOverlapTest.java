@@ -52,6 +52,17 @@ class RemoteLogTabletOverlapTest {
     }
 
     @Test
+    void testLogicalStartOffsetExcludesClippedPhysicalPrefix() {
+        RemoteLogSegment segment = segment(5L, 25L).withLogicalRange(10L, 25L);
+        RemoteLogTablet tablet = new RemoteLogTablet(TABLE_PATH, TABLE_BUCKET, -1L);
+        tablet.loadRemoteLogManifest(
+                new RemoteLogManifest(
+                        TABLE_PATH, TABLE_BUCKET, Collections.singletonList(segment)));
+
+        assertThat(tablet.getLogicalStartOffset()).isEqualTo(10L);
+    }
+
+    @Test
     void testFetchV0StopsBeforePhysicalOverlap() {
         RemoteLogSegment first = segment(0L, 10L).withLogicalRange(0L, 5L);
         RemoteLogSegment second = segment(5L, 20L);
@@ -90,7 +101,7 @@ class RemoteLogTabletOverlapTest {
                 .physicalTablePath(TABLE_PATH)
                 .tableBucket(TABLE_BUCKET)
                 .remoteLogSegmentId(UUID.randomUUID())
-                .remoteLogStartOffset(startOffset)
+                .physicalStartOffset(startOffset)
                 .remoteLogEndOffset(endOffset)
                 .maxTimestamp(1L)
                 .segmentSizeInBytes(10)

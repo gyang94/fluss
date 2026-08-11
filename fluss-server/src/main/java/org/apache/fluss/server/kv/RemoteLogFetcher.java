@@ -266,7 +266,7 @@ public class RemoteLogFetcher implements Closeable {
     private File downloadSegment(RemoteLogSegment segment) throws IOException {
         File localFile =
                 tempDir.resolve(
-                                FlussPaths.filenamePrefixFromOffset(segment.remoteLogStartOffset())
+                                FlussPaths.filenamePrefixFromOffset(segment.physicalStartOffset())
                                         + ".log")
                         .toFile();
 
@@ -274,7 +274,7 @@ public class RemoteLogFetcher implements Closeable {
         LOG.info(
                 "Downloading remote log segment {} (offsets {}-{}) to {}",
                 segment.remoteLogSegmentId(),
-                segment.remoteLogStartOffset(),
+                segment.physicalStartOffset(),
                 segment.remoteLogEndOffset(),
                 localFile);
 
@@ -530,7 +530,7 @@ public class RemoteLogFetcher implements Closeable {
                     // fetchSegmentFile() already calls fillPrefetchWindow() in its finally block.
                     int startPosition = 0;
                     // if this segment contains data before currentOffset, find the right position
-                    if (segment.remoteLogStartOffset() < currentOffset) {
+                    if (segment.physicalStartOffset() < currentOffset) {
                         startPosition =
                                 remoteLogManager.lookupPositionForOffset(segment, currentOffset);
                     }

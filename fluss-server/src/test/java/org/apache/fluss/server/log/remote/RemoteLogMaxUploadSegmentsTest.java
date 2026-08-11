@@ -66,7 +66,7 @@ class RemoteLogMaxUploadSegmentsTest extends RemoteLogTestBase {
         RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
         List<RemoteLogSegment> manifestSegments = remoteLog.allRemoteLogSegments();
         assertThat(manifestSegments).hasSize(5);
-        assertThat(remoteLog.getRemoteLogStartOffset()).isEqualTo(0L);
+        assertThat(remoteLog.getLogicalStartOffset()).isEqualTo(0L);
         assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(50L);
 
         // Second tiering task execution - should upload the remaining 4 segments.

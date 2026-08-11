@@ -482,7 +482,7 @@ class RemoteLogDownloaderTest {
                                         String.format(
                                                 "(bucket=%s, offset=%s, ts=%s)",
                                                 r.segment.tableBucket().getBucket(),
-                                                r.segment.remoteLogStartOffset(),
+                                                r.segment.physicalStartOffset(),
                                                 r.segment.maxTimestamp()))
                         .collect(Collectors.toList());
         List<String> expected =
@@ -656,7 +656,7 @@ class RemoteLogDownloaderTest {
                         .tableBucket(tableBucket)
                         .physicalTablePath(DATA1_PHYSICAL_TABLE_PATH)
                         .remoteLogSegmentId(UUID.randomUUID())
-                        .remoteLogStartOffset(startOffset)
+                        .physicalStartOffset(startOffset)
                         .remoteLogEndOffset(startOffset + 10)
                         .maxTimestamp(maxTimestamp)
                         .segmentSizeInBytes(Integer.MAX_VALUE)
@@ -693,7 +693,7 @@ class RemoteLogDownloaderTest {
                             .tableBucket(tableBucket)
                             .physicalTablePath(physicalTablePath)
                             .remoteLogSegmentId(segmentId)
-                            .remoteLogStartOffset(baseOffset)
+                            .physicalStartOffset(baseOffset)
                             .remoteLogEndOffset(baseOffset + 9)
                             .maxTimestamp(maxTimestamp)
                             .segmentSizeInBytes(Integer.MAX_VALUE)

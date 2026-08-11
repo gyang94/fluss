@@ -86,9 +86,9 @@ public class RemoteLogManifestJsonSerde
             generator.writeStartObject();
             generator.writeStringField(
                     REMOTE_LOG_SEGMENT_ID_FIELD, remoteLogSegment.remoteLogSegmentId().toString());
-            generator.writeNumberField(START_OFFSET_FIELD, remoteLogSegment.remoteLogStartOffset());
+            generator.writeNumberField(START_OFFSET_FIELD, remoteLogSegment.physicalStartOffset());
             generator.writeNumberField(END_OFFSET_FIELD, remoteLogSegment.remoteLogEndOffset());
-            if (remoteLogSegment.logicalStartOffset() != remoteLogSegment.remoteLogStartOffset()) {
+            if (remoteLogSegment.logicalStartOffset() != remoteLogSegment.physicalStartOffset()) {
                 generator.writeNumberField(
                         LOGICAL_START_OFFSET_FIELD, remoteLogSegment.logicalStartOffset());
             }
@@ -140,7 +140,7 @@ public class RemoteLogManifestJsonSerde
                             .physicalTablePath(physicalTablePath)
                             .tableBucket(tableBucket)
                             .remoteLogSegmentId(UUID.fromString(remoteLogSegmentId))
-                            .remoteLogStartOffset(startOffset)
+                            .physicalStartOffset(startOffset)
                             .remoteLogEndOffset(endOffset)
                             .maxTimestamp(maxTimestamp)
                             .segmentSizeInBytes(segmentSizeInBytes);
