@@ -100,14 +100,12 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
-    void testExpiredActiveSegmentWaitsForHighWatermarkWithoutRemoteLogEndOffset(
-            boolean partitionTable) throws Exception {
+    void testExpiredLocalSegmentsRetainedWithoutHighestCopiedEndOffset(boolean partitionTable)
+            throws Exception {
         TableBucket tb =
                 partitionTable
                         ? new TableBucket(DATA1_TABLE_ID, 0L, 0)
                         : new TableBucket(DATA1_TABLE_ID, 0);
-        conf.set(ConfigOptions.LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED, true);
-        logManager.reconfigure(conf);
         makeLogTableAsLeader(tb, partitionTable);
         LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
 
@@ -115,19 +113,11 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
         assertThat(remoteLogManager.remoteLogTablet(tb).getRemoteLogEndOffset()).isEmpty();
 
         manualClock.advanceTime(Duration.ofMinutes(90));
-        logTablet.updateHighWatermark(logTablet.localLogEndOffset() - 1L);
         logManager.cleanupExpiredLocalLogSegments();
 
         assertThat(logTablet.getSegments()).hasSize(5);
         assertThat(logTablet.localLogStartOffset()).isZero();
         assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(40L);
-
-        logTablet.updateHighWatermark(logTablet.localLogEndOffset());
-        logManager.cleanupExpiredLocalLogSegments();
-
-        assertThat(logTablet.getSegments()).hasSize(2);
-        assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
-        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(50L);
     }
 
     @ParameterizedTest

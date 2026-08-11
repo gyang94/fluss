@@ -111,6 +111,7 @@ public final class LogTablet {
 
     private final AtomicBoolean rollExpiredActiveSegmentEnabled;
     private volatile long localLogTtlMs;
+    private final boolean remoteLogEnabled;
 
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
@@ -169,6 +170,8 @@ public final class LogTablet {
                         rollExpiredActiveSegmentEnabled,
                         "rollExpiredActiveSegmentEnabled must not be null");
         this.localLogTtlMs = localLogTtlMs;
+        this.remoteLogEnabled =
+                conf.get(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION).toMillis() > 0L;
 
         this.scheduler = scheduler;
         // scheduler the writer expiration interval check.
@@ -788,12 +791,7 @@ public final class LogTablet {
      * remote storage. Otherwise, cleanup is bounded by the high watermark.
      */
     public void deleteExpiredSegments() {
-        // A missing remote end offset can mean either that no segment has been uploaded or that
-        // all remote segments have expired. In both cases, table.log.ttl remains authoritative for
-        // local retention, while the high watermark and minRetainOffset still protect data that
-        // cannot be deleted yet.
-        long cleanupToOffset =
-                highestCopiedEndOffset == -1L ? getHighWatermark() : highestCopiedEndOffset;
+        long cleanupToOffset = remoteLogEnabled ? highestCopiedEndOffset : getHighWatermark();
         cleanupSegments(cleanupToOffset, this::cleanupExpiredSegments);
     }
 

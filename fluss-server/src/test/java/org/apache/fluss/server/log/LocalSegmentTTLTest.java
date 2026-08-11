@@ -22,9 +22,9 @@ import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.server.replica.ReplicaTestBase;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -112,5 +112,9 @@ final class LocalSegmentTTLTest extends ReplicaTestBase {
 
         addMultiSegmentsToLogTablet(logTablet, 5);
         manualClock.advanceTime(Duration.ofMinutes(90));
+        logManager.cleanupExpiredLocalLogSegments();
+
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
     }
 }
