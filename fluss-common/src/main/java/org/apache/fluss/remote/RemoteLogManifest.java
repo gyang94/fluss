@@ -147,8 +147,7 @@ public class RemoteLogManifest {
      * Long#MAX_VALUE} if this manifest is empty.
      *
      * <p>The returned value is the start of the logical range visible through the manifest, not
-     * necessarily the physical start offset of its first persisted segment. This method retains the
-     * remote-log naming for API compatibility.
+     * necessarily the physical start offset of its first persisted segment.
      */
     public long getRemoteLogStartOffset() {
         long startOffset = Long.MAX_VALUE;
@@ -165,8 +164,7 @@ public class RemoteLogManifest {
      * manifest is empty.
      *
      * <p>The returned value is the end of the logical range visible through the manifest, rather
-     * than a physical segment boundary. This method retains the remote-log naming for API
-     * compatibility.
+     * than a physical segment boundary.
      */
     public long getRemoteLogEndOffset() {
         long endOffset = -1;
