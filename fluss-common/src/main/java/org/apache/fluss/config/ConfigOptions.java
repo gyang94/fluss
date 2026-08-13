@@ -1838,12 +1838,13 @@ public class ConfigOptions {
     public static final ConfigOption<Duration> TABLE_LOG_LOCAL_TTL =
             key("table.log.local-ttl")
                     .durationType()
-                    .defaultValue(Duration.ofDays(1))
+                    .noDefaultValue()
                     .withDescription(
                             "The time to retain local log segments after they have been copied to remote storage. "
-                                    + "The default value is 1 day. When configured, the value must be greater "
-                                    + "than 0 and, if `table.log.ttl` is positive, less than or equal to "
-                                    + "`table.log.ttl`.");
+                                    + "If not configured, the value falls back to `table.log.ttl`. If set to a "
+                                    + "non-positive value, local log segments will not expire. When both this "
+                                    + "option and `table.log.ttl` are positive, this value must be less than or "
+                                    + "equal to `table.log.ttl`.");
 
     public static final ConfigOption<Boolean> TABLE_DATALAKE_ENABLED =
             key("table.datalake.enabled")

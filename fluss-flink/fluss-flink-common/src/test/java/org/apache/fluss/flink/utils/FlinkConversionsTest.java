@@ -378,7 +378,7 @@ public class FlinkConversionsTest {
                         org.apache.flink.configuration.ConfigOptions.key(
                                         ConfigOptions.TABLE_LOG_LOCAL_TTL.key())
                                 .stringType()
-                                .defaultValue("86400000 ms")
+                                .noDefaultValue()
                                 .withDescription(ConfigOptions.TABLE_LOG_LOCAL_TTL.description()));
 
         flinkOption =

@@ -877,16 +877,16 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                 .isInstanceOf(InvalidConfigException.class)
                 .hasMessage("'table.log.local-ttl' must be less than or equal to 'table.log.ttl'.");
 
-        TableDescriptor nonPositiveLocalTtl =
+        TableDescriptor disabledLocalTtl =
                 TableDescriptor.builder()
                         .schema(DEFAULT_SCHEMA)
                         .comment("test table")
                         .property(ConfigOptions.TABLE_LOG_LOCAL_TTL.key(), "0ms")
                         .build();
-        assertThatThrownBy(() -> admin.createTable(tablePath, nonPositiveLocalTtl, false).get())
-                .cause()
-                .isInstanceOf(InvalidConfigException.class)
-                .hasMessage("'table.log.local-ttl' must be greater than 0.");
+        admin.createTable(tablePath, disabledLocalTtl, false).join();
+        assertThat(admin.getTableInfo(tablePath).join().getTableConfig().getLocalLogTTLMs())
+                .isZero();
+        admin.dropTable(tablePath, false).join();
 
         TableDescriptor t4 =
                 TableDescriptor.builder()
@@ -2511,7 +2511,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         false)
                 .get();
         waitUntil(
-                () -> logTablet.getLocalLogTtlMs() == Duration.ofDays(1).toMillis(),
+                () -> logTablet.getLocalLogTtlMs() == Duration.ofDays(7).toMillis(),
                 Duration.ofSeconds(30),
                 "Waiting for local log TTL reset to propagate to TabletServer");
 

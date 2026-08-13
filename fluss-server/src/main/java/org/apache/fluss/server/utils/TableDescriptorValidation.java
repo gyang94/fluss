@@ -521,15 +521,12 @@ public class TableDescriptorValidation {
         if (!localTtl.isPresent()) {
             return;
         }
-        if (localTtl.get().isZero() || localTtl.get().isNegative()) {
-            throw new InvalidConfigException(
-                    String.format(
-                            "'%s' must be greater than 0.",
-                            ConfigOptions.TABLE_LOG_LOCAL_TTL.key()));
-        }
-
         Duration logTtl = tableConf.get(ConfigOptions.TABLE_LOG_TTL);
-        if (!logTtl.isZero() && !logTtl.isNegative() && localTtl.get().compareTo(logTtl) > 0) {
+        if (!localTtl.get().isZero()
+                && !localTtl.get().isNegative()
+                && !logTtl.isZero()
+                && !logTtl.isNegative()
+                && localTtl.get().compareTo(logTtl) > 0) {
             throw new InvalidConfigException(
                     String.format(
                             "'%s' must be less than or equal to '%s'.",

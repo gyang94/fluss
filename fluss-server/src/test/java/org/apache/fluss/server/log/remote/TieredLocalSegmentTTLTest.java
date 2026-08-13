@@ -122,13 +122,41 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    void testExpiredActiveSegmentWaitsForHighWatermark(boolean partitionTable) throws Exception {
+        TableBucket tb =
+                partitionTable
+                        ? new TableBucket(DATA1_TABLE_ID, 0L, 0)
+                        : new TableBucket(DATA1_TABLE_ID, 0);
+        conf.set(ConfigOptions.LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED, true);
+        logManager.reconfigure(conf);
+        makeLogTableAsLeader(tb, partitionTable);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
+
+        addMultiSegmentsToLogTablet(logTablet, 5);
+        logTablet.updateHighestCopiedEndOffset(40L);
+        manualClock.advanceTime(Duration.ofMinutes(90));
+        logTablet.updateHighWatermark(logTablet.localLogEndOffset() - 1L);
+        logManager.cleanupExpiredLocalLogSegments();
+
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(40L);
+
+        logTablet.updateHighWatermark(logTablet.localLogEndOffset());
+        logManager.cleanupExpiredLocalLogSegments();
+
+        assertThat(logTablet.getSegments()).hasSize(2);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(50L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     void testExpiredActiveSegmentNotRolledWhenTtlDisabled(boolean partitionTable) throws Exception {
         registerTableInZkClient(
                 DATA1_TABLE_PATH,
                 DATA1_SCHEMA,
                 DATA1_TABLE_ID,
                 Collections.emptyList(),
-                Collections.singletonMap(ConfigOptions.TABLE_LOG_TTL.key(), "0ms"));
+                Collections.singletonMap(ConfigOptions.TABLE_LOG_LOCAL_TTL.key(), "0ms"));
         TableBucket tb =
                 partitionTable
                         ? new TableBucket(DATA1_TABLE_ID, 0L, 0)
