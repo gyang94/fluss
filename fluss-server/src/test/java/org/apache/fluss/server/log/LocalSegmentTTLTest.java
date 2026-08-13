@@ -117,4 +117,15 @@ final class LocalSegmentTTLTest extends ReplicaTestBase {
         assertThat(logTablet.getSegments()).hasSize(1);
         assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);
     }
+
+    @Test
+    void testLogTtlRemainsEffectiveWhenRemoteLogDisabled() throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 0);
+        makeLogTableAsLeader(tableBucket, false);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tableBucket).getLogTablet();
+
+        logTablet.updateLogTtls(Duration.ofHours(2).toMillis(), Duration.ofMinutes(30).toMillis());
+
+        assertThat(logTablet.getEffectiveLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
+    }
 }

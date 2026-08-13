@@ -2489,7 +2489,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
         TableBucket tableBucket = new TableBucket(tableInfo.getTableId(), 0);
         LogTablet logTablet =
                 FLUSS_CLUSTER_EXTENSION.waitAndGetLeaderReplica(tableBucket).getLogTablet();
-        assertThat(logTablet.getLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
+        assertThat(logTablet.getEffectiveLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
 
         admin.alterTable(
                         tablePath,
@@ -2500,7 +2500,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
         assertThat(admin.getTableInfo(tablePath).get().getTableConfig().getLocalLogTTLMs())
                 .isEqualTo(Duration.ofHours(3).toMillis());
         waitUntil(
-                () -> logTablet.getLocalLogTtlMs() == Duration.ofHours(3).toMillis(),
+                () -> logTablet.getEffectiveLocalLogTtlMs() == Duration.ofHours(3).toMillis(),
                 Duration.ofSeconds(30),
                 "Waiting for local log TTL to propagate to TabletServer");
 
@@ -2511,7 +2511,7 @@ class FlussAdminITCase extends ClientToServerITCaseBase {
                         false)
                 .get();
         waitUntil(
-                () -> logTablet.getLocalLogTtlMs() == Duration.ofDays(7).toMillis(),
+                () -> logTablet.getEffectiveLocalLogTtlMs() == Duration.ofDays(7).toMillis(),
                 Duration.ofSeconds(30),
                 "Waiting for local log TTL reset to propagate to TabletServer");
 

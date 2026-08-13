@@ -110,8 +110,8 @@ public final class LogTablet {
     private final boolean isChangeLog;
 
     private final AtomicBoolean rollExpiredActiveSegmentEnabled;
-    private volatile long localLogTtlMs;
     private final boolean remoteLogEnabled;
+    private volatile long effectiveLocalLogTtlMs;
 
     @GuardedBy("lock")
     private volatile LogOffsetMetadata highWatermarkMetadata;
@@ -153,6 +153,7 @@ public final class LogTablet {
             WriterStateManager writerStateManager,
             LogFormat logFormat,
             int tieredLogLocalSegments,
+            long logTtlMs,
             long localLogTtlMs,
             boolean isChangelog,
             Clock clock) {
@@ -169,9 +170,9 @@ public final class LogTablet {
                 checkNotNull(
                         rollExpiredActiveSegmentEnabled,
                         "rollExpiredActiveSegmentEnabled must not be null");
-        this.localLogTtlMs = localLogTtlMs;
         this.remoteLogEnabled =
                 conf.get(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION).toMillis() > 0L;
+        this.effectiveLocalLogTtlMs = effectiveLocalLogTtlMs(logTtlMs, localLogTtlMs);
 
         this.scheduler = scheduler;
         // scheduler the writer expiration interval check.
@@ -360,6 +361,7 @@ public final class LogTablet {
             Scheduler scheduler,
             LogFormat logFormat,
             int tieredLogLocalSegments,
+            long logTtlMs,
             long localLogTtlMs,
             boolean isChangelog,
             Clock clock,
@@ -410,6 +412,7 @@ public final class LogTablet {
                 writerStateManager,
                 logFormat,
                 tieredLogLocalSegments,
+                logTtlMs,
                 localLogTtlMs,
                 isChangelog,
                 clock);
@@ -443,6 +446,7 @@ public final class LogTablet {
                 scheduler,
                 logFormat,
                 tieredLogLocalSegments,
+                tableConfig.getLogTTLMs(),
                 tableConfig.getLocalLogTTLMs(),
                 isChangelog,
                 clock,
@@ -689,14 +693,14 @@ public final class LogTablet {
         return tieredLogLocalSegments;
     }
 
-    /** Updates the TTL used by local log segment cleanup. */
-    public void updateLocalLogTtlMs(long localLogTtlMs) {
-        this.localLogTtlMs = localLogTtlMs;
+    /** Updates the remote and local log TTLs used to derive the effective local log TTL. */
+    public void updateLogTtls(long logTtlMs, long localLogTtlMs) {
+        this.effectiveLocalLogTtlMs = effectiveLocalLogTtlMs(logTtlMs, localLogTtlMs);
     }
 
-    /** Returns the TTL used by local log segment cleanup, in milliseconds. */
-    public long getLocalLogTtlMs() {
-        return localLogTtlMs;
+    /** Returns the effective TTL used by local log segment cleanup, in milliseconds. */
+    public long getEffectiveLocalLogTtlMs() {
+        return effectiveLocalLogTtlMs;
     }
 
     public void updateLakeTableSnapshotId(long snapshotId) {
@@ -1401,7 +1405,7 @@ public final class LogTablet {
         List<LogSegment> deletableSegments = new ArrayList<>();
         for (int i = 0; i < logSegments.size() - 1; i++) {
             if (logSegments.get(i + 1).getBaseOffset() > endOffset
-                    || !isSegmentExpired(now, logSegments.get(i), localLogTtlMs)) {
+                    || !isSegmentExpired(now, logSegments.get(i), effectiveLocalLogTtlMs)) {
                 break;
             }
             deletableSegments.add(logSegments.get(i));
@@ -1414,8 +1418,12 @@ public final class LogTablet {
             throws IOException {
         return rollExpiredActiveSegmentEnabled.get()
                 && activeSegment.getSizeInBytes() > 0
-                && isSegmentExpired(now, activeSegment, localLogTtlMs)
+                && isSegmentExpired(now, activeSegment, effectiveLocalLogTtlMs)
                 && getHighWatermark() >= localLogEndOffset();
+    }
+
+    private long effectiveLocalLogTtlMs(long logTtlMs, long localLogTtlMs) {
+        return remoteLogEnabled ? localLogTtlMs : logTtlMs;
     }
 
     @FunctionalInterface

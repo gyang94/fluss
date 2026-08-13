@@ -333,7 +333,8 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
                                     scheduler,
                                     logFormat,
                                     tieredLogLocalSegments,
-                                    effectiveLocalLogTtlMs(logTtlMs, localLogTtlMs),
+                                    logTtlMs,
+                                    localLogTtlMs,
                                     isChangelog,
                                     clock,
                                     true);
@@ -480,9 +481,8 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
                         scheduler,
                         tableInfo.getTableConfig().getLogFormat(),
                         tableInfo.getTableConfig().getTieredLogLocalSegments(),
-                        effectiveLocalLogTtlMs(
-                                tableInfo.getTableConfig().getLogTTLMs(),
-                                tableInfo.getTableConfig().getLocalLogTTLMs()),
+                        tableInfo.getTableConfig().getLogTTLMs(),
+                        tableInfo.getTableConfig().getLocalLogTTLMs(),
                         tableInfo.hasPrimaryKey(),
                         clock,
                         isCleanShutdown);
@@ -505,12 +505,6 @@ public final class LogManager extends TabletManagerBase implements ServerReconfi
         localDiskManager.recordReplicaLoad(dataDir, tableInfo.hasPrimaryKey());
 
         return logTablet;
-    }
-
-    private long effectiveLocalLogTtlMs(long logTtlMs, long localLogTtlMs) {
-        return conf.get(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION).toMillis() > 0L
-                ? localLogTtlMs
-                : logTtlMs;
     }
 
     /** Close all the logs. */

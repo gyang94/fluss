@@ -112,7 +112,7 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
         addMultiSegmentsToLogTablet(logTablet, 5);
         assertThat(remoteLogManager.remoteLogTablet(tb).getRemoteLogEndOffset()).isEmpty();
 
-        manualClock.advanceTime(Duration.ofMinutes(90));
+        manualClock.advanceTime(Duration.ofHours(3));
         logManager.cleanupExpiredLocalLogSegments();
 
         assertThat(logTablet.getSegments()).hasSize(5);
@@ -215,14 +215,14 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
 
         addMultiSegmentsToLogTablet(logTablet, 5);
         remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
-        logTablet.updateLocalLogTtlMs(Duration.ofHours(2).toMillis());
-        assertThat(logTablet.getLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
+        logTablet.updateLogTtls(Duration.ofHours(2).toMillis(), Duration.ofHours(2).toMillis());
+        assertThat(logTablet.getEffectiveLocalLogTtlMs()).isEqualTo(Duration.ofHours(2).toMillis());
 
         manualClock.advanceTime(Duration.ofMinutes(90));
         logManager.cleanupExpiredLocalLogSegments();
         assertThat(logTablet.getSegments()).hasSize(5);
 
-        logTablet.updateLocalLogTtlMs(Duration.ofHours(1).toMillis());
+        logTablet.updateLogTtls(Duration.ofHours(2).toMillis(), Duration.ofHours(1).toMillis());
         logManager.cleanupExpiredLocalLogSegments();
         assertThat(logTablet.getSegments()).hasSize(1);
         assertThat(logTablet.localLogStartOffset()).isEqualTo(40L);

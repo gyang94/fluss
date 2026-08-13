@@ -598,7 +598,7 @@ public class ReplicaManager implements ServerReconfigurable {
     private void updateReplicaTableConfig(ClusterMetadata clusterMetadata) {
         Map<Long, Boolean> tableIdToLakeFlag = new HashMap<>();
         Map<Long, Integer> tableIdToTieredLogLocalSegments = new HashMap<>();
-        Map<Long, Long> tableIdToLocalLogTtlMs = new HashMap<>();
+        Map<Long, TableConfig> tableIdToTableConfig = new HashMap<>();
 
         for (TableMetadata tableMetadata : clusterMetadata.getTableMetadataList()) {
             TableInfo tableInfo = tableMetadata.getTableInfo();
@@ -614,18 +614,12 @@ public class ReplicaManager implements ServerReconfigurable {
             int tieredLogLocalSegments = tableInfo.getTableConfig().getTieredLogLocalSegments();
             tableIdToTieredLogLocalSegments.put(tableId, tieredLogLocalSegments);
 
-            // Collect local log TTL configuration. When remote log is disabled, table.log.ttl
-            // remains authoritative for local retention.
-            long localLogTtlMs =
-                    conf.get(ConfigOptions.REMOTE_LOG_TASK_INTERVAL_DURATION).toMillis() > 0L
-                            ? tableInfo.getTableConfig().getLocalLogTTLMs()
-                            : tableInfo.getTableConfig().getLogTTLMs();
-            tableIdToLocalLogTtlMs.put(tableId, localLogTtlMs);
+            tableIdToTableConfig.put(tableId, tableInfo.getTableConfig());
         }
 
         if (tableIdToLakeFlag.isEmpty()
                 && tableIdToTieredLogLocalSegments.isEmpty()
-                && tableIdToLocalLogTtlMs.isEmpty()) {
+                && tableIdToTableConfig.isEmpty()) {
             return;
         }
 
@@ -646,9 +640,11 @@ public class ReplicaManager implements ServerReconfigurable {
                             tableIdToTieredLogLocalSegments.get(tableId));
                 }
 
-                // Update local log TTL configuration
-                if (tableIdToLocalLogTtlMs.containsKey(tableId)) {
-                    replica.updateLocalLogTtlMs(tableIdToLocalLogTtlMs.get(tableId));
+                // Update log TTL configurations
+                if (tableIdToTableConfig.containsKey(tableId)) {
+                    TableConfig tableConfig = tableIdToTableConfig.get(tableId);
+                    replica.updateLogTtls(
+                            tableConfig.getLogTTLMs(), tableConfig.getLocalLogTTLMs());
                 }
             }
         }
