@@ -115,7 +115,8 @@ public final class CreateTopicsHandler implements KafkaApiHandler<CreateTopicsRe
                         validTopics,
                         request.data().validateOnly(),
                         context.listenerName(),
-                        clientAddress(context.remoteAddress()))
+                        clientAddress(context.remoteAddress()),
+                        context.principal())
                 .thenApply(results -> toResponse(request, localResults, results));
     }
 

@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.backend.metadata;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.security.acl.FlussPrincipal;
 
 import org.apache.kafka.common.Uuid;
 
@@ -38,6 +39,7 @@ public final class KafkaMetadataQuery {
     private final List<TopicReference> topics;
     private final String listenerName;
     private final @Nullable InetAddress clientAddress;
+    private final FlussPrincipal principal;
 
     /** Creates a metadata query. */
     public KafkaMetadataQuery(
@@ -45,10 +47,21 @@ public final class KafkaMetadataQuery {
             List<TopicReference> topics,
             String listenerName,
             @Nullable InetAddress clientAddress) {
+        this(allTopics, topics, listenerName, clientAddress, FlussPrincipal.ANONYMOUS);
+    }
+
+    /** Creates a metadata query for the authenticated Kafka principal. */
+    public KafkaMetadataQuery(
+            boolean allTopics,
+            List<TopicReference> topics,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
         this.allTopics = allTopics;
         this.topics = Collections.unmodifiableList(new ArrayList<>(checkNotNull(topics)));
         this.listenerName = checkNotNull(listenerName);
         this.clientAddress = clientAddress;
+        this.principal = checkNotNull(principal);
     }
 
     /** Returns whether all Kafka topics should be returned. */
@@ -69,6 +82,11 @@ public final class KafkaMetadataQuery {
     /** Returns the client address when it is available. */
     public @Nullable InetAddress clientAddress() {
         return clientAddress;
+    }
+
+    /** Returns the authenticated Kafka principal. */
+    public FlussPrincipal principal() {
+        return principal;
     }
 
     /** Kafka topic name and ID supplied by a Metadata request. */

@@ -34,7 +34,6 @@ import org.apache.fluss.rpc.messages.PbServerNode;
 import org.apache.fluss.rpc.messages.PbTableMetadata;
 import org.apache.fluss.rpc.messages.PbTablePath;
 import org.apache.fluss.rpc.netty.server.Session;
-import org.apache.fluss.security.acl.FlussPrincipal;
 
 import org.apache.kafka.common.Uuid;
 import org.slf4j.Logger;
@@ -259,7 +258,7 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
                         query.listenerName(),
                         false,
                         query.clientAddress(),
-                        FlussPrincipal.ANONYMOUS));
+                        query.principal()));
     }
 
     private static boolean containsTopicId(List<TopicReference> topics) {

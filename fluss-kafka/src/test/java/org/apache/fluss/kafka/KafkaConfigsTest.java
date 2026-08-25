@@ -19,6 +19,7 @@ package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.ConfigException;
 
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +29,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for Kafka configuration. */
 public class KafkaConfigsTest {
@@ -62,5 +64,58 @@ public class KafkaConfigsTest {
                 .isEqualTo("raw");
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_VALUE_FORMAT))
                 .isEqualTo("raw");
+    }
+
+    @Test
+    public void testKafkaSaslPlainConfiguration() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "sasl"));
+        configuration.set(
+                ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
+                Collections.singletonList("PLAIN"));
+        configuration.set(
+                ConfigOptions.SERVER_SASL_CREDENTIALS,
+                Collections.singletonMap("writer", "writer-secret"));
+
+        new KafkaProtocolPlugin().setup(configuration);
+    }
+
+    @Test
+    public void testKafkaSaslRequiresPlainMechanism() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "sasl"));
+        configuration.set(
+                ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
+                Collections.singletonList("SCRAM-SHA-256"));
+
+        assertThatThrownBy(() -> new KafkaProtocolPlugin().setup(configuration))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining("require PLAIN");
+    }
+
+    @Test
+    public void testKafkaListenerRejectsNonSaslAuthenticationPlugin() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "custom"));
+
+        assertThatThrownBy(() -> new KafkaProtocolPlugin().setup(configuration))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining("supports only PLAINTEXT or SASL authentication");
+    }
+
+    @Test
+    public void testKafkaListenerAcceptsExplicitPlaintextProtocol() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "PLAINTEXT"));
+
+        new KafkaProtocolPlugin().setup(configuration);
     }
 }

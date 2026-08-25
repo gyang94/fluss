@@ -107,7 +107,8 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
                         request.isAllTopics(),
                         validTopics,
                         context.listenerName(),
-                        clientAddress(context.remoteAddress()));
+                        clientAddress(context.remoteAddress()),
+                        context.principal());
         return backend.getMetadata(query)
                 .thenApply(
                         metadata -> {

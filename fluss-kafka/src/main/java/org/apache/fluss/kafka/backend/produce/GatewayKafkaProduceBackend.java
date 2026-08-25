@@ -36,7 +36,6 @@ import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.netty.server.Session;
-import org.apache.fluss.security.acl.FlussPrincipal;
 
 import org.apache.kafka.common.protocol.Errors;
 
@@ -238,7 +237,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         command.listenerName(),
                         false,
                         command.clientAddress(),
-                        FlussPrincipal.ANONYMOUS));
+                        command.principal()));
     }
 
     private static Throwable unwrap(Throwable failure) {

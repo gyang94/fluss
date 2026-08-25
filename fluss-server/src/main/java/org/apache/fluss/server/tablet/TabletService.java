@@ -42,6 +42,7 @@ import org.apache.fluss.rpc.entity.PutKvResultForBucket;
 import org.apache.fluss.rpc.entity.ResultForBucket;
 import org.apache.fluss.rpc.entity.TableStatsResultForBucket;
 import org.apache.fluss.rpc.gateway.AdminGatewayProvider;
+import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
@@ -82,6 +83,7 @@ import org.apache.fluss.rpc.messages.StopReplicaRequest;
 import org.apache.fluss.rpc.messages.StopReplicaResponse;
 import org.apache.fluss.rpc.messages.UpdateMetadataRequest;
 import org.apache.fluss.rpc.messages.UpdateMetadataResponse;
+import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.rpc.protocol.ApiError;
 import org.apache.fluss.rpc.protocol.Errors;
 import org.apache.fluss.rpc.protocol.FetchLogReadPreference;
@@ -172,7 +174,7 @@ import static org.apache.fluss.server.utils.ServerRpcMessageUtils.toPutKvDataFor
 
 /** An RPC Gateway service for tablet server. */
 public final class TabletService extends RpcServiceBase
-        implements TabletServerGateway, AdminGatewayProvider {
+        implements TabletServerGateway, AdminGatewayProvider, AdminOperationAuthorizer {
 
     private final String serviceName;
     private final ReplicaManager replicaManager;
@@ -227,6 +229,13 @@ public final class TabletService extends RpcServiceBase
     @Override
     public CoordinatorGateway getAdminGateway() {
         return coordinatorGateway;
+    }
+
+    @Override
+    public void authorize(Session session, OperationType operationType, Resource resource) {
+        if (authorizer != null) {
+            authorizer.authorize(session, operationType, resource);
+        }
     }
 
     @Override

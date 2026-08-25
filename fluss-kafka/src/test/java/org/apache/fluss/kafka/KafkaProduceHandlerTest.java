@@ -36,6 +36,7 @@ import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.server.utils.ServerRpcMessageUtils;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
@@ -71,6 +72,36 @@ public class KafkaProduceHandlerTest {
     private static final int SCHEMA_ID = 1;
     private static final long TABLE_ID = 123L;
     private static final long TIMESTAMP = 123456L;
+
+    @Test
+    public void testAuthenticatedPrincipalPropagatesToProduceGatewaySessions() {
+        TestingProduceGatewayService service = new TestingProduceGatewayService();
+        FlussPrincipal principal = new FlussPrincipal("kafka-user", "User");
+        short version = ApiKeys.PRODUCE.latestVersion();
+        ProduceRequest requestBody = produceRequest(version, (short) 1);
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.PRODUCE,
+                        version,
+                        new RequestHeader(ApiKeys.PRODUCE, version, "client-id", 1),
+                        requestBody,
+                        "KAFKA",
+                        org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator.DEFAULT
+                                .buffer(),
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<>()) {
+                    @Override
+                    public FlussPrincipal principal() {
+                        return principal;
+                    }
+                };
+
+        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+
+        assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
+        assertThat(service.getTableInfoPrincipal).isEqualTo(principal);
+        assertThat(service.producePrincipal).isEqualTo(principal);
+    }
 
     @Test
     public void testProduceTranscodesAndWritesKafkaRecord() throws Exception {
@@ -420,6 +451,8 @@ public class KafkaProduceHandlerTest {
         private final TableDescriptor tableDescriptor;
         private ProduceLogRequest lastProduceRequest;
         private ProduceLogResponse produceResponse;
+        private FlussPrincipal getTableInfoPrincipal;
+        private FlussPrincipal producePrincipal;
         private org.apache.fluss.rpc.protocol.Errors produceError =
                 org.apache.fluss.rpc.protocol.Errors.NONE;
 
@@ -455,6 +488,7 @@ public class KafkaProduceHandlerTest {
 
         @Override
         public CompletableFuture<GetTableInfoResponse> getTableInfo(GetTableInfoRequest request) {
+            getTableInfoPrincipal = currentSession().getPrincipal();
             return CompletableFuture.completedFuture(
                     new GetTableInfoResponse()
                             .setTableId(TABLE_ID)
@@ -466,6 +500,7 @@ public class KafkaProduceHandlerTest {
 
         @Override
         public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
+            producePrincipal = currentSession().getPrincipal();
             lastProduceRequest = request;
             if (produceResponse != null) {
                 return CompletableFuture.completedFuture(produceResponse);

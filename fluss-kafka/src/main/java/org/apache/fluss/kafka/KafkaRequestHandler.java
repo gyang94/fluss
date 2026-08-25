@@ -21,6 +21,8 @@ import org.apache.fluss.kafka.api.admin.CreateTopicsHandler;
 import org.apache.fluss.kafka.api.admin.DeleteTopicsHandler;
 import org.apache.fluss.kafka.api.metadata.MetadataHandler;
 import org.apache.fluss.kafka.api.produce.ProduceHandler;
+import org.apache.fluss.kafka.api.sasl.SaslAuthenticateHandler;
+import org.apache.fluss.kafka.api.sasl.SaslHandshakeHandler;
 import org.apache.fluss.kafka.api.versions.ApiVersionsHandler;
 import org.apache.fluss.kafka.backend.admin.GatewayKafkaTopicAdminBackend;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
@@ -32,6 +34,7 @@ import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
+import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
@@ -51,6 +54,8 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         checkNotNull(kafkaDatabase);
         KafkaApiRegistry registry = new KafkaApiRegistry();
         registry.register(new ApiVersionsHandler(registry));
+        registry.register(new SaslHandshakeHandler());
+        registry.register(new SaslAuthenticateHandler());
         registry.register(
                 new MetadataHandler(
                         new GatewayKafkaMetadataBackend(service, gateway, kafkaDatabase)));
@@ -71,10 +76,21 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             String kafkaDatabase) {
+        this(service, gateway, adminGateway, adminOperationAuthorizer(service), kafkaDatabase);
+    }
+
+    /** Creates a Kafka request handler with explicit authorization for topic lifecycle requests. */
+    public KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase) {
         this(
                 service,
                 gateway,
                 adminGateway,
+                adminOperationAuthorizer,
                 kafkaDatabase,
                 KafkaDataFormat.RAW,
                 KafkaDataFormat.RAW);
@@ -90,14 +106,38 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat) {
+        this(
+                service,
+                gateway,
+                adminGateway,
+                adminOperationAuthorizer(service),
+                kafkaDatabase,
+                defaultKeyFormat,
+                defaultValueFormat);
+    }
+
+    /**
+     * Creates a Kafka request handler with explicit authorization and default format capabilities.
+     */
+    public KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase,
+            KafkaDataFormat defaultKeyFormat,
+            KafkaDataFormat defaultValueFormat) {
         checkNotNull(service);
         checkNotNull(gateway);
         checkNotNull(adminGateway);
+        checkNotNull(adminOperationAuthorizer);
         checkNotNull(kafkaDatabase);
         checkNotNull(defaultKeyFormat);
         checkNotNull(defaultValueFormat);
         KafkaApiRegistry registry = new KafkaApiRegistry();
         registry.register(new ApiVersionsHandler(registry));
+        registry.register(new SaslHandshakeHandler());
+        registry.register(new SaslAuthenticateHandler());
         registry.register(
                 new MetadataHandler(
                         new GatewayKafkaMetadataBackend(service, gateway, kafkaDatabase), true));
@@ -109,12 +149,21 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                 kafkaDatabase,
                                 new ArrowKafkaRecordTranscoder())));
         GatewayKafkaTopicAdminBackend topicAdminBackend =
-                new GatewayKafkaTopicAdminBackend(service, adminGateway, kafkaDatabase);
+                new GatewayKafkaTopicAdminBackend(
+                        service, adminGateway, adminOperationAuthorizer, kafkaDatabase);
         registry.register(
                 new CreateTopicsHandler(topicAdminBackend, defaultKeyFormat, defaultValueFormat));
         registry.register(new DeleteTopicsHandler(topicAdminBackend));
         registry.freeze();
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
+    }
+
+    private static AdminOperationAuthorizer adminOperationAuthorizer(RpcGatewayService service) {
+        if (!(service instanceof AdminOperationAuthorizer)) {
+            throw new IllegalArgumentException(
+                    "Kafka topic administration requires an AdminOperationAuthorizer.");
+        }
+        return (AdminOperationAuthorizer) service;
     }
 
     @Override

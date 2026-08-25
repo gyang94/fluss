@@ -60,12 +60,22 @@ public final class ApiVersionsHandler implements KafkaApiHandler<ApiVersionsRequ
     @Override
     public CompletableFuture<? extends AbstractResponse> handle(
             KafkaRequestContext context, ApiVersionsRequest request) {
+        if (context.saslConnection().isAuthenticating()) {
+            context.closeConnectionAfterResponse();
+            return CompletableFuture.completedFuture(
+                    new ApiVersionsResponse(
+                            new ApiVersionsResponseData()
+                                    .setErrorCode(Errors.ILLEGAL_SASL_STATE.code())));
+        }
         if (!request.isValid()) {
             return CompletableFuture.completedFuture(
                     request.getErrorResponse(Errors.INVALID_REQUEST.exception()));
         }
         ApiVersionsResponseData data = new ApiVersionsResponseData();
         for (KafkaApiSpec spec : registry.advertisedApiSpecs()) {
+            if (isSaslApi(spec.apiKey()) && !context.saslConnection().authenticationEnabled()) {
+                continue;
+            }
             data.apiKeys()
                     .add(
                             new ApiVersionsResponseData.ApiVersion()
@@ -74,5 +84,9 @@ public final class ApiVersionsHandler implements KafkaApiHandler<ApiVersionsRequ
                                     .setMaxVersion(spec.maxVersion()));
         }
         return CompletableFuture.completedFuture(new ApiVersionsResponse(data));
+    }
+
+    private static boolean isSaslApi(ApiKeys apiKey) {
+        return apiKey == ApiKeys.SASL_HANDSHAKE || apiKey == ApiKeys.SASL_AUTHENTICATE;
     }
 }

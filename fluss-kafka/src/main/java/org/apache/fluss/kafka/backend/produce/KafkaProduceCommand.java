@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.security.acl.FlussPrincipal;
 
 import javax.annotation.Nullable;
 
@@ -37,6 +38,7 @@ public final class KafkaProduceCommand {
     private final List<TopicWrite> topics;
     private final String listenerName;
     private final @Nullable InetAddress clientAddress;
+    private final FlussPrincipal principal;
 
     /** Creates a Kafka write command. */
     public KafkaProduceCommand(
@@ -45,11 +47,23 @@ public final class KafkaProduceCommand {
             List<TopicWrite> topics,
             String listenerName,
             @Nullable InetAddress clientAddress) {
+        this(acks, timeoutMs, topics, listenerName, clientAddress, FlussPrincipal.ANONYMOUS);
+    }
+
+    /** Creates a Kafka write command for the authenticated Kafka principal. */
+    public KafkaProduceCommand(
+            short acks,
+            int timeoutMs,
+            List<TopicWrite> topics,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
         this.acks = acks;
         this.timeoutMs = timeoutMs;
         this.topics = immutableCopy(topics);
         this.listenerName = checkNotNull(listenerName);
         this.clientAddress = clientAddress;
+        this.principal = checkNotNull(principal);
     }
 
     /** Returns Kafka required acknowledgements. */
@@ -75,6 +89,11 @@ public final class KafkaProduceCommand {
     /** Returns the client network address when available. */
     public @Nullable InetAddress clientAddress() {
         return clientAddress;
+    }
+
+    /** Returns the authenticated Kafka principal. */
+    public FlussPrincipal principal() {
+        return principal;
     }
 
     private static <T> List<T> immutableCopy(List<T> values) {
