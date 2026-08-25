@@ -346,10 +346,6 @@ public class ReplicaStateMachine {
                 validReplicas.forEach(
                         replica -> doStateChange(replica, ReplicaState.ReplicaDeletionSuccessful));
                 break;
-            case ReplicaDeletionIneligible:
-                validReplicas.forEach(
-                        replica -> doStateChange(replica, ReplicaState.ReplicaDeletionIneligible));
-                break;
             case NonExistentReplica:
                 validReplicas.forEach(replica -> doStateChange(replica, null));
                 break;

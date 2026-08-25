@@ -26,7 +26,6 @@ import org.apache.fluss.metrics.MetricNames;
 import org.apache.fluss.metrics.groups.MetricGroup;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.ApiMessage;
-import org.apache.fluss.rpc.messages.StopReplicaRequest;
 import org.apache.fluss.utils.concurrent.ShutdownableThread;
 
 import java.util.Optional;
@@ -40,24 +39,22 @@ import java.util.function.Supplier;
 
 /**
  * Per-tablet-server sender thread that drains the control-plane request queue and retries on
- * transient RPC failures. Mirrors Kafka's {@code RequestSendThread}
- * (ControllerChannelManager.scala:226-300).
+ * transient RPC failures.
  *
  * <p>Each invocation of {@link #doWork()} takes one {@link QueueItem} from the queue. Stale items
  * (whose {@code coordinatorEpoch} is less than the current epoch) are dropped immediately.
  * Otherwise the item is sent to the tablet server via the gateway, retrying with a configurable
  * backoff until the send succeeds or the thread is shut down.
  *
- * <p>The callback is invoked in its own {@code try/catch} OUTSIDE the retry loop (alignment fix F),
- * so a buggy response handler cannot re-enter the send retry path and cannot reach the outer
- * Scenario-E catch.
+ * <p>The callback is invoked outside the retry loop so a response-handler failure does not retry a
+ * request that the tablet server has already completed.
  */
 public class ControlRequestSendThread extends ShutdownableThread {
 
     private static final int HISTOGRAM_WINDOW_SIZE = 100;
 
     private final int tabletServerId;
-    private final BlockingQueue<QueueItem> queue;
+    private final BlockingQueue<QueueItem<?>> queue;
     private final Supplier<Optional<TabletServerGateway>> gatewaySupplier;
     private final IntSupplier epochSupplier;
     private final long backoffMs;
@@ -73,7 +70,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
 
     public ControlRequestSendThread(
             int tabletServerId,
-            BlockingQueue<QueueItem> queue,
+            BlockingQueue<QueueItem<?>> queue,
             Supplier<Optional<TabletServerGateway>> gatewaySupplier,
             IntSupplier epochSupplier,
             Configuration conf,
@@ -126,7 +123,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
     @Override
     public void doWork() throws Exception {
         try {
-            QueueItem item = queue.take();
+            QueueItem<?> item = queue.take();
             queueTimeMsHistogram.update(System.currentTimeMillis() - item.getEnqueueTimeMs());
 
             int currentEpoch = epochSupplier.getAsInt();
@@ -141,46 +138,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
                 return;
             }
 
-            ApiMessage response = null;
-            boolean sendSuccessful = false;
-            while (isRunning() && !sendSuccessful) {
-                Optional<TabletServerGateway> gatewayOpt = gatewaySupplier.get();
-                if (!gatewayOpt.isPresent()) {
-                    retryCount.inc();
-                    backoff();
-                    continue;
-                }
-                try {
-                    CompletableFuture<? extends ApiMessage> future = invoke(gatewayOpt.get(), item);
-                    inFlight.set(future);
-                    response = future.get(requestTimeoutMs, TimeUnit.MILLISECONDS);
-                    sendSuccessful = true;
-                } catch (Throwable t) {
-                    retryCount.inc();
-                    log.warn(
-                            "Failed to send {} to tabletServer {}; will retry after {}ms",
-                            item.getApiKey(),
-                            tabletServerId,
-                            backoffMs,
-                            t);
-                    backoff();
-                } finally {
-                    inFlight.set(null);
-                }
-            }
-
-            if (sendSuccessful && item.getCallback() != null) {
-                try {
-                    item.getCallback().accept(response, null);
-                } catch (Throwable t) {
-                    log.error(
-                            "Callback for {} to tabletServer {} threw; the request itself "
-                                    + "succeeded so no retry is attempted.",
-                            item.getApiKey(),
-                            tabletServerId,
-                            t);
-                }
-            }
+            send(item);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         } catch (Throwable t) {
@@ -188,17 +146,51 @@ public class ControlRequestSendThread extends ShutdownableThread {
         }
     }
 
-    private void backoff() throws InterruptedException {
-        pause(backoffMs, TimeUnit.MILLISECONDS);
+    private <ResponseT extends ApiMessage> void send(QueueItem<ResponseT> item)
+            throws InterruptedException {
+        ResponseT response = null;
+        boolean sendSuccessful = false;
+        while (isRunning() && !sendSuccessful) {
+            Optional<TabletServerGateway> gatewayOpt = gatewaySupplier.get();
+            if (!gatewayOpt.isPresent()) {
+                retryCount.inc();
+                backoff();
+                continue;
+            }
+            try {
+                CompletableFuture<ResponseT> future = item.send(gatewayOpt.get());
+                inFlight.set(future);
+                response = future.get(requestTimeoutMs, TimeUnit.MILLISECONDS);
+                sendSuccessful = true;
+            } catch (Throwable t) {
+                retryCount.inc();
+                log.warn(
+                        "Failed to send {} to tabletServer {}; will retry after {}ms",
+                        item.getApiKey(),
+                        tabletServerId,
+                        backoffMs,
+                        t);
+                backoff();
+            } finally {
+                inFlight.set(null);
+            }
+        }
+
+        if (sendSuccessful && item.getCallback() != null) {
+            try {
+                item.getCallback().accept(response, null);
+            } catch (Throwable t) {
+                log.error(
+                        "Callback for {} to tabletServer {} threw; the request itself "
+                                + "succeeded so no retry is attempted.",
+                        item.getApiKey(),
+                        tabletServerId,
+                        t);
+            }
+        }
     }
 
-    private CompletableFuture<? extends ApiMessage> invoke(
-            TabletServerGateway gateway, QueueItem item) {
-        switch (item.getApiKey()) {
-            case STOP_REPLICA:
-                return gateway.stopReplica((StopReplicaRequest) item.getRequest());
-            default:
-                throw new IllegalArgumentException("Unsupported ApiKey: " + item.getApiKey());
-        }
+    private void backoff() throws InterruptedException {
+        pause(backoffMs, TimeUnit.MILLISECONDS);
     }
 }

@@ -115,7 +115,7 @@ public abstract class ShutdownableThread extends Thread {
      * Causes the current thread to wait until the shutdown is initiated, or the specified waiting
      * time elapses.
      */
-    public void pause(long timeout, TimeUnit unit) throws InterruptedException {
+    protected void pause(long timeout, TimeUnit unit) throws InterruptedException {
         if (shutdownInitiated.await(timeout, unit)) {
             log.trace("shutdownInitiated latch count reached zero. Shutdown called.");
         }

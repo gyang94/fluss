@@ -21,7 +21,6 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.metadata.TableBucketReplica;
 import org.apache.fluss.metrics.MetricNames;
 import org.apache.fluss.metrics.groups.MetricGroup;
 import org.apache.fluss.rpc.RpcClient;
@@ -54,11 +53,11 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.IntSupplier;
 
 import static org.apache.fluss.utils.Preconditions.checkState;
@@ -72,8 +71,6 @@ import static org.apache.fluss.utils.Preconditions.checkState;
 public class CoordinatorChannelManager {
 
     private static final Logger LOG = LoggerFactory.getLogger(CoordinatorChannelManager.class);
-
-    private static final int WINDOW_SIZE = 100;
 
     /** A manager for the rpc gateways to tablet servers. */
     private final RpcGatewayManager<TabletServerGateway> rpcGatewayManager;
@@ -108,6 +105,7 @@ public class CoordinatorChannelManager {
     }
 
     public void close() throws Exception {
+        shutdown();
         rpcGatewayManager.close();
     }
 
@@ -134,7 +132,7 @@ public class CoordinatorChannelManager {
             if (channelStates.containsKey(id)) {
                 return;
             }
-            BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+            BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
 
             MetricGroup tsGroup =
                     coordinatorMetricGroup.addGroup("tablet-server-id", String.valueOf(id));
@@ -148,8 +146,7 @@ public class CoordinatorChannelManager {
                             epochSupplier,
                             conf,
                             tsGroup);
-            channelStates.put(
-                    id, new TabletServerChannelState(id, serverNode, queue, thread, tsGroup));
+            channelStates.put(id, new TabletServerChannelState(queue, thread, tsGroup));
         }
     }
 
@@ -224,45 +221,57 @@ public class CoordinatorChannelManager {
                 responseConsumer);
     }
 
-    /**
-     * Enqueues a StopReplica request onto the per-tablet-server sender queue. The sender thread
-     * retries on network-level failures until the TS responds or is removed.
-     */
+    /** Send StopBucketReplicaRequest to the server and handle the response. */
     public void sendStopBucketReplicaRequest(
             int receiveServerId,
             StopReplicaRequest stopReplicaRequest,
-            int coordinatorEpoch,
-            @Nullable Set<TableBucketReplica> deletionReplicas,
             BiConsumer<StopReplicaResponse, ? super Throwable> responseConsumer) {
+        sendRequest(
+                receiveServerId,
+                stopReplicaRequest,
+                TabletServerGateway::stopReplica,
+                responseConsumer);
+    }
+
+    /**
+     * Enqueues a control-plane request for the target tablet server. The per-tablet-server sender
+     * retries RPC-layer failures until the request succeeds or the channel is removed.
+     *
+     * @return whether the request was enqueued
+     */
+    protected <ResponseT extends ApiMessage> boolean enqueueRequest(
+            int targetServerId,
+            ApiKeys apiKey,
+            int coordinatorEpoch,
+            Function<TabletServerGateway, CompletableFuture<ResponseT>> requestSender,
+            @Nullable BiConsumer<ResponseT, ? super Throwable> responseConsumer) {
         TabletServerChannelState state;
         synchronized (channelLock) {
-            state = channelStates.get(receiveServerId);
+            state = channelStates.get(targetServerId);
         }
         if (state == null) {
             LOG.warn(
-                    "No channel state for tabletServer {}; dropping stopReplica (epoch={}). "
-                            + "Correctness for any deletion replicas is handled by "
-                            + "processDeadTabletServer.",
-                    receiveServerId,
-                    coordinatorEpoch);
-            return;
+                    "Cannot enqueue {} for tablet server {} because its channel does not exist.",
+                    apiKey,
+                    targetServerId);
+            return false;
         }
-        QueueItem item =
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        stopReplicaRequest,
-                        responseConsumer,
-                        coordinatorEpoch,
-                        System.currentTimeMillis(),
-                        deletionReplicas);
+
         try {
-            state.getQueue().put(item);
+            state.getQueue()
+                    .put(
+                            new QueueItem<>(
+                                    apiKey,
+                                    requestSender,
+                                    responseConsumer,
+                                    coordinatorEpoch,
+                                    System.currentTimeMillis()));
+            return true;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.warn(
-                    "Interrupted while enqueueing stopReplica for tabletServer {}",
-                    receiveServerId,
-                    e);
+                    "Interrupted while enqueueing {} for tablet server {}", apiKey, targetServerId);
+            return false;
         }
     }
 

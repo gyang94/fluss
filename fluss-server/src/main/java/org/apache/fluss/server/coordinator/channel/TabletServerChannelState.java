@@ -17,7 +17,6 @@
 
 package org.apache.fluss.server.coordinator.channel;
 
-import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.metrics.groups.MetricGroup;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -32,9 +31,7 @@ import java.util.concurrent.BlockingQueue;
 @ThreadSafe
 public final class TabletServerChannelState {
 
-    private final int tabletServerId;
-    private final ServerNode serverNode;
-    private final BlockingQueue<QueueItem> queue;
+    private final BlockingQueue<QueueItem<?>> queue;
     private final ControlRequestSendThread sendThread;
 
     /**
@@ -44,19 +41,15 @@ public final class TabletServerChannelState {
     private final MetricGroup metricGroup;
 
     public TabletServerChannelState(
-            int tabletServerId,
-            ServerNode serverNode,
-            BlockingQueue<QueueItem> queue,
+            BlockingQueue<QueueItem<?>> queue,
             ControlRequestSendThread sendThread,
             MetricGroup metricGroup) {
-        this.tabletServerId = tabletServerId;
-        this.serverNode = serverNode;
         this.queue = queue;
         this.sendThread = sendThread;
         this.metricGroup = metricGroup;
     }
 
-    public BlockingQueue<QueueItem> getQueue() {
+    public BlockingQueue<QueueItem<?>> getQueue() {
         return queue;
     }
 

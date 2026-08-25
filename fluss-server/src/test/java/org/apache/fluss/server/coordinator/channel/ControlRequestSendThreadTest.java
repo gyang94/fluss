@@ -25,8 +25,7 @@ import org.apache.fluss.metrics.MetricNames;
 import org.apache.fluss.metrics.groups.MetricGroup;
 import org.apache.fluss.metrics.util.TestMetricGroup;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
-import org.apache.fluss.rpc.messages.StopReplicaRequest;
-import org.apache.fluss.rpc.messages.StopReplicaResponse;
+import org.apache.fluss.rpc.messages.ApiVersionsResponse;
 import org.apache.fluss.rpc.protocol.ApiKeys;
 
 import org.junit.jupiter.api.AfterEach;
@@ -41,7 +40,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
@@ -63,20 +61,14 @@ class ControlRequestSendThreadTest {
         }
     }
 
-    /** U1: happy path — single item dequeued, dispatched, callback invoked. */
     @Test
     void testHappyPath() throws Exception {
-        BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
         MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
 
-        StopReplicaResponse response = new StopReplicaResponse();
+        ApiVersionsResponse response = new ApiVersionsResponse();
         AtomicInteger invocationCount = new AtomicInteger(0);
-        TabletServerGateway gateway =
-                stubGateway(
-                        req -> {
-                            invocationCount.incrementAndGet();
-                            return CompletableFuture.completedFuture(response);
-                        });
+        TabletServerGateway gateway = unusedGateway();
 
         AtomicReference<Object> callbackResponse = new AtomicReference<>();
         CountDownLatch callbackLatch = new CountDownLatch(1);
@@ -85,16 +77,18 @@ class ControlRequestSendThreadTest {
         thread.start();
 
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            invocationCount.incrementAndGet();
+                            return CompletableFuture.completedFuture(response);
+                        },
                         (resp, err) -> {
                             callbackResponse.set(resp);
                             callbackLatch.countDown();
                         },
                         EPOCH,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(callbackResponse.get()).isSameAs(response);
@@ -105,25 +99,14 @@ class ControlRequestSendThreadTest {
         assertThat(invocationCount.get()).isEqualTo(1);
     }
 
-    /** U2: retry then succeed — gateway fails once, succeeds on second attempt. */
     @Test
     void testRetryThenSucceed() throws Exception {
-        BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
         MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
 
-        StopReplicaResponse response = new StopReplicaResponse();
+        ApiVersionsResponse response = new ApiVersionsResponse();
         AtomicInteger callCount = new AtomicInteger(0);
-        TabletServerGateway gateway =
-                stubGateway(
-                        req -> {
-                            if (callCount.incrementAndGet() == 1) {
-                                CompletableFuture<StopReplicaResponse> fail =
-                                        new CompletableFuture<>();
-                                fail.completeExceptionally(new RuntimeException("transient error"));
-                                return fail;
-                            }
-                            return CompletableFuture.completedFuture(response);
-                        });
+        TabletServerGateway gateway = unusedGateway();
 
         CountDownLatch callbackLatch = new CountDownLatch(1);
 
@@ -131,28 +114,33 @@ class ControlRequestSendThreadTest {
         thread.start();
 
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            if (callCount.incrementAndGet() == 1) {
+                                CompletableFuture<ApiVersionsResponse> fail =
+                                        new CompletableFuture<>();
+                                fail.completeExceptionally(new RuntimeException("transient error"));
+                                return fail;
+                            }
+                            return CompletableFuture.completedFuture(response);
+                        },
                         (resp, err) -> callbackLatch.countDown(),
                         EPOCH,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(getCounter(metricGroup, MetricNames.SENDER_RETRY_COUNT).getCount())
                 .isGreaterThanOrEqualTo(1);
     }
 
-    /** U4: stale-epoch drop — item with older epoch is dropped, staleDropCount increments. */
     @Test
     void testStaleEpochDrop() throws Exception {
-        BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
         MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
 
-        StopReplicaResponse response = new StopReplicaResponse();
-        TabletServerGateway gateway =
-                stubGateway(req -> CompletableFuture.completedFuture(response));
+        ApiVersionsResponse response = new ApiVersionsResponse();
+        TabletServerGateway gateway = unusedGateway();
 
         CountDownLatch sentinelLatch = new CountDownLatch(1);
 
@@ -161,38 +149,34 @@ class ControlRequestSendThreadTest {
 
         // stale item (epoch 1 < current 5)
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> CompletableFuture.completedFuture(response),
                         (resp, err) -> {},
                         1,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         // sentinel item with current epoch to detect when stale item was processed
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> CompletableFuture.completedFuture(response),
                         (resp, err) -> sentinelLatch.countDown(),
                         5,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         assertThat(sentinelLatch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(getCounter(metricGroup, MetricNames.SENDER_STALE_DROP_COUNT).getCount())
                 .isEqualTo(1);
     }
 
-    /** U5: gateway absent then present — retries until gateway becomes available. */
     @Test
     void testGatewayAbsentThenPresent() throws Exception {
-        BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
         MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
 
-        StopReplicaResponse response = new StopReplicaResponse();
-        TabletServerGateway gateway =
-                stubGateway(req -> CompletableFuture.completedFuture(response));
+        ApiVersionsResponse response = new ApiVersionsResponse();
+        TabletServerGateway gateway = unusedGateway();
 
         AtomicInteger gatewayCallCount = new AtomicInteger(0);
         Supplier<Optional<TabletServerGateway>> gatewaySupplier =
@@ -209,33 +193,26 @@ class ControlRequestSendThreadTest {
         thread.start();
 
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> CompletableFuture.completedFuture(response),
                         (resp, err) -> callbackLatch.countDown(),
                         EPOCH,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(getCounter(metricGroup, MetricNames.SENDER_RETRY_COUNT).getCount())
                 .isGreaterThanOrEqualTo(3);
     }
 
-    /** U7: shutdown cancels in-flight — shutdown completes quickly, callback never invoked. */
     @Test
     void testShutdownCancelsInFlight() throws Exception {
-        BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
         MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
 
         CountDownLatch invokedLatch = new CountDownLatch(1);
-        CompletableFuture<StopReplicaResponse> neverCompleteFuture = new CompletableFuture<>();
-        TabletServerGateway gateway =
-                stubGateway(
-                        req -> {
-                            invokedLatch.countDown();
-                            return neverCompleteFuture;
-                        });
+        CompletableFuture<ApiVersionsResponse> neverCompleteFuture = new CompletableFuture<>();
+        TabletServerGateway gateway = unusedGateway();
 
         AtomicInteger callbackCount = new AtomicInteger(0);
 
@@ -243,13 +220,15 @@ class ControlRequestSendThreadTest {
         thread.start();
 
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            invokedLatch.countDown();
+                            return neverCompleteFuture;
+                        },
                         (resp, err) -> callbackCount.incrementAndGet(),
                         EPOCH,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         assertThat(invokedLatch.await(5, TimeUnit.SECONDS)).isTrue();
 
@@ -263,20 +242,14 @@ class ControlRequestSendThreadTest {
         thread = null;
     }
 
-    /** U8: callback throws after successful send — thread survives, no re-send. */
     @Test
     void testCallbackThrowsDoesNotRetry() throws Exception {
-        BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>();
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
         MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
 
-        StopReplicaResponse response = new StopReplicaResponse();
+        ApiVersionsResponse response = new ApiVersionsResponse();
         AtomicInteger invocationCount = new AtomicInteger(0);
-        TabletServerGateway gateway =
-                stubGateway(
-                        req -> {
-                            invocationCount.incrementAndGet();
-                            return CompletableFuture.completedFuture(response);
-                        });
+        TabletServerGateway gateway = unusedGateway();
 
         CountDownLatch secondCallbackLatch = new CountDownLatch(1);
 
@@ -285,50 +258,50 @@ class ControlRequestSendThreadTest {
 
         // first item: callback throws
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            invocationCount.incrementAndGet();
+                            return CompletableFuture.completedFuture(response);
+                        },
                         (resp, err) -> {
                             throw new RuntimeException("buggy callback");
                         },
                         EPOCH,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         // second item: proves thread survived
         queue.put(
-                new QueueItem(
-                        ApiKeys.STOP_REPLICA,
-                        new StopReplicaRequest(),
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            invocationCount.incrementAndGet();
+                            return CompletableFuture.completedFuture(response);
+                        },
                         (resp, err) -> secondCallbackLatch.countDown(),
                         EPOCH,
-                        System.currentTimeMillis(),
-                        null));
+                        System.currentTimeMillis()));
 
         assertThat(secondCallbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
-        // gateway invoked exactly twice (once per item, no re-send from callback failure)
+        // request sender invoked exactly twice (once per item, no re-send from callback failure)
         assertThat(invocationCount.get()).isEqualTo(2);
         assertThat(getCounter(metricGroup, MetricNames.SENDER_RETRY_COUNT).getCount()).isEqualTo(0);
         assertThat(getGaugeValue(metricGroup, MetricNames.SENDER_ALIVE)).isEqualTo(1);
     }
 
-    private static TabletServerGateway stubGateway(
-            Function<StopReplicaRequest, CompletableFuture<StopReplicaResponse>> stopReplicaFn) {
+    private static TabletServerGateway unusedGateway() {
         return (TabletServerGateway)
                 Proxy.newProxyInstance(
                         TabletServerGateway.class.getClassLoader(),
                         new Class<?>[] {TabletServerGateway.class},
                         (proxy, method, args) -> {
-                            if ("stopReplica".equals(method.getName())) {
-                                return stopReplicaFn.apply((StopReplicaRequest) args[0]);
-                            }
                             throw new UnsupportedOperationException(
-                                    "Stub does not support: " + method.getName());
+                                    "Unexpected gateway call: " + method.getName());
                         });
     }
 
     private ControlRequestSendThread createThread(
-            BlockingQueue<QueueItem> queue,
+            BlockingQueue<QueueItem<?>> queue,
             Supplier<Optional<TabletServerGateway>> gatewaySupplier,
             IntSupplier epochSupplier,
             MetricGroup metricGroup) {

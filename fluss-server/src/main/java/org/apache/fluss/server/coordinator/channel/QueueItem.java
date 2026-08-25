@@ -17,51 +17,48 @@
 
 package org.apache.fluss.server.coordinator.channel;
 
-import org.apache.fluss.metadata.TableBucketReplica;
+import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.ApiMessage;
 import org.apache.fluss.rpc.protocol.ApiKeys;
 
 import javax.annotation.Nullable;
 
-import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 
 /** An immutable item placed on the per-tablet-server sender queue. */
-public final class QueueItem {
+public final class QueueItem<ResponseT extends ApiMessage> {
 
     private final ApiKeys apiKey;
-    private final ApiMessage request;
-    @Nullable private final BiConsumer<ApiMessage, Throwable> callback;
+    private final Function<TabletServerGateway, CompletableFuture<ResponseT>> requestSender;
+    @Nullable private final BiConsumer<ResponseT, ? super Throwable> callback;
     private final int coordinatorEpoch;
     private final long enqueueTimeMs;
-    @Nullable private final Set<TableBucketReplica> deletionReplicas;
 
-    @SuppressWarnings("unchecked")
     public QueueItem(
             ApiKeys apiKey,
-            ApiMessage request,
-            @Nullable BiConsumer<? extends ApiMessage, ? super Throwable> callback,
+            Function<TabletServerGateway, CompletableFuture<ResponseT>> requestSender,
+            @Nullable BiConsumer<ResponseT, ? super Throwable> callback,
             int coordinatorEpoch,
-            long enqueueTimeMs,
-            @Nullable Set<TableBucketReplica> deletionReplicas) {
+            long enqueueTimeMs) {
         this.apiKey = apiKey;
-        this.request = request;
-        this.callback = (BiConsumer<ApiMessage, Throwable>) callback;
+        this.requestSender = requestSender;
+        this.callback = callback;
         this.coordinatorEpoch = coordinatorEpoch;
         this.enqueueTimeMs = enqueueTimeMs;
-        this.deletionReplicas = deletionReplicas;
     }
 
     public ApiKeys getApiKey() {
         return apiKey;
     }
 
-    public ApiMessage getRequest() {
-        return request;
+    public CompletableFuture<ResponseT> send(TabletServerGateway gateway) {
+        return requestSender.apply(gateway);
     }
 
     @Nullable
-    public BiConsumer<ApiMessage, Throwable> getCallback() {
+    public BiConsumer<ResponseT, ? super Throwable> getCallback() {
         return callback;
     }
 

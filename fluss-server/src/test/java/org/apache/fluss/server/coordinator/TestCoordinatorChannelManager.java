@@ -18,27 +18,16 @@
 package org.apache.fluss.server.coordinator;
 
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.metadata.TableBucketReplica;
 import org.apache.fluss.rpc.RpcClient;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
-import org.apache.fluss.rpc.messages.StopReplicaRequest;
-import org.apache.fluss.rpc.messages.StopReplicaResponse;
 import org.apache.fluss.rpc.metrics.TestingClientMetricGroup;
 import org.apache.fluss.server.metrics.group.TestingMetricGroups;
-
-import javax.annotation.Nullable;
 
 import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.function.BiConsumer;
 
-/**
- * A coordinator channel manager for test purpose which can set gateways manually. Overrides {@link
- * #sendStopBucketReplicaRequest} to invoke the callback synchronously via the direct gateway path,
- * bypassing the per-TS sender thread used in production.
- */
+/** A coordinator channel manager for test purpose which can set gateways manually. */
 public class TestCoordinatorChannelManager extends CoordinatorChannelManager {
 
     private Map<Integer, TabletServerGateway> gateways;
@@ -58,19 +47,6 @@ public class TestCoordinatorChannelManager extends CoordinatorChannelManager {
 
     public void setGateways(Map<Integer, TabletServerGateway> gateways) {
         this.gateways = gateways;
-    }
-
-    @Override
-    public void sendStopBucketReplicaRequest(
-            int receiveServerId,
-            StopReplicaRequest stopReplicaRequest,
-            int coordinatorEpoch,
-            @Nullable Set<TableBucketReplica> deletionReplicas,
-            BiConsumer<StopReplicaResponse, ? super Throwable> responseConsumer) {
-        Optional<TabletServerGateway> gatewayOpt = getTabletServerGateway(receiveServerId);
-        if (gatewayOpt.isPresent()) {
-            gatewayOpt.get().stopReplica(stopReplicaRequest).whenComplete(responseConsumer);
-        }
     }
 
     @Override

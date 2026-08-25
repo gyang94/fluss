@@ -39,13 +39,13 @@ public enum ReplicaState implements BaseState<ReplicaState> {
     OnlineReplica {
         @Override
         public Set<ReplicaState> getValidPreviousStates() {
-            return EnumSet.of(NewReplica, OnlineReplica, OfflineReplica, ReplicaDeletionIneligible);
+            return EnumSet.of(NewReplica, OnlineReplica, OfflineReplica);
         }
     },
     OfflineReplica {
         @Override
         public Set<ReplicaState> getValidPreviousStates() {
-            return EnumSet.of(NewReplica, OnlineReplica, OfflineReplica, ReplicaDeletionIneligible);
+            return EnumSet.of(NewReplica, OnlineReplica, OfflineReplica);
         }
     },
     ReplicaMigrationStarted {
@@ -68,12 +68,6 @@ public enum ReplicaState implements BaseState<ReplicaState> {
         @Override
         public Set<ReplicaState> getValidPreviousStates() {
             return EnumSet.of(ReplicaDeletionStarted);
-        }
-    },
-    ReplicaDeletionIneligible {
-        @Override
-        public Set<ReplicaState> getValidPreviousStates() {
-            return EnumSet.of(OfflineReplica, ReplicaDeletionStarted);
         }
     }
 }
