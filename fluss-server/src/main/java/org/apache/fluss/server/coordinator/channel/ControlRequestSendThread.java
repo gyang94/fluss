@@ -19,6 +19,8 @@ package org.apache.fluss.server.coordinator.channel;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.DisconnectException;
+import org.apache.fluss.exception.NetworkException;
 import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.metrics.DescriptiveStatisticsHistogram;
 import org.apache.fluss.metrics.Histogram;
@@ -31,11 +33,16 @@ import org.apache.fluss.utils.concurrent.ShutdownableThread;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
+
+import static org.apache.fluss.utils.ExceptionUtils.stripCompletionException;
+import static org.apache.fluss.utils.ExceptionUtils.stripExecutionException;
 
 /**
  * Per-tablet-server sender thread that drains the control-plane request queue and retries on
@@ -44,7 +51,10 @@ import java.util.function.Supplier;
  * <p>Each invocation of {@link #doWork()} takes one {@link QueueItem} from the queue. Stale items
  * (whose {@code coordinatorEpoch} is less than the current epoch) are dropped immediately.
  * Otherwise the item is sent to the tablet server via the gateway, retrying with a configurable
- * backoff until the send succeeds or the thread is shut down.
+ * backoff after transport failures until the send succeeds or the thread is shut down. Before a
+ * retry, the old connection is closed so its in-flight request cannot accumulate in the RPC layer.
+ * Explicit server rejections and local request construction failures are completed through the
+ * callback without retrying, allowing the next FIFO item to make progress.
  *
  * <p>The callback is invoked outside the retry loop so a response-handler failure does not retry a
  * request that the tablet server has already completed.
@@ -56,6 +66,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
     private final int tabletServerId;
     private final BlockingQueue<QueueItem<?>> queue;
     private final Supplier<Optional<TabletServerGateway>> gatewaySupplier;
+    private final Supplier<CompletableFuture<Void>> connectionInvalidator;
     private final IntSupplier epochSupplier;
     private final long backoffMs;
     private final long requestTimeoutMs;
@@ -72,6 +83,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
             int tabletServerId,
             BlockingQueue<QueueItem<?>> queue,
             Supplier<Optional<TabletServerGateway>> gatewaySupplier,
+            Supplier<CompletableFuture<Void>> connectionInvalidator,
             IntSupplier epochSupplier,
             Configuration conf,
             MetricGroup metricGroup) {
@@ -79,6 +91,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
         this.tabletServerId = tabletServerId;
         this.queue = queue;
         this.gatewaySupplier = gatewaySupplier;
+        this.connectionInvalidator = connectionInvalidator;
         this.epochSupplier = epochSupplier;
         this.backoffMs = conf.get(ConfigOptions.COORDINATOR_REQUEST_RETRY_BACKOFF).toMillis();
         this.requestTimeoutMs = conf.get(ConfigOptions.COORDINATOR_REQUEST_TIMEOUT).toMillis();
@@ -96,7 +109,11 @@ public class ControlRequestSendThread extends ShutdownableThread {
     @Override
     public void run() {
         aliveFlag.set(1);
-        super.run();
+        try {
+            super.run();
+        } finally {
+            aliveFlag.set(0);
+        }
     }
 
     @Override
@@ -109,15 +126,6 @@ public class ControlRequestSendThread extends ShutdownableThread {
             }
         }
         return initiated;
-    }
-
-    @Override
-    public void shutdown() throws InterruptedException {
-        try {
-            super.shutdown();
-        } finally {
-            aliveFlag.set(0);
-        }
     }
 
     @Override
@@ -141,52 +149,152 @@ public class ControlRequestSendThread extends ShutdownableThread {
             send(item);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        } catch (Throwable t) {
-            log.error("Unexpected error in {}; thread continues", getName(), t);
         }
     }
 
     private <ResponseT extends ApiMessage> void send(QueueItem<ResponseT> item)
             throws InterruptedException {
-        ResponseT response = null;
-        boolean sendSuccessful = false;
-        while (isRunning() && !sendSuccessful) {
-            Optional<TabletServerGateway> gatewayOpt = gatewaySupplier.get();
+        while (isRunning()) {
+            Optional<TabletServerGateway> gatewayOpt;
+            try {
+                gatewayOpt = gatewaySupplier.get();
+            } catch (RuntimeException e) {
+                Throwable failure = unwrapFailure(e);
+                log.error(
+                        "Failed to resolve the gateway for {} to tabletServer {}; "
+                                + "the request will not be retried",
+                        item.getApiKey(),
+                        tabletServerId,
+                        failure);
+                invokeCallback(item, null, failure);
+                return;
+            }
             if (!gatewayOpt.isPresent()) {
                 retryCount.inc();
                 backoff();
                 continue;
             }
+
+            CompletableFuture<ResponseT> future = null;
+            ResponseT response;
+            Throwable failure;
             try {
-                CompletableFuture<ResponseT> future = item.send(gatewayOpt.get());
+                future = item.send(gatewayOpt.get());
                 inFlight.set(future);
                 response = future.get(requestTimeoutMs, TimeUnit.MILLISECONDS);
-                sendSuccessful = true;
-            } catch (Throwable t) {
-                retryCount.inc();
-                log.warn(
-                        "Failed to send {} to tabletServer {}; will retry after {}ms",
-                        item.getApiKey(),
-                        tabletServerId,
-                        backoffMs,
-                        t);
-                backoff();
+                invokeCallback(item, response, null);
+                return;
+            } catch (TimeoutException e) {
+                failure = e;
+            } catch (ExecutionException e) {
+                failure = unwrapFailure(e);
+            } catch (RuntimeException e) {
+                failure = unwrapFailure(e);
             } finally {
-                inFlight.set(null);
+                if (future != null) {
+                    inFlight.compareAndSet(future, null);
+                }
             }
-        }
 
-        if (sendSuccessful && item.getCallback() != null) {
-            try {
-                item.getCallback().accept(response, null);
-            } catch (Throwable t) {
+            if (!isRunning()) {
+                return;
+            }
+
+            if (!isRetriableTransportFailure(failure)) {
                 log.error(
-                        "Callback for {} to tabletServer {} threw; the request itself "
-                                + "succeeded so no retry is attempted.",
+                        "Failed to send {} to tabletServer {}; the failure is not retriable",
                         item.getApiKey(),
                         tabletServerId,
-                        t);
+                        failure);
+                invokeCallback(item, null, failure);
+                return;
             }
+
+            if (!invalidateConnection(item, failure)) {
+                invokeCallback(item, null, failure);
+                return;
+            }
+
+            retryCount.inc();
+            log.warn(
+                    "Failed to send {} to tabletServer {}; will retry after {}ms",
+                    item.getApiKey(),
+                    tabletServerId,
+                    backoffMs,
+                    failure);
+            backoff();
+        }
+    }
+
+    private boolean invalidateConnection(QueueItem<?> item, Throwable requestFailure)
+            throws InterruptedException {
+        try {
+            connectionInvalidator.get().get();
+            return true;
+        } catch (ExecutionException e) {
+            Throwable invalidationFailure = unwrapFailure(e);
+            addSuppressedIfDistinct(requestFailure, invalidationFailure);
+            log.error(
+                    "Failed to invalidate the connection to tabletServer {} after {} failed; "
+                            + "the request will not be retried",
+                    tabletServerId,
+                    item.getApiKey(),
+                    invalidationFailure);
+            return false;
+        } catch (RuntimeException e) {
+            Throwable invalidationFailure = unwrapFailure(e);
+            addSuppressedIfDistinct(requestFailure, invalidationFailure);
+            log.error(
+                    "Failed to invalidate the connection to tabletServer {} after {} failed; "
+                            + "the request will not be retried",
+                    tabletServerId,
+                    item.getApiKey(),
+                    invalidationFailure);
+            return false;
+        }
+    }
+
+    private static Throwable unwrapFailure(Throwable failure) {
+        Throwable unwrapped = failure;
+        Throwable previous;
+        do {
+            previous = unwrapped;
+            unwrapped = stripCompletionException(stripExecutionException(unwrapped));
+        } while (unwrapped != previous);
+
+        if (unwrapped instanceof Error) {
+            throw (Error) unwrapped;
+        }
+        return unwrapped;
+    }
+
+    private static void addSuppressedIfDistinct(Throwable failure, Throwable suppressed) {
+        if (failure != suppressed) {
+            failure.addSuppressed(suppressed);
+        }
+    }
+
+    private static boolean isRetriableTransportFailure(Throwable failure) {
+        return failure instanceof TimeoutException
+                || failure instanceof org.apache.fluss.exception.TimeoutException
+                || failure instanceof NetworkException
+                || failure instanceof DisconnectException;
+    }
+
+    private <ResponseT extends ApiMessage> void invokeCallback(
+            QueueItem<ResponseT> item, ResponseT response, Throwable failure) {
+        if (item.getCallback() == null) {
+            return;
+        }
+        try {
+            item.getCallback().accept(response, failure);
+        } catch (RuntimeException e) {
+            Throwable callbackFailure = unwrapFailure(e);
+            log.error(
+                    "Callback for {} to tabletServer {} threw; the request will not be retried.",
+                    item.getApiKey(),
+                    tabletServerId,
+                    callbackFailure);
         }
     }
 

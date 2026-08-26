@@ -143,6 +143,7 @@ public class CoordinatorChannelManager {
                             id,
                             queue,
                             () -> rpcGatewayManager.getRpcGateway(id),
+                            () -> rpcGatewayManager.disconnectServer(id),
                             epochSupplier,
                             conf,
                             tsGroup);
@@ -235,7 +236,8 @@ public class CoordinatorChannelManager {
 
     /**
      * Enqueues a control-plane request for the target tablet server. The per-tablet-server sender
-     * retries RPC-layer failures until the request succeeds or the channel is removed.
+     * retries transport failures and timeouts until the request succeeds or the channel is removed.
+     * Other failures are completed through the response consumer without retrying.
      *
      * @return whether the request was enqueued
      */

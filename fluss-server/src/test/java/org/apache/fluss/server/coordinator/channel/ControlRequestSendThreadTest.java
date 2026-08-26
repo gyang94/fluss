@@ -19,6 +19,7 @@ package org.apache.fluss.server.coordinator.channel;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.NetworkException;
 import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.metrics.Gauge;
 import org.apache.fluss.metrics.MetricNames;
@@ -32,6 +33,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -44,6 +46,7 @@ import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for {@link ControlRequestSendThread}. */
 class ControlRequestSendThreadTest {
@@ -109,8 +112,19 @@ class ControlRequestSendThreadTest {
         TabletServerGateway gateway = unusedGateway();
 
         CountDownLatch callbackLatch = new CountDownLatch(1);
+        AtomicInteger invalidationCount = new AtomicInteger(0);
 
-        thread = createThread(queue, () -> Optional.of(gateway), () -> EPOCH, metricGroup);
+        thread =
+                createThread(
+                        queue,
+                        () -> Optional.of(gateway),
+                        () -> {
+                            invalidationCount.incrementAndGet();
+                            return CompletableFuture.completedFuture(null);
+                        },
+                        () -> EPOCH,
+                        metricGroup,
+                        Duration.ofSeconds(30));
         thread.start();
 
         queue.put(
@@ -120,7 +134,7 @@ class ControlRequestSendThreadTest {
                             if (callCount.incrementAndGet() == 1) {
                                 CompletableFuture<ApiVersionsResponse> fail =
                                         new CompletableFuture<>();
-                                fail.completeExceptionally(new RuntimeException("transient error"));
+                                fail.completeExceptionally(new NetworkException("transient error"));
                                 return fail;
                             }
                             return CompletableFuture.completedFuture(response);
@@ -132,6 +146,138 @@ class ControlRequestSendThreadTest {
         assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
         assertThat(getCounter(metricGroup, MetricNames.SENDER_RETRY_COUNT).getCount())
                 .isGreaterThanOrEqualTo(1);
+        assertThat(invalidationCount.get()).isEqualTo(1);
+    }
+
+    @Test
+    void testNonRetriableFailureAdvancesQueue() throws Exception {
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
+        MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
+        TabletServerGateway gateway = unusedGateway();
+
+        IllegalStateException permanentFailure = new IllegalStateException("invalid request");
+        AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
+        AtomicInteger firstRequestInvocations = new AtomicInteger(0);
+        CountDownLatch secondCallbackLatch = new CountDownLatch(1);
+
+        thread = createThread(queue, () -> Optional.of(gateway), () -> EPOCH, metricGroup);
+        thread.start();
+
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            firstRequestInvocations.incrementAndGet();
+                            throw permanentFailure;
+                        },
+                        (response, failure) -> callbackFailure.set(failure),
+                        EPOCH,
+                        System.currentTimeMillis()));
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> CompletableFuture.completedFuture(new ApiVersionsResponse()),
+                        (response, failure) -> secondCallbackLatch.countDown(),
+                        EPOCH,
+                        System.currentTimeMillis()));
+
+        assertThat(secondCallbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(callbackFailure.get()).isSameAs(permanentFailure);
+        assertThat(firstRequestInvocations.get()).isEqualTo(1);
+        assertThat(getCounter(metricGroup, MetricNames.SENDER_RETRY_COUNT).getCount()).isEqualTo(0);
+    }
+
+    @Test
+    void testTimeoutInvalidatesConnectionBeforeRetry() throws Exception {
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
+        MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
+        TabletServerGateway gateway = unusedGateway();
+
+        CompletableFuture<ApiVersionsResponse> firstAttempt = new CompletableFuture<>();
+        ApiVersionsResponse response = new ApiVersionsResponse();
+        AtomicInteger invocationCount = new AtomicInteger(0);
+        AtomicInteger invalidationCount = new AtomicInteger(0);
+        CountDownLatch callbackLatch = new CountDownLatch(1);
+
+        thread =
+                createThread(
+                        queue,
+                        () -> Optional.of(gateway),
+                        () -> {
+                            invalidationCount.incrementAndGet();
+                            firstAttempt.completeExceptionally(
+                                    new NetworkException("connection invalidated"));
+                            return CompletableFuture.completedFuture(null);
+                        },
+                        () -> EPOCH,
+                        metricGroup,
+                        Duration.ofMillis(20));
+        thread.start();
+
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored ->
+                                invocationCount.incrementAndGet() == 1
+                                        ? firstAttempt
+                                        : CompletableFuture.completedFuture(response),
+                        (callbackResponse, failure) -> callbackLatch.countDown(),
+                        EPOCH,
+                        System.currentTimeMillis()));
+
+        assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(firstAttempt.isCompletedExceptionally()).isTrue();
+        assertThat(invalidationCount.get()).isEqualTo(1);
+        assertThat(invocationCount.get()).isEqualTo(2);
+    }
+
+    @Test
+    void testAsyncRequestErrorIsRethrown() throws Exception {
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
+        MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
+        AssertionError error = new AssertionError("fatal request error");
+        CompletableFuture<ApiVersionsResponse> failedFuture = new CompletableFuture<>();
+        failedFuture.completeExceptionally(error);
+
+        thread = createThread(queue, () -> Optional.of(unusedGateway()), () -> EPOCH, metricGroup);
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> failedFuture,
+                        (response, failure) -> {},
+                        EPOCH,
+                        System.currentTimeMillis()));
+
+        assertThatThrownBy(thread::doWork).isSameAs(error);
+    }
+
+    @Test
+    void testAsyncConnectionInvalidationErrorIsRethrown() throws Exception {
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
+        MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
+        CompletableFuture<ApiVersionsResponse> requestFailure = new CompletableFuture<>();
+        requestFailure.completeExceptionally(new NetworkException("transient error"));
+        AssertionError error = new AssertionError("fatal invalidation error");
+        CompletableFuture<Void> invalidationFailure = new CompletableFuture<>();
+        invalidationFailure.completeExceptionally(error);
+
+        thread =
+                createThread(
+                        queue,
+                        () -> Optional.of(unusedGateway()),
+                        () -> invalidationFailure,
+                        () -> EPOCH,
+                        metricGroup,
+                        Duration.ofSeconds(30));
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> requestFailure,
+                        (response, failure) -> {},
+                        EPOCH,
+                        System.currentTimeMillis()));
+
+        assertThatThrownBy(thread::doWork).isSameAs(error);
     }
 
     @Test
@@ -233,7 +379,8 @@ class ControlRequestSendThreadTest {
         assertThat(invokedLatch.await(5, TimeUnit.SECONDS)).isTrue();
 
         long shutdownStart = System.currentTimeMillis();
-        thread.shutdown();
+        thread.initiateShutdown();
+        thread.awaitShutdown();
         long shutdownDuration = System.currentTimeMillis() - shutdownStart;
 
         assertThat(shutdownDuration).isLessThan(2000);
@@ -305,10 +452,33 @@ class ControlRequestSendThreadTest {
             Supplier<Optional<TabletServerGateway>> gatewaySupplier,
             IntSupplier epochSupplier,
             MetricGroup metricGroup) {
+        return createThread(
+                queue,
+                gatewaySupplier,
+                () -> CompletableFuture.completedFuture(null),
+                epochSupplier,
+                metricGroup,
+                Duration.ofSeconds(30));
+    }
+
+    private ControlRequestSendThread createThread(
+            BlockingQueue<QueueItem<?>> queue,
+            Supplier<Optional<TabletServerGateway>> gatewaySupplier,
+            Supplier<CompletableFuture<Void>> connectionInvalidator,
+            IntSupplier epochSupplier,
+            MetricGroup metricGroup,
+            Duration requestTimeout) {
         Configuration conf = new Configuration();
-        conf.set(ConfigOptions.COORDINATOR_REQUEST_RETRY_BACKOFF, java.time.Duration.ofMillis(10));
+        conf.set(ConfigOptions.COORDINATOR_REQUEST_RETRY_BACKOFF, Duration.ofMillis(10));
+        conf.set(ConfigOptions.COORDINATOR_REQUEST_TIMEOUT, requestTimeout);
         return new ControlRequestSendThread(
-                TABLET_SERVER_ID, queue, gatewaySupplier, epochSupplier, conf, metricGroup);
+                TABLET_SERVER_ID,
+                queue,
+                gatewaySupplier,
+                connectionInvalidator,
+                epochSupplier,
+                conf,
+                metricGroup);
     }
 
     private static Counter getCounter(MetricGroup group, String name) {
