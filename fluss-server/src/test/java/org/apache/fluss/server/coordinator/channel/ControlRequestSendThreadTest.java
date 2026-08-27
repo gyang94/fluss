@@ -45,6 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
 
+import static org.apache.fluss.testutils.common.CommonTestUtils.waitUntil;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -229,6 +230,115 @@ class ControlRequestSendThreadTest {
         assertThat(firstAttempt.isCompletedExceptionally()).isTrue();
         assertThat(invalidationCount.get()).isEqualTo(1);
         assertThat(invocationCount.get()).isEqualTo(2);
+    }
+
+    @Test
+    void testConnectionInvalidationFailureRetainsQueueHead() throws Exception {
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
+        MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
+        TabletServerGateway gateway = unusedGateway();
+        ApiVersionsResponse response = new ApiVersionsResponse();
+        AtomicInteger sendCount = new AtomicInteger();
+        AtomicInteger invalidationCount = new AtomicInteger();
+        AtomicReference<ApiVersionsResponse> callbackResponse = new AtomicReference<>();
+        CountDownLatch callbackLatch = new CountDownLatch(1);
+
+        thread =
+                createThread(
+                        queue,
+                        () -> Optional.of(gateway),
+                        () -> {
+                            if (invalidationCount.incrementAndGet() == 1) {
+                                CompletableFuture<Void> failure = new CompletableFuture<>();
+                                failure.completeExceptionally(
+                                        new NetworkException("invalidation failed"));
+                                return failure;
+                            }
+                            return CompletableFuture.completedFuture(null);
+                        },
+                        () -> EPOCH,
+                        metricGroup,
+                        Duration.ofSeconds(30));
+        thread.start();
+
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored -> {
+                            if (sendCount.incrementAndGet() == 1) {
+                                CompletableFuture<ApiVersionsResponse> failure =
+                                        new CompletableFuture<>();
+                                failure.completeExceptionally(
+                                        new NetworkException("request failed"));
+                                return failure;
+                            }
+                            return CompletableFuture.completedFuture(response);
+                        },
+                        (callbackResult, failure) -> {
+                            callbackResponse.set(callbackResult);
+                            callbackLatch.countDown();
+                        },
+                        EPOCH,
+                        System.currentTimeMillis()));
+
+        assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(callbackResponse.get()).isSameAs(response);
+        assertThat(sendCount.get()).isEqualTo(2);
+        assertThat(invalidationCount.get()).isEqualTo(2);
+    }
+
+    @Test
+    void testConnectionInvalidationTimeoutDoesNotResendRequest() throws Exception {
+        BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
+        MetricGroup metricGroup = TestMetricGroup.createTestMetricGroup();
+        TabletServerGateway gateway = unusedGateway();
+        CompletableFuture<ApiVersionsResponse> firstAttempt = new CompletableFuture<>();
+        CompletableFuture<Void> invalidationFuture = new CompletableFuture<>();
+        ApiVersionsResponse response = new ApiVersionsResponse();
+        AtomicInteger sendCount = new AtomicInteger();
+        AtomicInteger invalidationCount = new AtomicInteger();
+        CountDownLatch invalidationStarted = new CountDownLatch(1);
+        CountDownLatch callbackLatch = new CountDownLatch(1);
+
+        thread =
+                createThread(
+                        queue,
+                        () -> Optional.of(gateway),
+                        () -> {
+                            invalidationCount.incrementAndGet();
+                            invalidationStarted.countDown();
+                            return invalidationFuture;
+                        },
+                        () -> EPOCH,
+                        metricGroup,
+                        Duration.ofMillis(20));
+        thread.start();
+
+        queue.put(
+                new QueueItem<>(
+                        ApiKeys.API_VERSIONS,
+                        ignored ->
+                                sendCount.incrementAndGet() == 1
+                                        ? firstAttempt
+                                        : CompletableFuture.completedFuture(response),
+                        (callbackResponse, failure) -> callbackLatch.countDown(),
+                        EPOCH,
+                        System.currentTimeMillis()));
+
+        assertThat(invalidationStarted.await(5, TimeUnit.SECONDS)).isTrue();
+        waitUntil(
+                () -> getCounter(metricGroup, MetricNames.SENDER_RETRY_COUNT).getCount() > 0,
+                Duration.ofSeconds(5),
+                "The invalidation wait did not time out");
+        assertThat(sendCount.get()).isEqualTo(1);
+        assertThat(invalidationCount.get()).isEqualTo(1);
+        assertThat(callbackLatch.getCount()).isEqualTo(1);
+
+        firstAttempt.completeExceptionally(new NetworkException("connection invalidated"));
+        invalidationFuture.complete(null);
+
+        assertThat(callbackLatch.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(sendCount.get()).isEqualTo(2);
     }
 
     @Test
@@ -469,8 +579,8 @@ class ControlRequestSendThreadTest {
             MetricGroup metricGroup,
             Duration requestTimeout) {
         Configuration conf = new Configuration();
-        conf.set(ConfigOptions.COORDINATOR_REQUEST_RETRY_BACKOFF, Duration.ofMillis(10));
-        conf.set(ConfigOptions.COORDINATOR_REQUEST_TIMEOUT, requestTimeout);
+        conf.set(ConfigOptions.COORDINATOR_CONTROL_REQUEST_RETRY_BACKOFF, Duration.ofMillis(10));
+        conf.set(ConfigOptions.COORDINATOR_CONTROL_REQUEST_TIMEOUT, requestTimeout);
         return new ControlRequestSendThread(
                 TABLET_SERVER_ID,
                 queue,

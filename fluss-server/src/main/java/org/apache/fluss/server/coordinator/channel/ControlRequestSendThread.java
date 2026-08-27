@@ -93,8 +93,10 @@ public class ControlRequestSendThread extends ShutdownableThread {
         this.gatewaySupplier = gatewaySupplier;
         this.connectionInvalidator = connectionInvalidator;
         this.epochSupplier = epochSupplier;
-        this.backoffMs = conf.get(ConfigOptions.COORDINATOR_REQUEST_RETRY_BACKOFF).toMillis();
-        this.requestTimeoutMs = conf.get(ConfigOptions.COORDINATOR_REQUEST_TIMEOUT).toMillis();
+        this.backoffMs =
+                conf.get(ConfigOptions.COORDINATOR_CONTROL_REQUEST_RETRY_BACKOFF).toMillis();
+        this.requestTimeoutMs =
+                conf.get(ConfigOptions.COORDINATOR_CONTROL_REQUEST_TIMEOUT).toMillis();
 
         this.queueTimeMsHistogram =
                 metricGroup.histogram(
@@ -210,8 +212,7 @@ public class ControlRequestSendThread extends ShutdownableThread {
                 return;
             }
 
-            if (!invalidateConnection(item, failure)) {
-                invokeCallback(item, null, failure);
+            if (!invalidateConnection(item)) {
                 return;
             }
 
@@ -226,32 +227,54 @@ public class ControlRequestSendThread extends ShutdownableThread {
         }
     }
 
-    private boolean invalidateConnection(QueueItem<?> item, Throwable requestFailure)
-            throws InterruptedException {
-        try {
-            connectionInvalidator.get().get();
-            return true;
-        } catch (ExecutionException e) {
-            Throwable invalidationFailure = unwrapFailure(e);
-            addSuppressedIfDistinct(requestFailure, invalidationFailure);
-            log.error(
-                    "Failed to invalidate the connection to tabletServer {} after {} failed; "
-                            + "the request will not be retried",
-                    tabletServerId,
-                    item.getApiKey(),
-                    invalidationFailure);
-            return false;
-        } catch (RuntimeException e) {
-            Throwable invalidationFailure = unwrapFailure(e);
-            addSuppressedIfDistinct(requestFailure, invalidationFailure);
-            log.error(
-                    "Failed to invalidate the connection to tabletServer {} after {} failed; "
-                            + "the request will not be retried",
-                    tabletServerId,
-                    item.getApiKey(),
-                    invalidationFailure);
-            return false;
+    private boolean invalidateConnection(QueueItem<?> item) throws InterruptedException {
+        CompletableFuture<Void> invalidationFuture = null;
+        while (isRunning()) {
+            if (invalidationFuture == null) {
+                try {
+                    invalidationFuture = connectionInvalidator.get();
+                } catch (RuntimeException e) {
+                    logInvalidationFailure(item, unwrapFailure(e));
+                    retryCount.inc();
+                    backoff();
+                    continue;
+                }
+            }
+
+            try {
+                invalidationFuture.get(requestTimeoutMs, TimeUnit.MILLISECONDS);
+                return true;
+            } catch (TimeoutException e) {
+                log.warn(
+                        "Timed out waiting to invalidate the connection to tabletServer {} after "
+                                + "{}; the queue head will be retained and invalidation will be "
+                                + "checked again after {}ms",
+                        tabletServerId,
+                        item.getApiKey(),
+                        backoffMs,
+                        e);
+            } catch (ExecutionException e) {
+                logInvalidationFailure(item, unwrapFailure(e));
+                invalidationFuture = null;
+            } catch (RuntimeException e) {
+                logInvalidationFailure(item, unwrapFailure(e));
+                invalidationFuture = null;
+            }
+
+            retryCount.inc();
+            backoff();
         }
+        return false;
+    }
+
+    private void logInvalidationFailure(QueueItem<?> item, Throwable failure) {
+        log.warn(
+                "Failed to invalidate the connection to tabletServer {} after {}; the queue head "
+                        + "will be retained and invalidation will be retried after {}ms",
+                tabletServerId,
+                item.getApiKey(),
+                backoffMs,
+                failure);
     }
 
     private static Throwable unwrapFailure(Throwable failure) {
@@ -266,12 +289,6 @@ public class ControlRequestSendThread extends ShutdownableThread {
             throw (Error) unwrapped;
         }
         return unwrapped;
-    }
-
-    private static void addSuppressedIfDistinct(Throwable failure, Throwable suppressed) {
-        if (failure != suppressed) {
-            failure.addSuppressed(suppressed);
-        }
     }
 
     private static boolean isRetriableTransportFailure(Throwable failure) {

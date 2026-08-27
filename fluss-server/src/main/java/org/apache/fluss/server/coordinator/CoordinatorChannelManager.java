@@ -135,7 +135,7 @@ public class CoordinatorChannelManager {
             BlockingQueue<QueueItem<?>> queue = new LinkedBlockingQueue<>();
 
             MetricGroup tsGroup =
-                    coordinatorMetricGroup.addGroup("tablet-server-id", String.valueOf(id));
+                    coordinatorMetricGroup.addGroup("tablet_server_id", String.valueOf(id));
             tsGroup.gauge(MetricNames.SENDER_QUEUE_SIZE, queue::size);
 
             ControlRequestSendThread thread =

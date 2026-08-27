@@ -576,8 +576,8 @@ public class ConfigOptions {
                             "The interval for cleaning up expired producer offsets "
                                     + "and orphan files in remote storage. Default is 1 hour.");
 
-    public static final ConfigOption<Duration> COORDINATOR_REQUEST_RETRY_BACKOFF =
-            key("coordinator.request.retry-backoff")
+    public static final ConfigOption<Duration> COORDINATOR_CONTROL_REQUEST_RETRY_BACKOFF =
+            key("coordinator.control-request.retry-backoff")
                     .durationType()
                     .defaultValue(Duration.ofMillis(100))
                     .withDescription(
@@ -585,8 +585,8 @@ public class ConfigOptions {
                                     + "control-plane request to a tablet server after a "
                                     + "transient RPC-layer failure.");
 
-    public static final ConfigOption<Duration> COORDINATOR_REQUEST_TIMEOUT =
-            key("coordinator.request.timeout")
+    public static final ConfigOption<Duration> COORDINATOR_CONTROL_REQUEST_TIMEOUT =
+            key("coordinator.control-request.timeout")
                     .durationType()
                     .defaultValue(Duration.ofSeconds(30))
                     .withDescription(
