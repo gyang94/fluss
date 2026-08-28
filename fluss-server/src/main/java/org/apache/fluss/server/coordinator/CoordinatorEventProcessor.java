@@ -2013,7 +2013,6 @@ public class CoordinatorEventProcessor implements EventProcessor {
 
         List<AdjustIsrResultForBucket> result = new ArrayList<>();
         Map<TableBucket, LeaderAndIsr> proposedChanges = new HashMap<>();
-        Map<TableBucket, LeaderAndIsr> committedChanges = new HashMap<>();
         for (Map.Entry<TableBucket, LeaderAndIsr> entry : leaderAndIsrList.entrySet()) {
             TableBucket tableBucket = entry.getKey();
             LeaderAndIsr tryAdjustLeaderAndIsr = entry.getValue();
@@ -2050,13 +2049,15 @@ public class CoordinatorEventProcessor implements EventProcessor {
             proposedChanges.put(tableBucket, newLeaderAndIsr);
         }
 
+        Map<TableBucket, LeaderAndIsr> committedChanges = new HashMap<>();
         try {
             zooKeeperClient.batchUpdateLeaderAndIsr(
                     proposedChanges, coordinatorContext.getCoordinatorZkVersion());
-            committedChanges.putAll(proposedChanges);
-            committedChanges.forEach(
-                    (tableBucket, newLeaderAndIsr) ->
-                            result.add(new AdjustIsrResultForBucket(tableBucket, newLeaderAndIsr)));
+            proposedChanges.forEach(
+                    (tableBucket, newLeaderAndIsr) -> {
+                        committedChanges.put(tableBucket, newLeaderAndIsr);
+                        result.add(new AdjustIsrResultForBucket(tableBucket, newLeaderAndIsr));
+                    });
         } catch (Exception batchException) {
             LOG.error("Error when batch update leader and isr. Try one by one.", batchException);
 
