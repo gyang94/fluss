@@ -656,7 +656,7 @@ public class ServerRpcMessageUtils {
             }
 
             for (Integer isrId : bucketMetadata.getIsr()) {
-                pbBucketMetadata.addIsrId(isrId);
+                pbBucketMetadata.addIsr(isrId);
             }
 
             pbBucketMetadataList.add(pbBucketMetadata);
@@ -700,7 +700,7 @@ public class ServerRpcMessageUtils {
                 Arrays.stream(pbBucketMetadata.getReplicaIds())
                         .boxed()
                         .collect(Collectors.toList()),
-                Arrays.stream(pbBucketMetadata.getIsrIds()).boxed().collect(Collectors.toList()),
+                Arrays.stream(pbBucketMetadata.getIsrs()).boxed().collect(Collectors.toList()),
                 pbBucketMetadata.hasBucketEpoch() ? pbBucketMetadata.getBucketEpoch() : null);
     }
 

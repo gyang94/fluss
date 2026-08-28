@@ -882,7 +882,7 @@ message PbBucketMetadata {
   // Generation of the complete leader/ISR state.
   // Absence indicates legacy metadata; -1 indicates no leader/ISR state exists.
   optional int32 bucket_epoch = 5;
-  repeated int32 isr_id = 6 [packed = true];
+  repeated int32 isr = 6 [packed = true];
 }
 
 message PbProduceLogReqForBucket {

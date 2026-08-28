@@ -170,7 +170,7 @@ class ServerRpcMessageUtilsTest {
         PbBucketMetadata pbBucketMetadata =
                 request.getTableMetadatasList().get(0).getBucketMetadatasList().get(0);
         assertThat(pbBucketMetadata.hasBucketEpoch()).isFalse();
-        assertThat(pbBucketMetadata.getIsrIds()).isEmpty();
+        assertThat(pbBucketMetadata.getIsrs()).isEmpty();
 
         BucketMetadata decoded =
                 getUpdateMetadataRequestData(request)
@@ -189,14 +189,14 @@ class ServerRpcMessageUtilsTest {
         assertThat(bucketMetadata.get(0).getReplicaIds()).containsExactly(1, 2, 3);
         assertThat(bucketMetadata.get(0).hasBucketEpoch()).isTrue();
         assertThat(bucketMetadata.get(0).getBucketEpoch()).isEqualTo(3);
-        assertThat(bucketMetadata.get(0).getIsrIds()).containsExactly(1, 2);
+        assertThat(bucketMetadata.get(0).getIsrs()).containsExactly(1, 2);
 
         assertThat(bucketMetadata.get(1).hasBucketEpoch()).isTrue();
         assertThat(bucketMetadata.get(1).getBucketEpoch()).isEqualTo(NO_LEADER_ISR_STATE_EPOCH);
-        assertThat(bucketMetadata.get(1).getIsrIds()).isEmpty();
+        assertThat(bucketMetadata.get(1).getIsrs()).isEmpty();
 
         assertThat(bucketMetadata.get(2).hasBucketEpoch()).isTrue();
         assertThat(bucketMetadata.get(2).getBucketEpoch()).isEqualTo(5);
-        assertThat(bucketMetadata.get(2).getIsrIds()).isEmpty();
+        assertThat(bucketMetadata.get(2).getIsrs()).isEmpty();
     }
 }
