@@ -2697,7 +2697,7 @@ public class ConfigOptions {
                     .stringType()
                     .defaultValue("raw")
                     .withDescription(
-                            "The default format for Kafka record keys when a CreateTopics request does not specify fluss.key.format. "
+                            "The default format for Kafka record keys when a CreateTopics request does not specify kafka.key.format. "
                                     + "Supported formats are raw and string.");
 
     public static final ConfigOption<String> KAFKA_DEFAULT_VALUE_FORMAT =
@@ -2705,7 +2705,7 @@ public class ConfigOptions {
                     .stringType()
                     .defaultValue("raw")
                     .withDescription(
-                            "The default format for Kafka record values when a CreateTopics request does not specify fluss.value.format. "
+                            "The default format for Kafka record values when a CreateTopics request does not specify kafka.value.format. "
                                     + "Supported formats are raw and string.");
 
     public static final ConfigOption<Duration> KAFKA_CONNECTION_MAX_IDLE_TIME =

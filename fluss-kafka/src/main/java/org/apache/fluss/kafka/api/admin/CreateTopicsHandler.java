@@ -163,6 +163,11 @@ public final class CreateTopicsHandler implements KafkaApiHandler<CreateTopicsRe
                         "Unsupported Kafka topic config '" + config.getKey() + "'.");
             }
         }
+        if (keyFormat == KafkaDataFormat.JSON || valueFormat == KafkaDataFormat.JSON) {
+            throw new IllegalArgumentException(
+                    "Kafka CreateTopics cannot define a JSON Fluss table schema. "
+                            + "Pre-create the typed table through Fluss or Flink DDL.");
+        }
         return new FormatConfig(keyFormat, valueFormat);
     }
 

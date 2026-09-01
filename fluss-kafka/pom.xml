@@ -46,6 +46,11 @@
         </dependency>
 
         <dependency>
+            <groupId>org.apache.fluss</groupId>
+            <artifactId>fluss-shaded-jackson</artifactId>
+        </dependency>
+
+        <dependency>
             <groupId>${project.groupId}</groupId>
             <artifactId>fluss-common</artifactId>
             <version>${project.version}</version>

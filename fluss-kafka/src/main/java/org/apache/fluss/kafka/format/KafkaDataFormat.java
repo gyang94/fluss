@@ -25,13 +25,29 @@ import java.util.Locale;
 @Internal
 public enum KafkaDataFormat {
     RAW("raw"),
-    STRING("string");
+    STRING("string"),
+    JSON("json");
 
     /** Kafka topic config and Fluss custom property controlling the record key format. */
-    public static final String KEY_FORMAT_CONFIG = "fluss.key.format";
+    public static final String KEY_FORMAT_CONFIG = "kafka.key.format";
 
     /** Kafka topic config and Fluss custom property controlling the record value format. */
-    public static final String VALUE_FORMAT_CONFIG = "fluss.value.format";
+    public static final String VALUE_FORMAT_CONFIG = "kafka.value.format";
+
+    /** Fluss fields populated from the Kafka record key. */
+    public static final String KEY_FIELDS_CONFIG = "kafka.key.fields";
+
+    /** Strategy for deriving fields populated from the Kafka record value. */
+    public static final String VALUE_FIELDS_INCLUDE_CONFIG = "kafka.value.fields-include";
+
+    /** Nullable STRING column that captures JSON value fields absent from the table schema. */
+    public static final String VALUE_RESCUE_COLUMN_CONFIG = "kafka.value.rescue-column";
+
+    /** Fluss column populated from the Kafka record timestamp. */
+    public static final String TIMESTAMP_COLUMN_CONFIG = "kafka.metadata.timestamp.column";
+
+    /** Fluss column populated from the Kafka record headers. */
+    public static final String HEADERS_COLUMN_CONFIG = "kafka.metadata.headers.column";
 
     private final String value;
 
@@ -51,7 +67,7 @@ public enum KafkaDataFormat {
             }
         }
         throw new IllegalArgumentException(
-                "Unsupported Kafka data format '" + value + "'. Expected raw or string.");
+                "Unsupported Kafka data format '" + value + "'. Expected raw, string, or json.");
     }
 
     /** Returns the persisted topic config value. */

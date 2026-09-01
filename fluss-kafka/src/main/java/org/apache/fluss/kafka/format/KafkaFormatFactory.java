@@ -4,7 +4,7 @@
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -15,21 +15,21 @@
  * limitations under the License.
  */
 
-package org.apache.fluss.kafka.transcode;
+package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 
-/** Indicates that Kafka record bytes cannot be decoded using the configured data format. */
+import javax.annotation.Nullable;
+
+/** Creates a decoder for one Kafka key or value format and Fluss field projection. */
 @Internal
-public final class KafkaRecordEncodingException extends IllegalArgumentException {
+public interface KafkaFormatFactory {
 
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message) {
-        super(message);
-    }
+    /** Returns the format implemented by this factory. */
+    KafkaDataFormat format();
 
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message, Throwable cause) {
-        super(message, cause);
-    }
+    /** Creates and validates a decoder for the projection and optional JSON rescue column. */
+    KafkaFieldDecoder createDecoder(
+            KafkaFieldProjection projection, @Nullable String valueRescueColumn);
 }

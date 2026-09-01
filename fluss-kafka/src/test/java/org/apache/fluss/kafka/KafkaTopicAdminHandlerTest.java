@@ -233,7 +233,11 @@ public class KafkaTopicAdminHandlerTest {
                 .containsEntry(ConfigOptions.TABLE_REPLICATION_FACTOR.key(), "2");
         assertThat(descriptor.getCustomProperties())
                 .containsEntry(KafkaDataFormat.KEY_FORMAT_CONFIG, "raw")
-                .containsEntry(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw");
+                .containsEntry(KafkaDataFormat.KEY_FIELDS_CONFIG, "record_key")
+                .containsEntry(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                .containsEntry(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                .containsEntry(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                .containsEntry(KafkaDataFormat.HEADERS_COLUMN_CONFIG, "headers");
     }
 
     @Test
@@ -323,7 +327,7 @@ public class KafkaTopicAdminHandlerTest {
         CreateTopicsResponse response = (CreateTopicsResponse) parseResponse(request);
         assertThat(response.errorCounts()).containsEntry(Errors.INVALID_CONFIG, 1);
         assertThat(response.data().topics().find("topic").errorMessage())
-                .contains("Expected raw or string");
+                .contains("cannot define a JSON Fluss table schema");
         verify(adminGateway, never()).createTable(any(CreateTableRequest.class));
     }
 

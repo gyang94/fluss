@@ -20,6 +20,7 @@ package org.apache.fluss.kafka;
 import org.apache.fluss.cluster.Endpoint;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -459,6 +460,12 @@ public class KafkaRequestITCase {
                                         .build())
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "raw")
+                        .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "record_key")
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                        .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                        .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                        .customProperty(KafkaDataFormat.HEADERS_COLUMN_CONFIG, "headers")
                         .build();
 
         private TestingKafkaGatewayService() {
