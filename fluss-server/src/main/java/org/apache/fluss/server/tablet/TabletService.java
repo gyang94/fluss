@@ -37,6 +37,7 @@ import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.entity.LookupResultForBucket;
 import org.apache.fluss.rpc.entity.PrefixLookupResultForBucket;
 import org.apache.fluss.rpc.entity.ResultForBucket;
+import org.apache.fluss.rpc.gateway.AdminGatewayProvider;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
@@ -160,7 +161,8 @@ import static org.apache.fluss.server.utils.ServerRpcMessageUtils.toPrefixLookup
 import static org.apache.fluss.server.utils.ServerRpcMessageUtils.toPutKvDataForBuckets;
 
 /** An RPC Gateway service for tablet server. */
-public final class TabletService extends RpcServiceBase implements TabletServerGateway {
+public final class TabletService extends RpcServiceBase
+        implements TabletServerGateway, AdminGatewayProvider {
 
     private final String serviceName;
     private final ReplicaManager replicaManager;
@@ -207,6 +209,14 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
     @Override
     public String name() {
         return serviceName;
+    }
+
+    /**
+     * Returns the coordinator admin gateway used by this tablet service for internal forwarding.
+     */
+    @Override
+    public CoordinatorGateway getAdminGateway() {
+        return coordinatorGateway;
     }
 
     @Override
