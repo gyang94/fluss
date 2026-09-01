@@ -4,7 +4,7 @@
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -15,21 +15,18 @@
  * limitations under the License.
  */
 
-package org.apache.fluss.kafka.transcode;
+package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 
-/** Indicates that Kafka record bytes cannot be decoded using the configured data format. */
+import javax.annotation.Nullable;
+
+/** Converts one JSON node into the internal representation of one Fluss field. */
 @Internal
-public final class KafkaRecordEncodingException extends IllegalArgumentException {
+interface JsonToFlussConverter {
 
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message) {
-        super(message);
-    }
-
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message, Throwable cause) {
-        super(message, cause);
-    }
+    /** Converts the node, which is null when the JSON property is missing. */
+    @Nullable
+    Object convert(@Nullable JsonNode node, String path);
 }

@@ -223,8 +223,12 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
                         .customProperty(
                                 KafkaDataFormat.KEY_FORMAT_CONFIG, topic.keyFormat().value())
+                        .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "record_key")
                         .customProperty(
-                                KafkaDataFormat.VALUE_FORMAT_CONFIG, topic.valueFormat().value());
+                                KafkaDataFormat.VALUE_FORMAT_CONFIG, topic.valueFormat().value())
+                        .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                        .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                        .customProperty(KafkaDataFormat.HEADERS_COLUMN_CONFIG, "headers");
         if (topic.replicationFactor() > 0) {
             builder.property(
                     ConfigOptions.TABLE_REPLICATION_FACTOR, (int) topic.replicationFactor());
@@ -233,7 +237,14 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
     }
 
     private static DataType dataType(KafkaDataFormat format) {
-        return format == KafkaDataFormat.RAW ? DataTypes.BYTES() : DataTypes.STRING();
+        if (format == KafkaDataFormat.RAW) {
+            return DataTypes.BYTES();
+        }
+        if (format == KafkaDataFormat.STRING) {
+            return DataTypes.STRING();
+        }
+        throw new IllegalArgumentException(
+                "Kafka CreateTopics only supports raw or string formats.");
     }
 
     private static TopicResult success(CreateTopic topic, Uuid topicId) {

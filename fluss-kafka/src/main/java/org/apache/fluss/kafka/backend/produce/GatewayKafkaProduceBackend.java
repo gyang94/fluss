@@ -22,6 +22,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -105,18 +106,21 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         .setAcks(command.acks())
                         .setTimeoutMs(command.timeoutMs());
         List<BytesView> retainedRecords = new ArrayList<>();
-        try {
-            for (PartitionWrite partition : topic.partitions()) {
+        Map<Integer, PartitionResult> localFailures = new HashMap<>();
+        for (PartitionWrite partition : topic.partitions()) {
+            try {
                 BytesView records = transcoder.transcode(partition.records(), tableInfo);
                 retainedRecords.add(records);
                 request.addBucketsReq()
                         .setBucketId(partition.partitionId())
                         .setRecordsBytesView(records);
+            } catch (Exception e) {
+                localFailures.put(
+                        partition.partitionId(), failedPartition(partition.partitionId(), e));
             }
-        } catch (Exception e) {
-            CompletableFuture<TopicResult> failure = new CompletableFuture<>();
-            failure.completeExceptionally(e);
-            return failure;
+        }
+        if (retainedRecords.isEmpty()) {
+            return CompletableFuture.completedFuture(toTopicResult(topic, null, localFailures));
         }
 
         setCurrentSession(command);
@@ -126,7 +130,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                             // Keep the native buffers reachable until the asynchronous append has
                             // completed.
                             retainedRecords.size();
-                            return toTopicResult(topic, response);
+                            return toTopicResult(topic, response, localFailures);
                         });
     }
 
@@ -141,13 +145,23 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 response.getModifiedTime());
     }
 
-    private static TopicResult toTopicResult(TopicWrite topic, ProduceLogResponse response) {
+    private static TopicResult toTopicResult(
+            TopicWrite topic,
+            ProduceLogResponse response,
+            Map<Integer, PartitionResult> localFailures) {
         Map<Integer, PbProduceLogRespForBucket> responses = new HashMap<>();
-        for (PbProduceLogRespForBucket bucket : response.getBucketsRespsList()) {
-            responses.put(bucket.getBucketId(), bucket);
+        if (response != null) {
+            for (PbProduceLogRespForBucket bucket : response.getBucketsRespsList()) {
+                responses.put(bucket.getBucketId(), bucket);
+            }
         }
         List<PartitionResult> partitions = new ArrayList<>();
         for (PartitionWrite partition : topic.partitions()) {
+            PartitionResult localFailure = localFailures.get(partition.partitionId());
+            if (localFailure != null) {
+                partitions.add(localFailure);
+                continue;
+            }
             PbProduceLogRespForBucket bucket = responses.get(partition.partitionId());
             if (bucket == null) {
                 partitions.add(
@@ -177,15 +191,33 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         return new TopicResult(topic.topicName(), partitions);
     }
 
+    private static PartitionResult failedPartition(int partitionId, Throwable failure) {
+        Throwable cause = unwrap(failure);
+        Errors kafkaError;
+        if (cause instanceof KafkaRecordEncodingException) {
+            kafkaError = Errors.INVALID_RECORD;
+        } else if (cause instanceof KafkaTopicSchemaException) {
+            kafkaError = Errors.INVALID_CONFIG;
+        } else if (cause instanceof IllegalArgumentException) {
+            kafkaError = Errors.INVALID_REQUEST;
+        } else {
+            kafkaError = toKafkaError(org.apache.fluss.rpc.protocol.Errors.forException(cause));
+        }
+        return new PartitionResult(partitionId, kafkaError, -1L, cause.getMessage());
+    }
+
     private static TopicResult failedTopic(TopicWrite topic, Throwable failure) {
         Throwable cause = unwrap(failure);
         Errors kafkaError =
                 cause instanceof KafkaRecordEncodingException
-                        ? Errors.CORRUPT_MESSAGE
-                        : cause instanceof IllegalArgumentException
-                                ? Errors.INVALID_REQUEST
-                                : toKafkaError(
-                                        org.apache.fluss.rpc.protocol.Errors.forException(cause));
+                        ? Errors.INVALID_RECORD
+                        : cause instanceof KafkaTopicSchemaException
+                                ? Errors.INVALID_CONFIG
+                                : cause instanceof IllegalArgumentException
+                                        ? Errors.INVALID_REQUEST
+                                        : toKafkaError(
+                                                org.apache.fluss.rpc.protocol.Errors.forException(
+                                                        cause));
         List<PartitionResult> partitions = new ArrayList<>();
         for (PartitionWrite partition : topic.partitions()) {
             partitions.add(

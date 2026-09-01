@@ -59,6 +59,7 @@ import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
@@ -221,6 +222,131 @@ public class KafkaProduceHandlerTest {
     }
 
     @Test
+    public void testProduceTranscodesJsonIntoTypedFlussRow() throws Exception {
+        TestingProduceGatewayService service =
+                new TestingProduceGatewayService(jsonTableDescriptor());
+        short version = ApiKeys.PRODUCE.latestVersion();
+        KafkaRequest request =
+                kafkaRequest(
+                        produceRequest(
+                                version,
+                                (short) 1,
+                                bytes("order-1"),
+                                bytes("{\"customer_id\":42,\"amount\":12.50}")),
+                        version);
+
+        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+
+        assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
+        MemoryLogRecords records =
+                ServerRpcMessageUtils.getProduceLogData(service.lastProduceRequest)
+                        .values()
+                        .iterator()
+                        .next();
+        LogRecordBatch batch = records.batches().iterator().next();
+        try (LogRecordReadContext context =
+                        LogRecordReadContext.createArrowReadContext(
+                                service.schema.getRowType(),
+                                SCHEMA_ID,
+                                new TestingSchemaGetter(
+                                        new SchemaInfo(service.schema, SCHEMA_ID)));
+                CloseableIterator<LogRecord> iterator = batch.records(context)) {
+            InternalRow row = iterator.next().getRow();
+            assertThat(row.getString(0).toString()).isEqualTo("order-1");
+            assertThat(row.getLong(1)).isEqualTo(42L);
+            assertThat(row.getDecimal(2, 18, 2).toBigDecimal())
+                    .isEqualByComparingTo(new BigDecimal("12.50"));
+            assertThat(row.getTimestampLtz(3, 3).getEpochMillisecond()).isEqualTo(TIMESTAMP);
+        }
+    }
+
+    @Test
+    public void testUnknownJsonFieldFailureIsIsolatedByPartition() {
+        TestingProduceGatewayService service =
+                new TestingProduceGatewayService(jsonTableDescriptor());
+        short version = ApiKeys.PRODUCE.latestVersion();
+        KafkaRequest request = kafkaRequest(jsonTwoPartitionProduceRequest(version), version);
+
+        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+
+        ProduceResponse response = parseResponse(request);
+        ProduceResponseData.PartitionProduceResponse successful =
+                response.data().responses().find("topic").partitionResponses().get(0);
+        ProduceResponseData.PartitionProduceResponse failed =
+                response.data().responses().find("topic").partitionResponses().get(1);
+        assertThat(Errors.forCode(successful.errorCode())).isEqualTo(Errors.NONE);
+        assertThat(successful.baseOffset()).isEqualTo(42L);
+        assertThat(Errors.forCode(failed.errorCode())).isEqualTo(Errors.INVALID_RECORD);
+        assertThat(failed.errorMessage()).contains("$[\"extra\"]").contains("unknown field");
+        assertThat(service.lastProduceRequest.getBucketsReqsList())
+                .extracting(bucket -> bucket.getBucketId())
+                .containsExactly(0);
+    }
+
+    @Test
+    public void testProduceStoresUnknownJsonFieldsInConfiguredRescueColumn() throws Exception {
+        TestingProduceGatewayService service =
+                new TestingProduceGatewayService(jsonRescueTableDescriptor());
+        short version = ApiKeys.PRODUCE.latestVersion();
+        KafkaRequest request =
+                kafkaRequest(
+                        produceRequest(
+                                version,
+                                (short) 1,
+                                bytes("order-1"),
+                                bytes(
+                                        "{\"customer_id\":42,\"amount\":12.50,"
+                                                + "\"new_field\":\"preserved\"}")),
+                        version);
+
+        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+
+        assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
+        MemoryLogRecords records =
+                ServerRpcMessageUtils.getProduceLogData(service.lastProduceRequest)
+                        .values()
+                        .iterator()
+                        .next();
+        LogRecordBatch batch = records.batches().iterator().next();
+        try (LogRecordReadContext context =
+                        LogRecordReadContext.createArrowReadContext(
+                                service.schema.getRowType(),
+                                SCHEMA_ID,
+                                new TestingSchemaGetter(
+                                        new SchemaInfo(service.schema, SCHEMA_ID)));
+                CloseableIterator<LogRecord> iterator = batch.records(context)) {
+            InternalRow row = iterator.next().getRow();
+            assertThat(row.getString(4).toString()).isEqualTo("{\"new_field\":\"preserved\"}");
+        }
+    }
+
+    @Test
+    public void testNestedJsonConversionFailureIsIsolatedByPartition() {
+        TestingProduceGatewayService service =
+                new TestingProduceGatewayService(complexJsonTableDescriptor());
+        short version = ApiKeys.PRODUCE.latestVersion();
+        KafkaRequest request =
+                kafkaRequest(complexJsonTwoPartitionProduceRequest(version), version);
+
+        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+
+        ProduceResponse response = parseResponse(request);
+        ProduceResponseData.PartitionProduceResponse successful =
+                response.data().responses().find("topic").partitionResponses().get(0);
+        ProduceResponseData.PartitionProduceResponse failed =
+                response.data().responses().find("topic").partitionResponses().get(1);
+        assertThat(Errors.forCode(successful.errorCode())).isEqualTo(Errors.NONE);
+        assertThat(successful.baseOffset()).isEqualTo(42L);
+        assertThat(Errors.forCode(failed.errorCode())).isEqualTo(Errors.INVALID_RECORD);
+        assertThat(failed.errorMessage())
+                .contains("$[\"items\"][0][\"quantity\"]")
+                .contains("expected a JSON integer");
+        assertThat(service.lastProduceRequest.getBucketsReqsList())
+                .extracting(bucket -> bucket.getBucketId())
+                .containsExactly(0);
+    }
+
+    @Test
     public void testProduceRejectsInvalidUtf8ForStringFormat() {
         TestingProduceGatewayService service =
                 new TestingProduceGatewayService(KafkaDataFormat.STRING, KafkaDataFormat.RAW);
@@ -234,7 +360,7 @@ public class KafkaProduceHandlerTest {
         new KafkaRequestHandler(service, service, "kafka").processRequest(request);
 
         ProduceResponse response = parseResponse(request);
-        assertThat(response.errorCounts()).containsEntry(Errors.CORRUPT_MESSAGE, 1);
+        assertThat(response.errorCounts()).containsEntry(Errors.INVALID_RECORD, 1);
         assertThat(service.lastProduceRequest).isNull();
     }
 
@@ -392,12 +518,85 @@ public class KafkaProduceHandlerTest {
         return new ProduceRequest(data, version);
     }
 
+    private static ProduceRequest jsonTwoPartitionProduceRequest(short version) {
+        TopicProduceData topic =
+                new TopicProduceData()
+                        .setName("topic")
+                        .setPartitionData(
+                                Arrays.asList(
+                                        new PartitionProduceData()
+                                                .setIndex(0)
+                                                .setRecords(
+                                                        memoryRecords(
+                                                                bytes("order-1"),
+                                                                bytes(
+                                                                        "{\"customer_id\":42,"
+                                                                                + "\"amount\":12.50}"))),
+                                        new PartitionProduceData()
+                                                .setIndex(1)
+                                                .setRecords(
+                                                        memoryRecords(
+                                                                bytes("order-2"),
+                                                                bytes(
+                                                                        "{\"customer_id\":7,"
+                                                                                + "\"amount\":1.00,"
+                                                                                + "\"extra\":true}")))));
+        ProduceRequestData data =
+                new ProduceRequestData()
+                        .setAcks((short) 1)
+                        .setTimeoutMs(1000)
+                        .setTopicData(
+                                new ProduceRequestData.TopicProduceDataCollection(
+                                        Collections.singletonList(topic).iterator()));
+        return new ProduceRequest(data, version);
+    }
+
+    private static ProduceRequest complexJsonTwoPartitionProduceRequest(short version) {
+        byte[] validValue =
+                bytes(
+                        "{\"customer\":{\"name\":\"Alice\"},"
+                                + "\"items\":[{\"sku\":\"A-100\",\"quantity\":2}],"
+                                + "\"attributes\":{\"channel\":\"app\"}}");
+        byte[] invalidValue =
+                bytes(
+                        "{\"customer\":{\"name\":\"Bob\"},"
+                                + "\"items\":[{\"sku\":\"B-100\","
+                                + "\"quantity\":\"bad\"}],\"attributes\":{}}");
+        TopicProduceData topic =
+                new TopicProduceData()
+                        .setName("topic")
+                        .setPartitionData(
+                                Arrays.asList(
+                                        new PartitionProduceData()
+                                                .setIndex(0)
+                                                .setRecords(
+                                                        memoryRecords(
+                                                                bytes("order-1"), validValue)),
+                                        new PartitionProduceData()
+                                                .setIndex(1)
+                                                .setRecords(
+                                                        memoryRecords(
+                                                                bytes("order-2"), invalidValue))));
+        ProduceRequestData data =
+                new ProduceRequestData()
+                        .setAcks((short) 1)
+                        .setTimeoutMs(1000)
+                        .setTopicData(
+                                new ProduceRequestData.TopicProduceDataCollection(
+                                        Collections.singletonList(topic).iterator()));
+        return new ProduceRequest(data, version);
+    }
+
     private static MemoryRecords memoryRecords() {
+        return memoryRecords(bytes("key"), bytes("value"));
+    }
+
+    private static MemoryRecords memoryRecords(byte[] key, byte[] value) {
         return MemoryRecords.withRecords(
                 org.apache.kafka.common.record.RecordBatch.MAGIC_VALUE_V2,
                 TIMESTAMP,
                 Compression.NONE,
-                new SimpleRecord(TIMESTAMP, bytes("key"), bytes("value")));
+                new SimpleRecord(TIMESTAMP, key, value));
     }
 
     private static void assertAcksAllOutcome(
@@ -446,6 +645,79 @@ public class KafkaProduceHandlerTest {
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
+    private static TableDescriptor jsonTableDescriptor() {
+        Schema schema =
+                Schema.newBuilder()
+                        .column("order_id", DataTypes.STRING().copy(false))
+                        .column("customer_id", DataTypes.BIGINT().copy(false))
+                        .column("amount", DataTypes.DECIMAL(18, 2).copy(false))
+                        .column("event_time", DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                        .build();
+        return TableDescriptor.builder()
+                .schema(schema)
+                .distributedBy(2)
+                .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
+                .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "order_id")
+                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                .build();
+    }
+
+    private static TableDescriptor complexJsonTableDescriptor() {
+        Schema schema =
+                Schema.newBuilder()
+                        .column("order_id", DataTypes.STRING().copy(false))
+                        .column(
+                                "customer",
+                                DataTypes.ROW(
+                                        DataTypes.FIELD("name", DataTypes.STRING().copy(false))))
+                        .column(
+                                "items",
+                                DataTypes.ARRAY(
+                                        DataTypes.ROW(
+                                                DataTypes.FIELD(
+                                                        "sku", DataTypes.STRING().copy(false)),
+                                                DataTypes.FIELD(
+                                                        "quantity", DataTypes.INT().copy(false)))))
+                        .column("attributes", DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()))
+                        .column("event_time", DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                        .build();
+        return TableDescriptor.builder()
+                .schema(schema)
+                .distributedBy(2)
+                .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
+                .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "order_id")
+                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                .build();
+    }
+
+    private static TableDescriptor jsonRescueTableDescriptor() {
+        Schema schema =
+                Schema.newBuilder()
+                        .column("order_id", DataTypes.STRING().copy(false))
+                        .column("customer_id", DataTypes.BIGINT().copy(false))
+                        .column("amount", DataTypes.DECIMAL(18, 2).copy(false))
+                        .column("event_time", DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                        .column("kafka_rescue", DataTypes.STRING())
+                        .build();
+        return TableDescriptor.builder()
+                .schema(schema)
+                .distributedBy(2)
+                .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
+                .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "order_id")
+                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                .customProperty(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG, "kafka_rescue")
+                .build();
+    }
+
     private static final class TestingProduceGatewayService extends TestingTabletGatewayService {
         private final Schema schema;
         private final TableDescriptor tableDescriptor;
@@ -462,28 +734,43 @@ public class KafkaProduceHandlerTest {
 
         private TestingProduceGatewayService(
                 KafkaDataFormat keyFormat, KafkaDataFormat valueFormat) {
-            schema =
-                    Schema.newBuilder()
-                            .column("record_key", dataType(keyFormat))
-                            .column("payload", dataType(valueFormat))
-                            .column("event_time", DataTypes.TIMESTAMP_LTZ(3).copy(false))
-                            .column(
-                                    "headers",
-                                    DataTypes.ARRAY(
-                                            DataTypes.ROW(
-                                                    DataTypes.FIELD(
-                                                            "name", DataTypes.STRING().copy(false)),
-                                                    DataTypes.FIELD("value", DataTypes.BYTES()))))
-                            .build();
-            tableDescriptor =
+            this(
                     TableDescriptor.builder()
-                            .schema(schema)
+                            .schema(
+                                    Schema.newBuilder()
+                                            .column("record_key", dataType(keyFormat))
+                                            .column("payload", dataType(valueFormat))
+                                            .column(
+                                                    "event_time",
+                                                    DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                            .column(
+                                                    "headers",
+                                                    DataTypes.ARRAY(
+                                                            DataTypes.ROW(
+                                                                    DataTypes.FIELD(
+                                                                            "name",
+                                                                            DataTypes.STRING()
+                                                                                    .copy(false)),
+                                                                    DataTypes.FIELD(
+                                                                            "value",
+                                                                            DataTypes.BYTES()))))
+                                            .build())
                             .distributedBy(1)
                             .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
                             .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, keyFormat.value())
+                            .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "record_key")
                             .customProperty(
                                     KafkaDataFormat.VALUE_FORMAT_CONFIG, valueFormat.value())
-                            .build();
+                            .customProperty(
+                                    KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                            .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                            .customProperty(KafkaDataFormat.HEADERS_COLUMN_CONFIG, "headers")
+                            .build());
+        }
+
+        private TestingProduceGatewayService(TableDescriptor tableDescriptor) {
+            this.schema = tableDescriptor.getSchema();
+            this.tableDescriptor = tableDescriptor;
         }
 
         @Override

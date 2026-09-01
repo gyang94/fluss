@@ -4,7 +4,7 @@
  * this work for additional information regarding copyright ownership.
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
- * the License.  You may obtain a copy of the License at
+ * the License. You may obtain a copy of the License at
  *
  *    http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -15,21 +15,28 @@
  * limitations under the License.
  */
 
-package org.apache.fluss.kafka.transcode;
+package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.kafka.format.KafkaFieldDecoder;
+import org.apache.fluss.kafka.format.KafkaFormatFactory;
+import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 
-/** Indicates that Kafka record bytes cannot be decoded using the configured data format. */
+import javax.annotation.Nullable;
+
+/** Factory for schema-aware Kafka JSON value decoding. */
 @Internal
-public final class KafkaRecordEncodingException extends IllegalArgumentException {
+public final class JsonKafkaFormatFactory implements KafkaFormatFactory {
 
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message) {
-        super(message);
+    @Override
+    public KafkaDataFormat format() {
+        return KafkaDataFormat.JSON;
     }
 
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message, Throwable cause) {
-        super(message, cause);
+    @Override
+    public KafkaFieldDecoder createDecoder(
+            KafkaFieldProjection projection, @Nullable String valueRescueColumn) {
+        return new JsonKafkaFieldDecoder(projection, valueRescueColumn);
     }
 }

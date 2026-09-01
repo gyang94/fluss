@@ -29,10 +29,14 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
+import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalArray;
+import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
+import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -48,6 +52,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
@@ -62,6 +67,8 @@ public class KafkaFlussRoundTripITCase {
     private static final String DATABASE = "kafka";
     private static final String TOPIC = "round-trip-topic";
     private static final String STRING_TOPIC = "round-trip-string-topic";
+    private static final String JSON_TOPIC = "round-trip-json-topic";
+    private static final String COMPLEX_JSON_TOPIC = "round-trip-complex-json-topic";
     private static final long TIMESTAMP = 123456789L;
     private static final byte[] KEY = "kafka-key".getBytes(StandardCharsets.UTF_8);
     private static final byte[] VALUE = "kafka-value".getBytes(StandardCharsets.UTF_8);
@@ -112,6 +119,143 @@ public class KafkaFlussRoundTripITCase {
         testRoundTrip(STRING_TOPIC, configs, true);
     }
 
+    @Test
+    public void testKafkaJsonCanBeConsumedAsTypedFlussRow() throws Exception {
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("order_id", DataTypes.STRING().copy(false))
+                                        .column("customer_id", DataTypes.BIGINT().copy(false))
+                                        .column("amount", DataTypes.DECIMAL(18, 2).copy(false))
+                                        .column(
+                                                "event_time",
+                                                DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                        .build())
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
+                        .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "order_id")
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                        .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                        .build();
+        TablePath tablePath = TablePath.of(DATABASE, JSON_TOPIC);
+        flussAdmin.createTable(tablePath, descriptor, false).get();
+
+        writeKafkaRecord(
+                JSON_TOPIC, bytes("order-1"), bytes("{\"customer_id\":42,\"amount\":12.50}"));
+
+        try (Table table = connection.getTable(tablePath);
+                LogScanner scanner = table.newScan().createLogScanner()) {
+            scanner.subscribeFromBeginning(0);
+            for (int attempt = 0; attempt < 30; attempt++) {
+                ScanRecords records = scanner.poll(Duration.ofSeconds(1));
+                for (ScanRecord record : records) {
+                    InternalRow row = record.getRow();
+                    assertThat(row.getString(0).toString()).isEqualTo("order-1");
+                    assertThat(row.getLong(1)).isEqualTo(42L);
+                    assertThat(row.getDecimal(2, 18, 2).toBigDecimal())
+                            .isEqualByComparingTo(new BigDecimal("12.50"));
+                    assertThat(row.getTimestampLtz(3, 3).getEpochMillisecond())
+                            .isEqualTo(TIMESTAMP);
+                    return;
+                }
+            }
+        }
+        throw new AssertionError("Kafka JSON record was not visible through the Fluss LogScanner.");
+    }
+
+    @Test
+    public void testKafkaComplexJsonCanBeConsumedAsTypedFlussRow() throws Exception {
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("order_id", DataTypes.STRING().copy(false))
+                                        .column(
+                                                "customer",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "name",
+                                                                DataTypes.STRING().copy(false)),
+                                                        DataTypes.FIELD(
+                                                                "address",
+                                                                DataTypes.ROW(
+                                                                        DataTypes.FIELD(
+                                                                                "city",
+                                                                                DataTypes.STRING()
+                                                                                        .copy(
+                                                                                                false))))))
+                                        .column(
+                                                "items",
+                                                DataTypes.ARRAY(
+                                                        DataTypes.ROW(
+                                                                DataTypes.FIELD(
+                                                                        "sku",
+                                                                        DataTypes.STRING()
+                                                                                .copy(false)),
+                                                                DataTypes.FIELD(
+                                                                        "quantity",
+                                                                        DataTypes.INT()
+                                                                                .copy(false)))))
+                                        .column(
+                                                "attributes",
+                                                DataTypes.MAP(
+                                                        DataTypes.STRING(), DataTypes.STRING()))
+                                        .column(
+                                                "event_time",
+                                                DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                        .build())
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
+                        .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "order_id")
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                        .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "event_time")
+                        .build();
+        TablePath tablePath = TablePath.of(DATABASE, COMPLEX_JSON_TOPIC);
+        flussAdmin.createTable(tablePath, descriptor, false).get();
+
+        writeKafkaRecord(
+                COMPLEX_JSON_TOPIC,
+                bytes("order-1"),
+                bytes(
+                        "{\"customer\":{\"name\":\"Alice\","
+                                + "\"address\":{\"city\":\"Hangzhou\"}},"
+                                + "\"items\":[{\"sku\":\"A-100\",\"quantity\":2}],"
+                                + "\"attributes\":{\"channel\":\"app\"}}"));
+
+        try (Table table = connection.getTable(tablePath);
+                LogScanner scanner = table.newScan().createLogScanner()) {
+            scanner.subscribeFromBeginning(0);
+            for (int attempt = 0; attempt < 30; attempt++) {
+                ScanRecords records = scanner.poll(Duration.ofSeconds(1));
+                for (ScanRecord record : records) {
+                    InternalRow row = record.getRow();
+                    assertThat(row.getString(0).toString()).isEqualTo("order-1");
+                    InternalRow customer = row.getRow(1, 2);
+                    assertThat(customer.getString(0).toString()).isEqualTo("Alice");
+                    assertThat(customer.getRow(1, 1).getString(0).toString()).isEqualTo("Hangzhou");
+                    InternalArray items = row.getArray(2);
+                    assertThat(items.size()).isEqualTo(1);
+                    assertThat(items.getRow(0, 2).getString(0).toString()).isEqualTo("A-100");
+                    assertThat(items.getRow(0, 2).getInt(1)).isEqualTo(2);
+                    InternalMap attributes = row.getMap(3);
+                    assertThat(attributes.size()).isEqualTo(1);
+                    assertThat(attributes.keyArray().getString(0).toString()).isEqualTo("channel");
+                    assertThat(attributes.valueArray().getString(0).toString()).isEqualTo("app");
+                    assertThat(row.getTimestampLtz(4, 3).getEpochMillisecond())
+                            .isEqualTo(TIMESTAMP);
+                    return;
+                }
+            }
+        }
+        throw new AssertionError(
+                "Kafka complex JSON record was not visible through the Fluss LogScanner.");
+    }
+
     private void testRoundTrip(String topic, Map<String, String> topicConfigs, boolean stringFormat)
             throws Exception {
         Map<String, Object> adminConfig = new HashMap<>();
@@ -131,6 +275,10 @@ public class KafkaFlussRoundTripITCase {
     }
 
     private void writeKafkaRecord(String topic) throws Exception {
+        writeKafkaRecord(topic, KEY, VALUE);
+    }
+
+    private void writeKafkaRecord(String topic, byte[] key, byte[] value) throws Exception {
         Map<String, Object> producerConfig = new HashMap<>();
         producerConfig.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBootstrapServer);
         producerConfig.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
@@ -141,10 +289,14 @@ public class KafkaFlussRoundTripITCase {
                 new RecordHeaders(
                         Collections.singletonList(new RecordHeader(HEADER_KEY, HEADER_VALUE)));
         ProducerRecord<byte[], byte[]> record =
-                new ProducerRecord<>(topic, 0, TIMESTAMP, KEY, VALUE, headers);
+                new ProducerRecord<>(topic, 0, TIMESTAMP, key, value, headers);
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig)) {
             producer.send(record).get();
         }
+    }
+
+    private static byte[] bytes(String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
     }
 
     private void assertFlussRecord(String topic, boolean stringFormat) throws Exception {
