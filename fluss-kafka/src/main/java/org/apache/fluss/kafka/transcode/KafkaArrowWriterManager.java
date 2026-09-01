@@ -149,6 +149,10 @@ public final class KafkaArrowWriterManager implements AutoCloseable {
                                 maxBatchSizeBytes,
                                 tableInfo.getRowType(),
                                 tableInfo.getTableConfig().getArrowCompressionInfo());
+                // Compression adds fixed framing to each Arrow buffer. A tiny previous batch can
+                // therefore report a body ratio above one, but that fixed overhead must not be
+                // extrapolated as multiplicative expansion of this request.
+                writer.capEstimatedCompressionRatio(1.0f);
                 activeWriters++;
                 return new WriterLease(this, writer);
             }

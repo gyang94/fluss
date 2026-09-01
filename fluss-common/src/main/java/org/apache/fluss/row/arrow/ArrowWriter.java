@@ -44,6 +44,7 @@ import org.apache.fluss.utils.PagedMemorySegmentWritableChannel;
 
 import java.io.IOException;
 
+import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 import static org.apache.fluss.utils.Preconditions.checkState;
 
@@ -153,6 +154,24 @@ public class ArrowWriter implements AutoCloseable {
 
     public int getWriteLimitInBytes() {
         return writeLimitInBytes;
+    }
+
+    /**
+     * Caps the compression-ratio snapshot used to estimate the current batch size.
+     *
+     * <p>This does not modify the shared estimator. Callers can use it after acquiring a pooled
+     * writer when fixed compression framing from a tiny previous batch must not be extrapolated as
+     * multiplicative expansion of the next batch.
+     */
+    public void capEstimatedCompressionRatio(float maximumRatio) {
+        checkArgument(
+                maximumRatio > 0.0f, "Maximum estimated compression ratio must be greater than 0.");
+        if (estimatedCompressionRatio > maximumRatio) {
+            estimatedCompressionRatio = maximumRatio;
+            // A prior row-count estimate was calculated with the old ratio. Force the next
+            // non-empty size check to recalculate it with the capped ratio.
+            estimatedMaxRecordsCount = -1;
+        }
     }
 
     public RowType getSchema() {
@@ -375,5 +394,10 @@ public class ArrowWriter implements AutoCloseable {
     @VisibleForTesting
     public ArrowCompressionRatioEstimator getCompressionRatioEstimator() {
         return compressionRatioEstimator;
+    }
+
+    @VisibleForTesting
+    float getEstimatedCompressionRatio() {
+        return estimatedCompressionRatio;
     }
 }

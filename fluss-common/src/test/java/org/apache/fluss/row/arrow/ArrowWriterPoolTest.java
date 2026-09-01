@@ -93,6 +93,30 @@ public class ArrowWriterPoolTest {
     }
 
     @Test
+    void testCapEstimatedCompressionRatioOnlyChangesWriterSnapshot() {
+        ArrowWriterPool pool = new ArrowWriterPool(allocator);
+        ArrowWriter writer =
+                pool.getOrCreateWriter(1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION);
+        ArrowCompressionRatioEstimator estimator = writer.getCompressionRatioEstimator();
+
+        estimator.updateEstimation(0.5f);
+        writer.reset(1024);
+        assertThat(writer.getEstimatedCompressionRatio()).isLessThan(1.0f);
+        writer.capEstimatedCompressionRatio(1.0f);
+        assertThat(writer.getEstimatedCompressionRatio()).isLessThan(1.0f);
+
+        estimator.updateEstimation(2.7f);
+        writer.reset(1024);
+        assertThat(writer.getEstimatedCompressionRatio()).isEqualTo(2.7f);
+        writer.capEstimatedCompressionRatio(1.0f);
+        assertThat(writer.getEstimatedCompressionRatio()).isEqualTo(1.0f);
+        assertThat(estimator.estimation()).isEqualTo(2.7f);
+
+        writer.recycle(writer.getEpoch());
+        pool.close();
+    }
+
+    @Test
     void testConstructorAllocationFailureClosesPartialRoot() {
         try (BufferAllocator limitedAllocator = new RootAllocator(1);
                 ArrowWriterPool pool = new ArrowWriterPool(limitedAllocator)) {
