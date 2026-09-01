@@ -18,13 +18,18 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.admission.KafkaNativeProduceAdmissionController.ConnectionHandle;
 import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.netty4.io.netty.channel.Channel;
 
 import org.apache.kafka.common.protocol.ApiKeys;
 
+import javax.annotation.Nullable;
+
 import java.net.SocketAddress;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledExecutorService;
 
 /** Immutable wire-level context made available to Kafka API handlers. */
 @Internal
@@ -98,6 +103,11 @@ public final class KafkaRequestContext {
         return receivedTimeMs;
     }
 
+    /** Returns the admitted Kafka request frame size in bytes. */
+    public int requestBytes() {
+        return request.requestBytes();
+    }
+
     /** Returns the authenticated principal captured when this request was received. */
     public FlussPrincipal principal() {
         return request.principal();
@@ -106,6 +116,33 @@ public final class KafkaRequestContext {
     /** Returns this network connection's SASL state machine. */
     public KafkaSaslConnection saslConnection() {
         return request.saslConnection();
+    }
+
+    /** Returns this connection's native Produce admission handle when BP2 is enabled. */
+    public @Nullable ConnectionHandle nativeAdmissionConnection() {
+        return request.nativeAdmissionConnection();
+    }
+
+    /** Returns this connection's event-loop scheduler for bounded admission deadlines. */
+    public @Nullable ScheduledExecutorService admissionScheduler() {
+        return request.admissionScheduler();
+    }
+
+    /**
+     * Registers the one-shot raw-to-native accounting transfer before Produce payload detachment.
+     */
+    public void registerNativeAdmissionTransfer(CompletableFuture<Void> transferFuture) {
+        request.registerNativeAdmissionTransfer(transferFuture);
+    }
+
+    /** Adds copied/decompressed Produce bytes to this request's PF raw admission ownership. */
+    public void growRawAdmissionBytes(long additionalBytes) {
+        request.growRawAdmissionBytes(additionalBytes);
+    }
+
+    /** Rolls back copied/decompressed Produce bytes previously added to PF raw ownership. */
+    public void releaseGrownRawAdmissionBytes(long additionalBytes) {
+        request.releaseGrownRawAdmissionBytes(additionalBytes);
     }
 
     /** Closes the connection after this request's response has been flushed. */

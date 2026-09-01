@@ -17,24 +17,37 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.dispatcher.KafkaApiHandler;
+import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
+import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
+import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
+import org.apache.fluss.kafka.error.KafkaErrorMapper;
+import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
 import org.apache.fluss.kafka.security.KafkaSaslConnection;
+import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
+import org.apache.fluss.metrics.util.TestMetricGroup;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
 import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
+import org.apache.fluss.utils.clock.Clock;
 
+import org.apache.kafka.common.errors.LeaderNotAvailableException;
 import org.apache.kafka.common.message.ApiVersionsRequestData;
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersion;
 import org.apache.kafka.common.message.CreateTopicsRequestData;
+import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.CreateTopicsRequest;
 import org.apache.kafka.common.requests.CreateTopicsResponse;
+import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -45,6 +58,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 import static org.mockito.Mockito.mock;
 
@@ -313,8 +327,133 @@ public class KafkaRequestHandlerTest {
         assertThat(response.errorCounts()).containsEntry(Errors.UNSUPPORTED_VERSION, 1);
     }
 
+    @Test
+    public void testMetricFailuresDoNotSkipCancelledProduceFailure() {
+        TestingTabletGatewayService service = new TestingTabletGatewayService();
+        KafkaProduceMetrics metrics =
+                new KafkaProduceMetrics(TestMetricGroup.newBuilder().build(), new ThrowingClock());
+        KafkaRequestHandler handler =
+                new KafkaRequestHandler(
+                        service, service, "kafka", metrics, mock(KafkaRecordTranscoder.class));
+        short version = ApiKeys.PRODUCE.latestVersion();
+        ProduceRequest requestBody =
+                new ProduceRequest(
+                        new ProduceRequestData().setAcks((short) 1).setTimeoutMs(1000), version);
+        ByteBuf buffer = ByteBufAllocator.DEFAULT.buffer();
+        CompletableFuture<AbstractResponse> responseFuture = new CompletableFuture<>();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.PRODUCE,
+                        version,
+                        new RequestHeader(ApiKeys.PRODUCE, version, "client-id", 0),
+                        requestBody,
+                        buffer,
+                        new TestingChannelHandlerContext(),
+                        responseFuture);
+
+        try {
+            request.cancel();
+            handler.processRequest(request);
+
+            assertThat(responseFuture).isCompletedExceptionally();
+            assertThatThrownBy(responseFuture::join)
+                    .hasRootCauseInstanceOf(LeaderNotAvailableException.class);
+        } finally {
+            request.releaseOrderedBuffer();
+            buffer.release();
+        }
+    }
+
+    @Test
+    public void testErrorMappingFailureCompletesDispatcherFutureExceptionally() {
+        short version = ApiKeys.API_VERSIONS.oldestVersion();
+        CompletableFuture<AbstractResponse> handlerFuture = new CompletableFuture<>();
+        KafkaApiRegistry registry = new KafkaApiRegistry();
+        registry.register(new FailingApiVersionsHandler(handlerFuture));
+        registry.freeze();
+        KafkaRequestDispatcher dispatcher =
+                new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
+        ByteBuf buffer = ByteBufAllocator.DEFAULT.buffer();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.API_VERSIONS,
+                        version,
+                        new RequestHeader(ApiKeys.API_VERSIONS, version, "client-id", 0),
+                        new ErrorMappingFailureRequest(version),
+                        buffer,
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<>());
+
+        try {
+            CompletableFuture<AbstractResponse> responseFuture = dispatcher.dispatch(request);
+            handlerFuture.completeExceptionally(new IllegalStateException("backend failure"));
+
+            assertThat(responseFuture).isCompletedExceptionally();
+            assertThatThrownBy(responseFuture::join)
+                    .hasRootCauseInstanceOf(IllegalStateException.class)
+                    .hasRootCauseMessage("error mapping failure");
+        } finally {
+            request.releaseOrderedBuffer();
+            buffer.release();
+        }
+    }
+
     private static KafkaRequestHandler createKafkaRequestHandler() {
         TestingTabletGatewayService service = new TestingTabletGatewayService();
         return new KafkaRequestHandler(service, service, "kafka");
+    }
+
+    private static final class FailingApiVersionsHandler
+            implements KafkaApiHandler<ErrorMappingFailureRequest> {
+        private final CompletableFuture<AbstractResponse> responseFuture;
+
+        private FailingApiVersionsHandler(CompletableFuture<AbstractResponse> responseFuture) {
+            this.responseFuture = responseFuture;
+        }
+
+        @Override
+        public KafkaApiSpec apiSpec() {
+            return new KafkaApiSpec(
+                    ApiKeys.API_VERSIONS,
+                    ApiKeys.API_VERSIONS.oldestVersion(),
+                    ApiKeys.API_VERSIONS.latestVersion(),
+                    true);
+        }
+
+        @Override
+        public CompletableFuture<? extends AbstractResponse> handle(
+                KafkaRequestContext context, ErrorMappingFailureRequest request) {
+            return responseFuture;
+        }
+    }
+
+    private static final class ErrorMappingFailureRequest extends AbstractRequest {
+        private final ApiVersionsRequestData data = new ApiVersionsRequestData();
+
+        private ErrorMappingFailureRequest(short version) {
+            super(ApiKeys.API_VERSIONS, version);
+        }
+
+        @Override
+        public ApiVersionsRequestData data() {
+            return data;
+        }
+
+        @Override
+        public AbstractResponse getErrorResponse(int throttleTimeMs, Throwable e) {
+            throw new IllegalStateException("error mapping failure");
+        }
+    }
+
+    private static final class ThrowingClock implements Clock {
+        @Override
+        public long milliseconds() {
+            throw new IllegalStateException("test metrics clock failure");
+        }
+
+        @Override
+        public long nanoseconds() {
+            throw new IllegalStateException("test metrics clock failure");
+        }
     }
 }

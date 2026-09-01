@@ -17,6 +17,9 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.admission.KafkaNativeProduceAdmissionController.ConnectionHandle;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceResult;
+import org.apache.fluss.kafka.network.KafkaFrameAdmissionLease;
 import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RpcRequest;
 import org.apache.fluss.rpc.protocol.RequestType;
@@ -25,6 +28,7 @@ import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
 
+import org.apache.kafka.common.message.ProduceResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.ApiMessage;
 import org.apache.kafka.common.protocol.ByteBufferAccessor;
@@ -32,12 +36,19 @@ import org.apache.kafka.common.protocol.Message;
 import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.ProduceRequest;
+import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.ResponseHeader;
 
+import javax.annotation.Nullable;
+
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Represents a request received from Kafka protocol channel. */
 public class KafkaRequest implements RpcRequest {
@@ -54,7 +65,22 @@ public class KafkaRequest implements RpcRequest {
     private final ByteBuf buffer;
     private final ChannelHandlerContext ctx;
     private final long startTimeMs;
+    private final long receivedTimeNanos;
+    private final int requestBytes;
+    private final @Nullable ConnectionHandle nativeAdmissionConnection;
+    private final @Nullable ScheduledExecutorService admissionScheduler;
     private final CompletableFuture<AbstractResponse> future;
+    private final Object rawAdmissionLock = new Object();
+    private final AtomicBoolean orderedBufferOwned = new AtomicBoolean(true);
+    private final AtomicBoolean processorBufferOwned = new AtomicBoolean(false);
+    private final AtomicBoolean processingCompleted = new AtomicBoolean(false);
+    private final AtomicBoolean networkCompleted = new AtomicBoolean(false);
+    private final AtomicBoolean rawLeaseReleased = new AtomicBoolean(false);
+    private final AtomicBoolean liveLeaseReleased = new AtomicBoolean(false);
+    @Nullable private volatile KafkaFrameAdmissionLease admissionLease;
+    private final AtomicReference<CompletableFuture<Void>> nativeAdmissionTransfer =
+            new AtomicReference<>();
+    private volatile long responseReadyTimeNanos = -1L;
     private volatile boolean cancelled = false;
     private volatile boolean closeConnectionAfterResponse;
 
@@ -112,6 +138,64 @@ public class KafkaRequest implements RpcRequest {
             ByteBuf buffer,
             ChannelHandlerContext ctx,
             CompletableFuture<AbstractResponse> future) {
+        this(
+                apiKey,
+                apiVersion,
+                header,
+                request,
+                listenerName,
+                saslConnection,
+                buffer,
+                ctx,
+                future,
+                System.nanoTime(),
+                buffer.readableBytes(),
+                null,
+                null);
+    }
+
+    KafkaRequest(
+            ApiKeys apiKey,
+            short apiVersion,
+            RequestHeader header,
+            AbstractRequest request,
+            String listenerName,
+            KafkaSaslConnection saslConnection,
+            ByteBuf buffer,
+            ChannelHandlerContext ctx,
+            CompletableFuture<AbstractResponse> future,
+            long receivedTimeNanos,
+            int requestBytes) {
+        this(
+                apiKey,
+                apiVersion,
+                header,
+                request,
+                listenerName,
+                saslConnection,
+                buffer,
+                ctx,
+                future,
+                receivedTimeNanos,
+                requestBytes,
+                null,
+                null);
+    }
+
+    KafkaRequest(
+            ApiKeys apiKey,
+            short apiVersion,
+            RequestHeader header,
+            AbstractRequest request,
+            String listenerName,
+            KafkaSaslConnection saslConnection,
+            ByteBuf buffer,
+            ChannelHandlerContext ctx,
+            CompletableFuture<AbstractResponse> future,
+            long receivedTimeNanos,
+            int requestBytes,
+            @Nullable ConnectionHandle nativeAdmissionConnection,
+            @Nullable ScheduledExecutorService admissionScheduler) {
         this.apiKey = apiKey;
         this.apiVersion = apiVersion;
         this.header = header;
@@ -122,6 +206,10 @@ public class KafkaRequest implements RpcRequest {
         this.buffer = buffer.retain();
         this.ctx = ctx;
         this.startTimeMs = System.currentTimeMillis();
+        this.receivedTimeNanos = receivedTimeNanos;
+        this.requestBytes = requestBytes;
+        this.nativeAdmissionConnection = nativeAdmissionConnection;
+        this.admissionScheduler = admissionScheduler;
         this.future = future;
     }
 
@@ -132,12 +220,105 @@ public class KafkaRequest implements RpcRequest {
 
     @Override
     public void releaseBuffer() {
-        ReferenceCountUtil.safeRelease(buffer);
+        if (processorBufferOwned.compareAndSet(true, false)) {
+            ReferenceCountUtil.safeRelease(buffer);
+            tryReleaseRawLease();
+        }
     }
 
     /** Retains the request buffer for ownership by the RequestProcessor queue. */
     void retainBufferForProcessor() {
+        if (!processorBufferOwned.compareAndSet(false, true)) {
+            throw new IllegalStateException("RequestProcessor buffer ownership is already held");
+        }
         buffer.retain();
+    }
+
+    /** Releases ordered-response ownership of the raw request buffer. */
+    void releaseOrderedBuffer() {
+        if (orderedBufferOwned.compareAndSet(true, false)) {
+            ReferenceCountUtil.safeRelease(buffer);
+            tryReleaseRawLease();
+        }
+    }
+
+    /** Attaches the pre-frame admission ownership acquired for this request. */
+    void attachAdmissionLease(KafkaFrameAdmissionLease requestLease) {
+        if (admissionLease != null) {
+            throw new IllegalStateException("Kafka frame admission lease is already attached");
+        }
+        admissionLease = requestLease;
+        tryReleaseRawLease();
+        tryReleaseLiveLease();
+    }
+
+    /**
+     * Clears copied Produce records and releases ordered raw-buffer ownership.
+     *
+     * <p>{@link ProduceRequest#clearPartitionRecords()} caches the partition metadata needed for a
+     * later error response before dropping references to the Kafka record buffers.
+     */
+    void detachProducePayload() {
+        if (apiKey != ApiKeys.PRODUCE) {
+            return;
+        }
+        ((ProduceRequest) request).clearPartitionRecords();
+        releaseOrderedBuffer();
+    }
+
+    /**
+     * Keeps PF raw-byte ownership until copied Produce data has transferred into native admission.
+     */
+    void registerNativeAdmissionTransfer(CompletableFuture<Void> transferFuture) {
+        if (transferFuture == null) {
+            throw new NullPointerException("transferFuture must not be null");
+        }
+        if (apiKey != ApiKeys.PRODUCE) {
+            throw new IllegalStateException(
+                    "Native admission transfer is only valid for Kafka Produce requests.");
+        }
+        if (!nativeAdmissionTransfer.compareAndSet(null, transferFuture)) {
+            throw new IllegalStateException(
+                    "Native admission transfer is already registered for this request.");
+        }
+        transferFuture.whenComplete((ignored, failure) -> tryReleaseRawLease());
+        tryReleaseRawLease();
+    }
+
+    /** Adds copied/decompressed Produce bytes to this request's PF raw admission ownership. */
+    void growRawAdmissionBytes(long additionalBytes) {
+        synchronized (rawAdmissionLock) {
+            KafkaFrameAdmissionLease requestLease = admissionLease;
+            if (requestLease != null) {
+                if (rawLeaseReleased.get()) {
+                    throw new IllegalStateException(
+                            "Kafka frame raw-byte ownership is already released");
+                }
+                requestLease.growFrameBytes(additionalBytes);
+            }
+        }
+    }
+
+    /** Rolls back copied/decompressed Produce bytes previously added to PF raw ownership. */
+    void releaseGrownRawAdmissionBytes(long additionalBytes) {
+        synchronized (rawAdmissionLock) {
+            KafkaFrameAdmissionLease requestLease = admissionLease;
+            if (requestLease != null) {
+                requestLease.releaseGrownFrameBytes(additionalBytes);
+            }
+        }
+    }
+
+    /** Marks the final Kafka response future as complete. */
+    void markProcessingCompleted() {
+        processingCompleted.set(true);
+        tryReleaseLiveLease();
+    }
+
+    /** Marks response write, no-op response, or connection cancellation as complete. */
+    void markNetworkCompleted() {
+        networkCompleted.set(true);
+        tryReleaseLiveLease();
     }
 
     public ApiKeys apiKey() {
@@ -182,6 +363,32 @@ public class KafkaRequest implements RpcRequest {
         return startTimeMs;
     }
 
+    long receivedTimeNanos() {
+        return receivedTimeNanos;
+    }
+
+    int requestBytes() {
+        return requestBytes;
+    }
+
+    @Nullable
+    ConnectionHandle nativeAdmissionConnection() {
+        return nativeAdmissionConnection;
+    }
+
+    @Nullable
+    ScheduledExecutorService admissionScheduler() {
+        return admissionScheduler;
+    }
+
+    void markResponseReady(long responseReadyTimeNanos) {
+        this.responseReadyTimeNanos = responseReadyTimeNanos;
+    }
+
+    long responseReadyTimeNanos() {
+        return responseReadyTimeNanos;
+    }
+
     public CompletableFuture<AbstractResponse> future() {
         return future;
     }
@@ -220,11 +427,36 @@ public class KafkaRequest implements RpcRequest {
             AbstractResponse response = request.getErrorResponse(t);
             return serialize(response);
         } finally {
-            releaseBuffer();
+            releaseOrderedBuffer();
+        }
+    }
+
+    private void tryReleaseRawLease() {
+        synchronized (rawAdmissionLock) {
+            KafkaFrameAdmissionLease requestLease = admissionLease;
+            CompletableFuture<Void> transferFuture = nativeAdmissionTransfer.get();
+            if (requestLease != null
+                    && !orderedBufferOwned.get()
+                    && !processorBufferOwned.get()
+                    && (transferFuture == null || transferFuture.isDone())
+                    && rawLeaseReleased.compareAndSet(false, true)) {
+                requestLease.releaseFrameBytes();
+            }
+        }
+    }
+
+    private void tryReleaseLiveLease() {
+        KafkaFrameAdmissionLease requestLease = admissionLease;
+        if (requestLease != null
+                && processingCompleted.get()
+                && networkCompleted.get()
+                && liveLeaseReleased.compareAndSet(false, true)) {
+            requestLease.releaseRequest();
         }
     }
 
     private ByteBuf serialize(AbstractResponse response) {
+        limitProduceErrorMessages(response);
         final ObjectSerializationCache cache = new ObjectSerializationCache();
         ResponseHeader responseHeader = header.toResponseHeader();
         short headerVersion = responseHeader.headerVersion();
@@ -233,12 +465,41 @@ public class KafkaRequest implements RpcRequest {
         int headerSize = headerData.size(cache, headerVersion);
         ApiMessage apiMessage = response.data();
         int messageSize = apiMessage.size(cache, apiVersion);
-        final ByteBuf buffer = ctx.alloc().buffer(headerSize + messageSize);
-        buffer.writerIndex(headerSize + messageSize);
-        final ByteBuffer nioBuffer = buffer.nioBuffer();
-        final ByteBufferAccessor writable = new ByteBufferAccessor(nioBuffer);
-        headerData.write(writable, cache, headerVersion);
-        apiMessage.write(writable, cache, apiVersion);
-        return buffer;
+        final ByteBuf responseBuffer = ctx.alloc().buffer(headerSize + messageSize);
+        try {
+            responseBuffer.writerIndex(headerSize + messageSize);
+            final ByteBuffer nioBuffer = responseBuffer.nioBuffer();
+            final ByteBufferAccessor writable = new ByteBufferAccessor(nioBuffer);
+            headerData.write(writable, cache, headerVersion);
+            apiMessage.write(writable, cache, apiVersion);
+            return responseBuffer;
+        } catch (Throwable serializationFailure) {
+            ReferenceCountUtil.safeRelease(responseBuffer);
+            throw serializationFailure;
+        }
+    }
+
+    private void limitProduceErrorMessages(AbstractResponse response) {
+        if (apiKey != ApiKeys.PRODUCE || !(response instanceof ProduceResponse)) {
+            return;
+        }
+        int remainingBytes =
+                Math.min(
+                        Math.max(requestBytes, 0),
+                        KafkaProduceResult.MAX_TOTAL_ERROR_MESSAGE_BYTES);
+        ProduceResponseData responseData = ((ProduceResponse) response).data();
+        for (ProduceResponseData.TopicProduceResponse topic : responseData.responses()) {
+            for (ProduceResponseData.PartitionProduceResponse partition :
+                    topic.partitionResponses()) {
+                String errorMessage =
+                        KafkaProduceResult.limitErrorMessage(
+                                partition.errorMessage(),
+                                Math.min(
+                                        remainingBytes,
+                                        KafkaProduceResult.MAX_PARTITION_ERROR_MESSAGE_BYTES));
+                partition.setErrorMessage(errorMessage);
+                remainingBytes -= KafkaProduceResult.errorMessageBytes(errorMessage);
+            }
+        }
     }
 }

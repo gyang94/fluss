@@ -18,11 +18,18 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.kafka.api.produce.ProduceHandler;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceResult;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.SchemaInfo;
+import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
+import org.apache.fluss.metrics.util.TestMetricGroup;
 import org.apache.fluss.record.LogRecord;
 import org.apache.fluss.record.LogRecordBatch;
 import org.apache.fluss.record.LogRecordReadContext;
@@ -41,6 +48,7 @@ import org.apache.fluss.server.utils.ServerRpcMessageUtils;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.CloseableIterator;
+import org.apache.fluss.utils.clock.Clock;
 
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.header.Header;
@@ -63,6 +71,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -122,11 +131,7 @@ public class KafkaProduceHandlerTest {
         assertThat(service.lastProduceRequest.getAcks()).isEqualTo(1);
         assertThat(service.lastProduceRequest.getTimeoutMs()).isEqualTo(1000);
 
-        MemoryLogRecords records =
-                ServerRpcMessageUtils.getProduceLogData(service.lastProduceRequest)
-                        .values()
-                        .iterator()
-                        .next();
+        MemoryLogRecords records = service.lastProduceData.values().iterator().next();
         LogRecordBatch batch = records.batches().iterator().next();
         batch.ensureValid();
         assertThat(batch.schemaId()).isEqualTo((short) SCHEMA_ID);
@@ -162,6 +167,50 @@ public class KafkaProduceHandlerTest {
 
         assertThat(request.future()).isCompleted();
         assertThat(service.lastProduceRequest.getAcks()).isZero();
+    }
+
+    @Test
+    public void testRecordCopyMetricFailureDoesNotLoseBackendFuture() {
+        short version = ApiKeys.PRODUCE.latestVersion();
+        ProduceRequest requestBody = produceRequest(version, (short) 1);
+        org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf buffer =
+                org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator.DEFAULT.buffer();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.PRODUCE,
+                        version,
+                        new RequestHeader(ApiKeys.PRODUCE, version, "client-id", 1),
+                        requestBody,
+                        "KAFKA",
+                        buffer,
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<>());
+        CompletableFuture<KafkaProduceResult> backendFuture = new CompletableFuture<>();
+        KafkaProduceMetrics metrics =
+                new KafkaProduceMetrics(TestMetricGroup.newBuilder().build(), new ThrowingClock());
+        ProduceHandler handler = new ProduceHandler(command -> backendFuture, metrics);
+
+        try {
+            CompletableFuture<? extends AbstractResponse> responseFuture =
+                    handler.handle(KafkaRequestContext.fromRequest(request), requestBody);
+            assertThat(responseFuture).isNotDone();
+
+            backendFuture.complete(
+                    new KafkaProduceResult(
+                            Collections.singletonList(
+                                    new TopicResult(
+                                            "topic",
+                                            Collections.singletonList(
+                                                    new PartitionResult(
+                                                            0, Errors.NONE, 42L, null))))));
+
+            assertThat(responseFuture).isCompleted();
+            assertThat(((ProduceResponse) responseFuture.join()).errorCounts())
+                    .containsOnlyKeys(Errors.NONE);
+        } finally {
+            request.releaseOrderedBuffer();
+            buffer.release();
+        }
     }
 
     @Test
@@ -202,11 +251,7 @@ public class KafkaProduceHandlerTest {
         new KafkaRequestHandler(service, service, "kafka").processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
-        MemoryLogRecords records =
-                ServerRpcMessageUtils.getProduceLogData(service.lastProduceRequest)
-                        .values()
-                        .iterator()
-                        .next();
+        MemoryLogRecords records = service.lastProduceData.values().iterator().next();
         LogRecordBatch batch = records.batches().iterator().next();
         try (LogRecordReadContext context =
                         LogRecordReadContext.createArrowReadContext(
@@ -238,11 +283,7 @@ public class KafkaProduceHandlerTest {
         new KafkaRequestHandler(service, service, "kafka").processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
-        MemoryLogRecords records =
-                ServerRpcMessageUtils.getProduceLogData(service.lastProduceRequest)
-                        .values()
-                        .iterator()
-                        .next();
+        MemoryLogRecords records = service.lastProduceData.values().iterator().next();
         LogRecordBatch batch = records.batches().iterator().next();
         try (LogRecordReadContext context =
                         LogRecordReadContext.createArrowReadContext(
@@ -302,11 +343,7 @@ public class KafkaProduceHandlerTest {
         new KafkaRequestHandler(service, service, "kafka").processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
-        MemoryLogRecords records =
-                ServerRpcMessageUtils.getProduceLogData(service.lastProduceRequest)
-                        .values()
-                        .iterator()
-                        .next();
+        MemoryLogRecords records = service.lastProduceData.values().iterator().next();
         LogRecordBatch batch = records.batches().iterator().next();
         try (LogRecordReadContext context =
                         LogRecordReadContext.createArrowReadContext(
@@ -625,9 +662,12 @@ public class KafkaProduceHandlerTest {
                 new RequestHeader(ApiKeys.PRODUCE, version, "client-id", 1),
                 requestBody,
                 "KAFKA",
+                org.apache.fluss.kafka.security.KafkaSaslConnection.plaintext(),
                 org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator.DEFAULT.buffer(),
                 new TestingChannelHandlerContext(),
-                new CompletableFuture<>());
+                new CompletableFuture<>(),
+                System.nanoTime(),
+                KafkaProduceResult.MAX_TOTAL_ERROR_MESSAGE_BYTES);
     }
 
     private static ProduceResponse parseResponse(KafkaRequest request) {
@@ -722,6 +762,7 @@ public class KafkaProduceHandlerTest {
         private final Schema schema;
         private final TableDescriptor tableDescriptor;
         private ProduceLogRequest lastProduceRequest;
+        private Map<TableBucket, MemoryLogRecords> lastProduceData;
         private ProduceLogResponse produceResponse;
         private FlussPrincipal getTableInfoPrincipal;
         private FlussPrincipal producePrincipal;
@@ -789,6 +830,7 @@ public class KafkaProduceHandlerTest {
         public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
             producePrincipal = currentSession().getPrincipal();
             lastProduceRequest = request;
+            lastProduceData = ServerRpcMessageUtils.getProduceLogData(request);
             if (produceResponse != null) {
                 return CompletableFuture.completedFuture(produceResponse);
             }
@@ -803,6 +845,18 @@ public class KafkaProduceHandlerTest {
 
         private static DataType dataType(KafkaDataFormat format) {
             return format == KafkaDataFormat.RAW ? DataTypes.BYTES() : DataTypes.STRING();
+        }
+    }
+
+    private static final class ThrowingClock implements Clock {
+        @Override
+        public long milliseconds() {
+            throw new IllegalStateException("test metrics clock failure");
+        }
+
+        @Override
+        public long nanoseconds() {
+            throw new IllegalStateException("test metrics clock failure");
         }
     }
 }

@@ -27,11 +27,14 @@ import org.apache.fluss.kafka.api.versions.ApiVersionsHandler;
 import org.apache.fluss.kafka.backend.admin.GatewayKafkaTopicAdminBackend;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
 import org.apache.fluss.kafka.backend.produce.GatewayKafkaProduceBackend;
+import org.apache.fluss.kafka.backend.produce.KafkaNativeProduceOperationTracker;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
+import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
 import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
@@ -39,19 +42,130 @@ import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
 
+import org.apache.kafka.common.errors.LeaderNotAvailableException;
+import org.apache.kafka.common.message.ProduceResponseData;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.ProduceResponse;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Entry point that dispatches Kafka protocol requests to registered API handlers. */
 public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
 
+    private static final Logger LOG = LoggerFactory.getLogger(KafkaRequestHandler.class);
+    private static final Executor DIRECT_EXECUTOR = Runnable::run;
+    private static final Duration DEFAULT_NATIVE_ADMISSION_ACQUIRE_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration DEFAULT_NATIVE_COMPLETION_GRACE_TIMEOUT = Duration.ofMinutes(5);
+
     private final KafkaRequestDispatcher dispatcher;
+    private final KafkaProduceMetrics produceMetrics;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
     public KafkaRequestHandler(
             RpcGatewayService service, TabletServerGateway gateway, String kafkaDatabase) {
+        this(service, gateway, kafkaDatabase, KafkaProduceMetrics.noOp());
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            String kafkaDatabase,
+            KafkaProduceMetrics produceMetrics) {
+        this(
+                service,
+                gateway,
+                kafkaDatabase,
+                produceMetrics,
+                new ArrowKafkaRecordTranscoder(produceMetrics));
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            String kafkaDatabase,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder) {
+        this(
+                service,
+                gateway,
+                kafkaDatabase,
+                produceMetrics,
+                transcoder,
+                DIRECT_EXECUTOR,
+                DEFAULT_NATIVE_ADMISSION_ACQUIRE_TIMEOUT,
+                DEFAULT_NATIVE_COMPLETION_GRACE_TIMEOUT);
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            String kafkaDatabase,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder,
+            Executor conversionExecutor,
+            Duration nativeAdmissionAcquireTimeout,
+            Duration nativeCompletionGraceTimeout) {
+        this(
+                service,
+                gateway,
+                kafkaDatabase,
+                produceMetrics,
+                transcoder,
+                conversionExecutor,
+                nativeAdmissionAcquireTimeout,
+                nativeCompletionGraceTimeout,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE);
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            String kafkaDatabase,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder,
+            Executor conversionExecutor,
+            Duration nativeAdmissionAcquireTimeout,
+            Duration nativeCompletionGraceTimeout,
+            long maxCopiedBytesPerRequest,
+            long maxCopiedBytesPerRecord) {
+        this(
+                service,
+                gateway,
+                kafkaDatabase,
+                produceMetrics,
+                transcoder,
+                conversionExecutor,
+                nativeAdmissionAcquireTimeout,
+                nativeCompletionGraceTimeout,
+                maxCopiedBytesPerRequest,
+                maxCopiedBytesPerRecord,
+                new KafkaNativeProduceOperationTracker());
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            String kafkaDatabase,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder,
+            Executor conversionExecutor,
+            Duration nativeAdmissionAcquireTimeout,
+            Duration nativeCompletionGraceTimeout,
+            long maxCopiedBytesPerRequest,
+            long maxCopiedBytesPerRecord,
+            KafkaNativeProduceOperationTracker operationTracker) {
         checkNotNull(service);
         checkNotNull(gateway);
         checkNotNull(kafkaDatabase);
+        this.produceMetrics = checkNotNull(produceMetrics);
         KafkaApiRegistry registry = new KafkaApiRegistry();
         registry.register(new ApiVersionsHandler(registry));
         registry.register(new SaslHandshakeHandler());
@@ -65,7 +179,15 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                 service,
                                 gateway,
                                 kafkaDatabase,
-                                new ArrowKafkaRecordTranscoder())));
+                                checkNotNull(transcoder),
+                                produceMetrics,
+                                checkNotNull(conversionExecutor),
+                                checkNotNull(nativeAdmissionAcquireTimeout),
+                                checkNotNull(nativeCompletionGraceTimeout),
+                                checkNotNull(operationTracker)),
+                        produceMetrics,
+                        maxCopiedBytesPerRequest,
+                        maxCopiedBytesPerRecord));
         registry.freeze();
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
@@ -127,6 +249,142 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat) {
+        this(
+                service,
+                gateway,
+                adminGateway,
+                adminOperationAuthorizer,
+                kafkaDatabase,
+                defaultKeyFormat,
+                defaultValueFormat,
+                KafkaProduceMetrics.noOp());
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase,
+            KafkaDataFormat defaultKeyFormat,
+            KafkaDataFormat defaultValueFormat,
+            KafkaProduceMetrics produceMetrics) {
+        this(
+                service,
+                gateway,
+                adminGateway,
+                adminOperationAuthorizer,
+                kafkaDatabase,
+                defaultKeyFormat,
+                defaultValueFormat,
+                produceMetrics,
+                new ArrowKafkaRecordTranscoder(produceMetrics));
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase,
+            KafkaDataFormat defaultKeyFormat,
+            KafkaDataFormat defaultValueFormat,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder) {
+        this(
+                service,
+                gateway,
+                adminGateway,
+                adminOperationAuthorizer,
+                kafkaDatabase,
+                defaultKeyFormat,
+                defaultValueFormat,
+                produceMetrics,
+                transcoder,
+                DIRECT_EXECUTOR,
+                DEFAULT_NATIVE_ADMISSION_ACQUIRE_TIMEOUT,
+                DEFAULT_NATIVE_COMPLETION_GRACE_TIMEOUT);
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase,
+            KafkaDataFormat defaultKeyFormat,
+            KafkaDataFormat defaultValueFormat,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder,
+            Executor conversionExecutor,
+            Duration nativeAdmissionAcquireTimeout,
+            Duration nativeCompletionGraceTimeout) {
+        this(
+                service,
+                gateway,
+                adminGateway,
+                adminOperationAuthorizer,
+                kafkaDatabase,
+                defaultKeyFormat,
+                defaultValueFormat,
+                produceMetrics,
+                transcoder,
+                conversionExecutor,
+                nativeAdmissionAcquireTimeout,
+                nativeCompletionGraceTimeout,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE);
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase,
+            KafkaDataFormat defaultKeyFormat,
+            KafkaDataFormat defaultValueFormat,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder,
+            Executor conversionExecutor,
+            Duration nativeAdmissionAcquireTimeout,
+            Duration nativeCompletionGraceTimeout,
+            long maxCopiedBytesPerRequest,
+            long maxCopiedBytesPerRecord) {
+        this(
+                service,
+                gateway,
+                adminGateway,
+                adminOperationAuthorizer,
+                kafkaDatabase,
+                defaultKeyFormat,
+                defaultValueFormat,
+                produceMetrics,
+                transcoder,
+                conversionExecutor,
+                nativeAdmissionAcquireTimeout,
+                nativeCompletionGraceTimeout,
+                maxCopiedBytesPerRequest,
+                maxCopiedBytesPerRecord,
+                new KafkaNativeProduceOperationTracker());
+    }
+
+    KafkaRequestHandler(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            AdminGateway adminGateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String kafkaDatabase,
+            KafkaDataFormat defaultKeyFormat,
+            KafkaDataFormat defaultValueFormat,
+            KafkaProduceMetrics produceMetrics,
+            KafkaRecordTranscoder transcoder,
+            Executor conversionExecutor,
+            Duration nativeAdmissionAcquireTimeout,
+            Duration nativeCompletionGraceTimeout,
+            long maxCopiedBytesPerRequest,
+            long maxCopiedBytesPerRecord,
+            KafkaNativeProduceOperationTracker operationTracker) {
         checkNotNull(service);
         checkNotNull(gateway);
         checkNotNull(adminGateway);
@@ -134,6 +392,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         checkNotNull(kafkaDatabase);
         checkNotNull(defaultKeyFormat);
         checkNotNull(defaultValueFormat);
+        this.produceMetrics = checkNotNull(produceMetrics);
         KafkaApiRegistry registry = new KafkaApiRegistry();
         registry.register(new ApiVersionsHandler(registry));
         registry.register(new SaslHandshakeHandler());
@@ -147,7 +406,15 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                 service,
                                 gateway,
                                 kafkaDatabase,
-                                new ArrowKafkaRecordTranscoder())));
+                                checkNotNull(transcoder),
+                                produceMetrics,
+                                checkNotNull(conversionExecutor),
+                                checkNotNull(nativeAdmissionAcquireTimeout),
+                                checkNotNull(nativeCompletionGraceTimeout),
+                                checkNotNull(operationTracker)),
+                        produceMetrics,
+                        maxCopiedBytesPerRequest,
+                        maxCopiedBytesPerRecord));
         GatewayKafkaTopicAdminBackend topicAdminBackend =
                 new GatewayKafkaTopicAdminBackend(
                         service, adminGateway, adminOperationAuthorizer, kafkaDatabase);
@@ -173,15 +440,96 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
 
     @Override
     public void processRequest(KafkaRequest request) {
-        dispatcher
-                .dispatch(request)
-                .whenComplete(
-                        (response, failure) -> {
-                            if (failure == null) {
-                                request.complete(response);
-                            } else {
-                                request.fail(failure);
-                            }
-                        });
+        boolean isProduce = request.apiKey() == ApiKeys.PRODUCE;
+        if (isProduce) {
+            recordMetric(
+                    () ->
+                            produceMetrics.requestStarted(
+                                    request.receivedTimeNanos(), request.requestBytes()));
+        }
+        if (request.cancelled()) {
+            if (isProduce) {
+                recordMetric(
+                        () ->
+                                produceMetrics.requestCompleted(
+                                        request.receivedTimeNanos(), true, 0));
+            }
+            request.fail(
+                    new LeaderNotAvailableException(
+                            "Kafka connection closed before the request was dispatched."));
+            return;
+        }
+
+        CompletableFuture<AbstractResponse> responseFuture;
+        try {
+            responseFuture = dispatcher.dispatch(request);
+        } catch (Throwable failure) {
+            if (isProduce) {
+                recordMetric(
+                        () ->
+                                produceMetrics.requestCompleted(
+                                        request.receivedTimeNanos(), true, 0));
+            }
+            request.fail(failure);
+            return;
+        }
+        if (isProduce) {
+            try {
+                request.detachProducePayload();
+            } catch (Throwable detachFailure) {
+                // Retain ordered ownership until response/cancellation when partition metadata
+                // cannot be cached safely. The request can still complete normally.
+                LOG.warn(
+                        "Unable to detach copied Kafka Produce payload for request {}.",
+                        request.requestId(),
+                        detachFailure);
+            }
+        }
+        responseFuture.whenComplete(
+                (response, failure) -> {
+                    try {
+                        if (isProduce) {
+                            int failedPartitions = countFailedPartitions(response);
+                            recordMetric(
+                                    () ->
+                                            produceMetrics.requestCompleted(
+                                                    request.receivedTimeNanos(),
+                                                    failure != null || failedPartitions > 0,
+                                                    failedPartitions));
+                        }
+                        if (failure == null) {
+                            request.complete(response);
+                        } else {
+                            request.fail(failure);
+                        }
+                    } catch (Throwable completionFailure) {
+                        request.fail(completionFailure);
+                    }
+                });
+    }
+
+    private void recordMetric(Runnable recorder) {
+        try {
+            recorder.run();
+        } catch (Throwable ignored) {
+            // Metrics are observational and must not affect request dispatch or completion.
+        }
+    }
+
+    private static int countFailedPartitions(AbstractResponse response) {
+        if (!(response instanceof ProduceResponse)) {
+            return 0;
+        }
+        int failedPartitions = 0;
+        for (ProduceResponseData.TopicProduceResponse topic :
+                ((ProduceResponse) response).data().responses()) {
+            for (ProduceResponseData.PartitionProduceResponse partition :
+                    topic.partitionResponses()) {
+                if (partition.errorCode() != 0) {
+                    failedPartitions++;
+                }
+            }
+        }
+        return failedPartitions;
     }
 }

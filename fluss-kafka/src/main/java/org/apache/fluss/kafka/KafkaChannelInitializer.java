@@ -17,16 +17,27 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.admission.KafkaNativeProduceAdmissionController;
+import org.apache.fluss.kafka.admission.KafkaProduceFrameAdmission;
+import org.apache.fluss.kafka.admission.KafkaRequestAdmissionController;
+import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
+import org.apache.fluss.kafka.network.KafkaAdmissionFrameDecoder;
+import org.apache.fluss.kafka.network.KafkaFrameAdmission;
+import org.apache.fluss.kafka.network.KafkaFrameReadPauser;
 import org.apache.fluss.rpc.netty.NettyChannelInitializer;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
+import org.apache.fluss.rpc.netty.server.RequestChannel.PauseLease;
+import org.apache.fluss.rpc.netty.server.RequestChannel.PauseReason;
 import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelInitializer;
 import org.apache.fluss.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.codec.LengthFieldPrepender;
 import org.apache.fluss.shaded.netty4.io.netty.handler.flow.FlowControlHandler;
+import org.apache.fluss.utils.MathUtils;
 
 import javax.annotation.Nullable;
 
+import java.time.Duration;
 import java.util.function.Supplier;
 
 /**
@@ -35,10 +46,19 @@ import java.util.function.Supplier;
  */
 public class KafkaChannelInitializer extends NettyChannelInitializer {
 
+    private enum PreFramePauseReason implements PauseReason {
+        ADMISSION_WAIT
+    }
+
     private final RequestChannel[] requestChannels;
     private final String listenerName;
     private final int maxRequestSize;
     private final @Nullable Supplier<ServerAuthenticator> authenticatorSupplier;
+    private final KafkaProduceMetrics produceMetrics;
+    private final @Nullable KafkaRequestAdmissionController admissionController;
+    private final @Nullable KafkaNativeProduceAdmissionController nativeAdmissionController;
+    private final Duration preFrameWaitTimeout;
+    private final Duration bodyReadTimeout;
     private final LengthFieldPrepender prepender = new LengthFieldPrepender(4);
     private final boolean preferHeap;
 
@@ -60,12 +80,89 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
             int maxRequestSize,
             boolean preferHeap,
             @Nullable Supplier<ServerAuthenticator> authenticatorSupplier) {
+        this(
+                requestChannels,
+                listenerName,
+                maxIdleTimeSeconds,
+                maxRequestSize,
+                preferHeap,
+                authenticatorSupplier,
+                KafkaProduceMetrics.noOp());
+    }
+
+    /** Creates a channel initializer with authentication and Produce runtime metrics. */
+    public KafkaChannelInitializer(
+            RequestChannel[] requestChannels,
+            String listenerName,
+            long maxIdleTimeSeconds,
+            int maxRequestSize,
+            boolean preferHeap,
+            @Nullable Supplier<ServerAuthenticator> authenticatorSupplier,
+            KafkaProduceMetrics produceMetrics) {
+        this(
+                requestChannels,
+                listenerName,
+                maxIdleTimeSeconds,
+                maxRequestSize,
+                preferHeap,
+                authenticatorSupplier,
+                produceMetrics,
+                null,
+                null,
+                Duration.ofSeconds(30),
+                Duration.ofSeconds(30));
+    }
+
+    /** Creates a channel initializer with metrics, admission control, and bounded frame stages. */
+    public KafkaChannelInitializer(
+            RequestChannel[] requestChannels,
+            String listenerName,
+            long maxIdleTimeSeconds,
+            int maxRequestSize,
+            boolean preferHeap,
+            @Nullable Supplier<ServerAuthenticator> authenticatorSupplier,
+            KafkaProduceMetrics produceMetrics,
+            @Nullable KafkaRequestAdmissionController admissionController,
+            Duration preFrameWaitTimeout,
+            Duration bodyReadTimeout) {
+        this(
+                requestChannels,
+                listenerName,
+                maxIdleTimeSeconds,
+                maxRequestSize,
+                preferHeap,
+                authenticatorSupplier,
+                produceMetrics,
+                admissionController,
+                null,
+                preFrameWaitTimeout,
+                bodyReadTimeout);
+    }
+
+    /** Creates a channel initializer with frame and converted/native Produce admission control. */
+    public KafkaChannelInitializer(
+            RequestChannel[] requestChannels,
+            String listenerName,
+            long maxIdleTimeSeconds,
+            int maxRequestSize,
+            boolean preferHeap,
+            @Nullable Supplier<ServerAuthenticator> authenticatorSupplier,
+            KafkaProduceMetrics produceMetrics,
+            @Nullable KafkaRequestAdmissionController admissionController,
+            @Nullable KafkaNativeProduceAdmissionController nativeAdmissionController,
+            Duration preFrameWaitTimeout,
+            Duration bodyReadTimeout) {
         super(maxIdleTimeSeconds);
         this.requestChannels = requestChannels;
         this.listenerName = listenerName;
         this.maxRequestSize = maxRequestSize;
         this.preferHeap = preferHeap;
         this.authenticatorSupplier = authenticatorSupplier;
+        this.produceMetrics = produceMetrics;
+        this.admissionController = admissionController;
+        this.nativeAdmissionController = nativeAdmissionController;
+        this.preFrameWaitTimeout = preFrameWaitTimeout;
+        this.bodyReadTimeout = bodyReadTimeout;
     }
 
     @Override
@@ -76,13 +173,50 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
         if (authenticatorSupplier != null && ch.pipeline().get("loggingHandler") != null) {
             ch.pipeline().remove("loggingHandler");
         }
+        RequestChannel requestChannel = selectRequestChannel(ch);
+        KafkaFrameAdmission frameAdmission =
+                admissionController == null
+                        ? new KafkaProduceFrameAdmission(requestChannel, null)
+                        : admissionController.createConnectionAdmission(requestChannel);
+        KafkaFrameReadPauser readPauser =
+                channel -> {
+                    PauseLease lease =
+                            requestChannel.pauseChannel(
+                                    channel, PreFramePauseReason.ADMISSION_WAIT);
+                    return lease::close;
+                };
+        KafkaAdmissionFrameDecoder frameDecoder =
+                new KafkaAdmissionFrameDecoder(
+                        maxRequestSize,
+                        preferHeap,
+                        frameAdmission,
+                        readPauser,
+                        preFrameWaitTimeout,
+                        bodyReadTimeout,
+                        produceMetrics);
+        ch.config()
+                .setRecvByteBufAllocator(
+                        frameDecoder.newRecvByteBufAllocator(
+                                ch.config().getRecvByteBufAllocator()));
+        ch.pipeline().addLast("frameReadGate", frameDecoder.newReadGate());
         addIdleStateHandler(ch);
         ch.pipeline().addLast(prepender);
-        addFrameDecoder(ch, maxRequestSize, 4, preferHeap);
+        ch.pipeline().addLast("frameDecoder", frameDecoder);
         ch.pipeline().addLast("flowController", new FlowControlHandler());
         ch.pipeline()
                 .addLast(
                         new KafkaCommandDecoder(
-                                requestChannels, listenerName, authenticatorSupplier));
+                                requestChannels,
+                                listenerName,
+                                authenticatorSupplier,
+                                produceMetrics,
+                                null,
+                                nativeAdmissionController));
+    }
+
+    private RequestChannel selectRequestChannel(SocketChannel channel) {
+        int channelIndex =
+                MathUtils.murmurHash(channel.id().asLongText().hashCode()) % requestChannels.length;
+        return requestChannels[channelIndex];
     }
 }

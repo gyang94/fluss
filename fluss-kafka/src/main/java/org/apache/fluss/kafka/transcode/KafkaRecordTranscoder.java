@@ -27,6 +27,39 @@ import java.util.List;
 /** Converts copied Kafka records into the native Fluss log representation. */
 @Internal
 public interface KafkaRecordTranscoder {
-    /** Transcodes records according to the target Fluss table schema and log format. */
-    BytesView transcode(List<Record> records, TableInfo tableInfo) throws Exception;
+    /** Resolves or reuses the immutable conversion plan for the target table version. */
+    KafkaTopicWritePlan prepare(TableInfo tableInfo);
+
+    /** Transcodes records using a previously prepared immutable write plan. */
+    default BytesView transcode(List<Record> records, KafkaTopicWritePlan writePlan)
+            throws Exception {
+        return transcode(records, writePlan, KafkaOutputMemoryBudget.UNBOUNDED);
+    }
+
+    /**
+     * Transcodes records while reserving converted output storage before physical allocation.
+     *
+     * <p>Every implementation must explicitly account for retained output through the supplied
+     * budget before physical allocation. Implementations that retain no output may ignore the
+     * budget, but must still implement this method so a future transcoder cannot silently bypass
+     * production admission.
+     */
+    BytesView transcode(
+            List<Record> records,
+            KafkaTopicWritePlan writePlan,
+            KafkaOutputMemoryBudget outputMemoryBudget)
+            throws Exception;
+
+    /**
+     * Prepares and transcodes records in one call.
+     *
+     * <p>This convenience method is retained for component callers. Produce backends should prepare
+     * once per topic and share the returned plan across all partitions.
+     */
+    default BytesView transcode(List<Record> records, TableInfo tableInfo) throws Exception {
+        return transcode(records, prepare(tableInfo));
+    }
+
+    /** Invalidates a compiled plan when an authoritative metadata notification is available. */
+    default void invalidate(TableInfo tableInfo) {}
 }

@@ -20,9 +20,15 @@ package org.apache.fluss.kafka.format;
 import org.apache.fluss.annotation.Internal;
 
 import javax.annotation.Nullable;
+import javax.annotation.concurrent.ThreadSafe;
 
-/** Decodes one nullable Kafka record component into its ordered Fluss field projection. */
+/**
+ * Decodes one nullable Kafka record component into its ordered Fluss field projection.
+ *
+ * <p>Implementations are immutable and can be shared by concurrent Produce requests.
+ */
 @Internal
+@ThreadSafe
 public interface KafkaFieldDecoder {
 
     /** Decodes Kafka key or value bytes into internal Fluss field values. */

@@ -26,10 +26,13 @@ import org.apache.fluss.row.GenericArray;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 
+import javax.annotation.concurrent.ThreadSafe;
+
 import java.util.List;
 
-/** Assembles decoded Kafka key, value, and metadata into a physical Fluss row. */
+/** Thread-safe assembler for decoded Kafka key, value, and metadata into a physical Fluss row. */
 @Internal
+@ThreadSafe
 public final class KafkaRowAssembler {
 
     private final KafkaTopicSchema topicSchema;
@@ -80,7 +83,7 @@ public final class KafkaRowAssembler {
         Object[] rows = new Object[headers.size()];
         for (int i = 0; i < headers.size(); i++) {
             RecordHeader header = headers.get(i);
-            rows[i] = GenericRow.of(BinaryString.fromString(header.name()), header.value());
+            rows[i] = GenericRow.of(BinaryString.fromString(header.name()), header.borrowedValue());
         }
         return new GenericArray(rows);
     }

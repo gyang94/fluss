@@ -2715,6 +2715,182 @@ public class ConfigOptions {
                     .withDescription(
                             "Close kafka idle connections after the given time specified by this config.");
 
+    public static final ConfigOption<MemorySize> KAFKA_PRODUCE_ARROW_ALLOCATOR_MEMORY =
+            key("kafka.produce.arrow.allocator-memory")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("256mb"))
+                    .withDescription(
+                            "The hard memory limit of the TabletServer-local Arrow allocator used to convert Kafka Produce batches.");
+
+    public static final ConfigOption<Integer> KAFKA_PRODUCE_ARROW_MAX_CONCURRENT_WRITERS =
+            key("kafka.produce.arrow.max-concurrent-writers")
+                    .intType()
+                    .defaultValue(8)
+                    .withDescription(
+                            "The maximum number of Kafka Produce Arrow writers that may be checked out concurrently on one TabletServer.");
+
+    public static final ConfigOption<Integer> KAFKA_PRODUCE_ARROW_WRITER_CACHE_MAX_SCHEMA_KEYS =
+            key("kafka.produce.arrow.writer-cache-max-schema-keys")
+                    .intType()
+                    .defaultValue(128)
+                    .withDescription(
+                            "The maximum number of schema keys retained by the current Kafka Produce Arrow writer-pool generation. A new schema beyond this limit rotates the generation.");
+
+    public static final ConfigOption<Duration> KAFKA_PRODUCE_ARROW_ACQUIRE_TIMEOUT =
+            key("kafka.produce.arrow.acquire-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(30))
+                    .withDescription(
+                            "The maximum time a Kafka Produce conversion waits for an Arrow writer permit.");
+
+    public static final ConfigOption<Integer> KAFKA_PRODUCE_ADMISSION_MAX_LIVE_REQUESTS =
+            key("kafka.produce.admission.max-live-requests")
+                    .intType()
+                    .defaultValue(1024)
+                    .withDescription(
+                            "The TabletServer-local hard limit for live Kafka Produce requests reserved before their frame bodies are read. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize> KAFKA_PRODUCE_ADMISSION_MAX_RAW_BYTES =
+            key("kafka.produce.admission.max-raw-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("512mb"))
+                    .withDescription(
+                            "The TabletServer-local hard limit for concurrently retained Kafka Produce wire bytes. It limits both raw frame/copy ownership and, independently, live request-envelope ownership retained through response-network completion. It must be at least netty.server.max-request-size. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer>
+            KAFKA_PRODUCE_ADMISSION_MAX_LIVE_REQUESTS_PER_CONNECTION =
+                    key("kafka.produce.admission.max-live-requests-per-connection")
+                            .intType()
+                            .defaultValue(64)
+                            .withDescription(
+                                    "The per-connection hard limit for live Kafka Produce requests reserved before their frame bodies are read. It must not exceed the TabletServer-local Produce limit. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize>
+            KAFKA_PRODUCE_ADMISSION_MAX_RAW_BYTES_PER_CONNECTION =
+                    key("kafka.produce.admission.max-raw-bytes-per-connection")
+                            .memoryType()
+                            .defaultValue(MemorySize.parse("128mb"))
+                            .withDescription(
+                                    "The per-connection hard limit for concurrently retained Kafka Produce wire bytes. It limits both raw frame/copy ownership and, independently, live request-envelope ownership retained through response-network completion. It must be at least netty.server.max-request-size and must not exceed the TabletServer-local Produce limit. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer> KAFKA_PRODUCE_ADMISSION_MAX_PENDING_RESERVATIONS =
+            key("kafka.produce.admission.max-pending-reservations")
+                    .intType()
+                    .defaultValue(1024)
+                    .withDescription(
+                            "The maximum number of Kafka Produce frames waiting for pre-frame admission on one TabletServer. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer> KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_INFLIGHT_REQUESTS =
+            key("kafka.produce.native-admission.max-inflight-requests")
+                    .intType()
+                    .defaultValue(256)
+                    .withDescription(
+                            "The TabletServer-local hard limit for converted Kafka Produce requests retained until their original native Produce futures complete. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize> KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES =
+            key("kafka.produce.native-admission.max-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("512mb"))
+                    .withDescription(
+                            "The TabletServer-local hard accounting limit for conservatively estimated copied-record and request metadata bytes owned by waiting native-admission reservations, single-record decode transients, and converted output-page capacity plus wrapper overhead retained by granted requests until native completion. Arrow allocator memory is governed separately. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer>
+            KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_INFLIGHT_REQUESTS_PER_CONNECTION =
+                    key("kafka.produce.native-admission.max-inflight-requests-per-connection")
+                            .intType()
+                            .defaultValue(32)
+                            .withDescription(
+                                    "The per-connection hard limit for converted Kafka Produce requests retained until native completion. It must not exceed the TabletServer-local native request limit. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize>
+            KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES_PER_CONNECTION =
+                    key("kafka.produce.native-admission.max-bytes-per-connection")
+                            .memoryType()
+                            .defaultValue(MemorySize.parse("128mb"))
+                            .withDescription(
+                                    "The per-connection hard accounting limit for conservatively estimated copied-record and request metadata bytes owned by waiting native-admission reservations, single-record decode transients, and converted output-page capacity plus wrapper overhead retained by granted requests until native completion. It must not exceed the TabletServer-local native byte limit. Arrow allocator memory is governed separately. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer>
+            KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_PENDING_RESERVATIONS =
+                    key("kafka.produce.native-admission.max-pending-reservations")
+                            .intType()
+                            .defaultValue(1024)
+                            .withDescription(
+                                    "The maximum number of conversions waiting for native Produce admission on one TabletServer. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Duration> KAFKA_PRODUCE_NATIVE_ADMISSION_ACQUIRE_TIMEOUT =
+            key("kafka.produce.native-admission.acquire-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(30))
+                    .withDescription(
+                            "The maximum time a Kafka Produce conversion that already owns its estimated-byte token may wait for native request-count admission and FIFO order before native submission.");
+
+    public static final ConfigOption<Duration>
+            KAFKA_PRODUCE_NATIVE_ADMISSION_COMPLETION_GRACE_TIMEOUT =
+                    key("kafka.produce.native-admission.completion-grace-timeout")
+                            .durationType()
+                            .defaultValue(Duration.ofMinutes(5))
+                            .withDescription(
+                                    "The pre-submit deadline for an admitted native Produce conversion and, after native submission, the grace period before an incomplete original Produce future is reported as overdue. Pre-submit expiry cancels work that has not crossed the native submission boundary; submitted work retains its admission lease until the original native future terminates.");
+
+    public static final ConfigOption<Duration> KAFKA_ADMISSION_PRE_FRAME_WAIT_TIMEOUT =
+            key("kafka.admission.pre-frame-wait-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(30))
+                    .withDescription(
+                            "The maximum time a Kafka frame may wait for pre-frame admission. A timed-out connection is closed before the frame body is read or submitted. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Duration> KAFKA_ADMISSION_BODY_READ_TIMEOUT =
+            key("kafka.admission.body-read-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(30))
+                    .withDescription(
+                            "The maximum time allowed to read an admitted Kafka frame body. A timed-out connection is closed and its admission reservation is released. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer> KAFKA_CONTROL_ADMISSION_MAX_LIVE_REQUESTS =
+            key("kafka.control.admission.max-live-requests")
+                    .intType()
+                    .defaultValue(128)
+                    .withDescription(
+                            "The TabletServer-local hard limit for live Kafka control-plane requests. Control-plane admission is independent of Kafka Produce admission. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize> KAFKA_CONTROL_ADMISSION_MAX_RAW_BYTES =
+            key("kafka.control.admission.max-raw-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("128mb"))
+                    .withDescription(
+                            "The TabletServer-local hard limit for raw bytes reserved by Kafka control-plane frames. It must be at least kafka.control.admission.max-frame-bytes. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize> KAFKA_CONTROL_ADMISSION_MAX_FRAME_BYTES =
+            key("kafka.control.admission.max-frame-bytes")
+                    .memoryType()
+                    .defaultValue(MemorySize.parse("8mb"))
+                    .withDescription(
+                            "The maximum complete wire size of one Kafka control-plane request frame, including its four-byte length field. It must be at least 6 bytes, must not exceed netty.server.max-request-size, and must fit within both control-plane raw-byte admission limits. Oversized control-plane connections are closed before their frame bodies are read. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer>
+            KAFKA_CONTROL_ADMISSION_MAX_LIVE_REQUESTS_PER_CONNECTION =
+                    key("kafka.control.admission.max-live-requests-per-connection")
+                            .intType()
+                            .defaultValue(8)
+                            .withDescription(
+                                    "The per-connection hard limit for live Kafka control-plane requests. It must not exceed the TabletServer-local control-plane limit. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<MemorySize>
+            KAFKA_CONTROL_ADMISSION_MAX_RAW_BYTES_PER_CONNECTION =
+                    key("kafka.control.admission.max-raw-bytes-per-connection")
+                            .memoryType()
+                            .defaultValue(MemorySize.parse("100mb"))
+                            .withDescription(
+                                    "The per-connection hard limit for raw bytes reserved by Kafka control-plane frames. It must be at least kafka.control.admission.max-frame-bytes and must not exceed the TabletServer-local control-plane limit. This is startup configuration and changing it requires a TabletServer restart.");
+
+    public static final ConfigOption<Integer> KAFKA_CONNECTION_MAX_CONNECTIONS =
+            key("kafka.connection.max-connections")
+                    .intType()
+                    .defaultValue(10_000)
+                    .withDescription(
+                            "The maximum number of concurrent Kafka protocol connections accepted by one TabletServer. This is startup configuration and changing it requires a TabletServer restart.");
+
     /**
      * Compaction style for Fluss's kv, which is same to rocksdb's, but help use avoid including
      * rocksdb dependency when only need include this common module.
