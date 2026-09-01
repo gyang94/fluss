@@ -25,6 +25,7 @@ import org.apache.fluss.rpc.messages.PbBucketMetadata;
 import org.apache.fluss.rpc.messages.PbServerNode;
 import org.apache.fluss.rpc.messages.PbTableMetadata;
 import org.apache.fluss.rpc.messages.PbTablePath;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 
@@ -57,6 +58,35 @@ import static org.assertj.core.api.Assertions.assertThat;
 public class KafkaMetadataHandlerTest {
 
     private static final Uuid TOPIC_ID = new Uuid(0x466c757373000000L, 123L);
+
+    @Test
+    public void testAuthenticatedPrincipalPropagatesToMetadataGatewaySession() {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        FlussPrincipal principal = new FlussPrincipal("kafka-user", "User");
+        MetadataRequest requestBody = namedTopicRequest("topic");
+        short version = requestBody.version();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.METADATA,
+                        version,
+                        new RequestHeader(ApiKeys.METADATA, version, "client-id", 1),
+                        requestBody,
+                        "KAFKA",
+                        ByteBufAllocator.DEFAULT.buffer(),
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<>()) {
+                    @Override
+                    public FlussPrincipal principal() {
+                        return principal;
+                    }
+                };
+
+        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        ByteBuf responseBuffer = request.responseBuffer();
+        responseBuffer.release();
+
+        assertThat(service.lastPrincipal).isEqualTo(principal);
+    }
 
     @Test
     public void testNamedTopicForEverySupportedVersion() {
@@ -281,6 +311,7 @@ public class KafkaMetadataHandlerTest {
 
         private final Map<String, Long> tables = new LinkedHashMap<>();
         private String lastListenerName;
+        private FlussPrincipal lastPrincipal;
         private boolean topicLeaderAvailable = true;
         private boolean failMetadata;
         private boolean failNextMetadataAsMissing;
@@ -301,6 +332,7 @@ public class KafkaMetadataHandlerTest {
         public CompletableFuture<org.apache.fluss.rpc.messages.MetadataResponse> metadata(
                 org.apache.fluss.rpc.messages.MetadataRequest request) {
             lastListenerName = currentListenerName();
+            lastPrincipal = currentSession().getPrincipal();
             if (failMetadata) {
                 CompletableFuture<org.apache.fluss.rpc.messages.MetadataResponse> failure =
                         new CompletableFuture<>();

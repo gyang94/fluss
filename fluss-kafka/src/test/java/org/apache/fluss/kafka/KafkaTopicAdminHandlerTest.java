@@ -18,18 +18,23 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.exception.TableAlreadyExistException;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
+import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.messages.CreateTableRequest;
 import org.apache.fluss.rpc.messages.CreateTableResponse;
 import org.apache.fluss.rpc.messages.DropTableRequest;
 import org.apache.fluss.rpc.messages.DropTableResponse;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
+import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.security.acl.OperationType;
+import org.apache.fluss.security.acl.Resource;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.types.DataTypes;
@@ -50,13 +55,17 @@ import org.apache.kafka.common.requests.RequestHeader;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -64,6 +73,119 @@ import static org.mockito.Mockito.when;
 
 /** Tests the Kafka topic lifecycle mapping to Fluss tables. */
 public class KafkaTopicAdminHandlerTest {
+
+    @Test
+    public void testAuthenticatedPrincipalPropagatesToTopicAdminGatewaySessions() {
+        TestingTabletGatewayService service = new TestingTabletGatewayService();
+        AdminGateway adminGateway = mock(AdminGateway.class);
+        AdminOperationAuthorizer adminOperationAuthorizer = mock(AdminOperationAuthorizer.class);
+        FlussPrincipal principal = new FlussPrincipal("kafka-user", "User");
+        List<FlussPrincipal> observedPrincipals = new ArrayList<>();
+        when(adminGateway.createTable(any(CreateTableRequest.class)))
+                .thenAnswer(
+                        ignored -> {
+                            observedPrincipals.add(service.currentSession().getPrincipal());
+                            return CompletableFuture.completedFuture(new CreateTableResponse());
+                        });
+        when(adminGateway.getTableInfo(any(GetTableInfoRequest.class)))
+                .thenAnswer(
+                        ignored -> {
+                            observedPrincipals.add(service.currentSession().getPrincipal());
+                            return CompletableFuture.completedFuture(
+                                    new GetTableInfoResponse().setTableId(123L));
+                        });
+        when(adminGateway.dropTable(any(DropTableRequest.class)))
+                .thenAnswer(
+                        ignored -> {
+                            observedPrincipals.add(service.currentSession().getPrincipal());
+                            return CompletableFuture.completedFuture(new DropTableResponse());
+                        });
+
+        short createVersion = ApiKeys.CREATE_TOPICS.latestVersion();
+        KafkaRequest createRequest =
+                kafkaRequest(
+                        ApiKeys.CREATE_TOPICS,
+                        createTopicsRequest(createVersion),
+                        createVersion,
+                        principal);
+        new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer, "kafka")
+                .processRequest(createRequest);
+        assertThat(((CreateTopicsResponse) parseResponse(createRequest)).errorCounts())
+                .containsOnlyKeys(Errors.NONE);
+
+        short deleteVersion = ApiKeys.DELETE_TOPICS.latestVersion();
+        DeleteTopicsRequest deleteRequestBody =
+                new DeleteTopicsRequest.Builder(
+                                new DeleteTopicsRequestData()
+                                        .setTimeoutMs(1000)
+                                        .setTopics(
+                                                Collections.singletonList(
+                                                        new DeleteTopicsRequestData
+                                                                        .DeleteTopicState()
+                                                                .setName("topic")
+                                                                .setTopicId(Uuid.ZERO_UUID))))
+                        .build(deleteVersion);
+        KafkaRequest deleteRequest =
+                kafkaRequest(ApiKeys.DELETE_TOPICS, deleteRequestBody, deleteVersion, principal);
+        new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer, "kafka")
+                .processRequest(deleteRequest);
+        assertThat(((DeleteTopicsResponse) parseResponse(deleteRequest)).errorCounts())
+                .containsOnlyKeys(Errors.NONE);
+
+        assertThat(observedPrincipals).containsExactly(principal, principal, principal);
+        verify(adminOperationAuthorizer)
+                .authorize(
+                        org.mockito.ArgumentMatchers.argThat(
+                                session -> session.getPrincipal().equals(principal)),
+                        eq(OperationType.CREATE),
+                        eq(Resource.database("kafka")));
+        verify(adminOperationAuthorizer)
+                .authorize(
+                        org.mockito.ArgumentMatchers.argThat(
+                                session -> session.getPrincipal().equals(principal)),
+                        eq(OperationType.DROP),
+                        eq(Resource.table("kafka", "topic")));
+    }
+
+    @Test
+    public void testUnauthorizedTopicAdminRequestsDoNotReachCoordinatorGateway() {
+        TestingTabletGatewayService service = new TestingTabletGatewayService();
+        AdminGateway adminGateway = mock(AdminGateway.class);
+        AdminOperationAuthorizer adminOperationAuthorizer = mock(AdminOperationAuthorizer.class);
+        doThrow(new AuthorizationException("denied"))
+                .when(adminOperationAuthorizer)
+                .authorize(any(), any(), any());
+        KafkaRequestHandler handler =
+                new KafkaRequestHandler(
+                        service, service, adminGateway, adminOperationAuthorizer, "kafka");
+
+        short createVersion = ApiKeys.CREATE_TOPICS.latestVersion();
+        KafkaRequest createRequest =
+                kafkaRequest(
+                        ApiKeys.CREATE_TOPICS,
+                        createTopicsRequest(createVersion),
+                        createVersion,
+                        new FlussPrincipal("denied-user", "User"));
+        handler.processRequest(createRequest);
+        assertThat(((CreateTopicsResponse) parseResponse(createRequest)).errorCounts())
+                .containsExactlyEntriesOf(
+                        Collections.singletonMap(Errors.TOPIC_AUTHORIZATION_FAILED, 1));
+
+        short deleteVersion = ApiKeys.DELETE_TOPICS.latestVersion();
+        KafkaRequest deleteRequest =
+                kafkaRequest(
+                        ApiKeys.DELETE_TOPICS,
+                        deleteTopicsRequest(deleteVersion),
+                        deleteVersion,
+                        new FlussPrincipal("denied-user", "User"));
+        handler.processRequest(deleteRequest);
+        assertThat(((DeleteTopicsResponse) parseResponse(deleteRequest)).errorCounts())
+                .containsExactlyEntriesOf(
+                        Collections.singletonMap(Errors.TOPIC_AUTHORIZATION_FAILED, 1));
+
+        verify(adminGateway, never()).createTable(any(CreateTableRequest.class));
+        verify(adminGateway, never()).dropTable(any(DropTableRequest.class));
+    }
 
     @Test
     public void testCreateTopicCreatesArrowTable() {
@@ -277,8 +399,25 @@ public class KafkaTopicAdminHandlerTest {
         return new CreateTopicsRequest.Builder(data).build(version);
     }
 
+    private static DeleteTopicsRequest deleteTopicsRequest(short version) {
+        DeleteTopicsRequestData data =
+                new DeleteTopicsRequestData()
+                        .setTimeoutMs(1000)
+                        .setTopics(
+                                Collections.singletonList(
+                                        new DeleteTopicsRequestData.DeleteTopicState()
+                                                .setName("topic")
+                                                .setTopicId(Uuid.ZERO_UUID)));
+        return new DeleteTopicsRequest.Builder(data).build(version);
+    }
+
     private static KafkaRequest kafkaRequest(
             ApiKeys apiKey, AbstractRequest requestBody, short version) {
+        return kafkaRequest(apiKey, requestBody, version, FlussPrincipal.ANONYMOUS);
+    }
+
+    private static KafkaRequest kafkaRequest(
+            ApiKeys apiKey, AbstractRequest requestBody, short version, FlussPrincipal principal) {
         return new KafkaRequest(
                 apiKey,
                 version,
@@ -287,7 +426,12 @@ public class KafkaTopicAdminHandlerTest {
                 "KAFKA",
                 ByteBufAllocator.DEFAULT.buffer(),
                 new TestingChannelHandlerContext(),
-                new CompletableFuture<>());
+                new CompletableFuture<>()) {
+            @Override
+            public FlussPrincipal principal() {
+                return principal;
+            }
+        };
     }
 
     private static AbstractResponse parseResponse(KafkaRequest request) {

@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.backend.admin;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.security.acl.FlussPrincipal;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.protocol.Errors;
@@ -40,9 +41,28 @@ public interface KafkaTopicAdminBackend {
             String listenerName,
             @Nullable InetAddress clientAddress);
 
+    /** Creates or validates topics on behalf of the authenticated Kafka principal. */
+    default CompletableFuture<List<TopicResult>> createTopics(
+            List<CreateTopic> topics,
+            boolean validateOnly,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
+        return createTopics(topics, validateOnly, listenerName, clientAddress);
+    }
+
     /** Deletes the requested topics. */
     CompletableFuture<List<TopicResult>> deleteTopics(
             List<DeleteTopic> topics, String listenerName, @Nullable InetAddress clientAddress);
+
+    /** Deletes topics on behalf of the authenticated Kafka principal. */
+    default CompletableFuture<List<TopicResult>> deleteTopics(
+            List<DeleteTopic> topics,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
+        return deleteTopics(topics, listenerName, clientAddress);
+    }
 
     /** A validated request to create one topic. */
     final class CreateTopic {

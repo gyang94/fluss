@@ -26,11 +26,14 @@ import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
+import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.messages.CreateTableRequest;
 import org.apache.fluss.rpc.messages.DropTableRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.security.acl.OperationType;
+import org.apache.fluss.security.acl.Resource;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 
@@ -53,14 +56,19 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
 
     private final RpcGatewayService service;
     private final AdminGateway gateway;
+    private final AdminOperationAuthorizer adminOperationAuthorizer;
     private final String databaseName;
     private final KafkaTopicMapper topicMapper;
 
     /** Creates a topic backend backed by the Fluss coordinator admin gateway. */
     public GatewayKafkaTopicAdminBackend(
-            RpcGatewayService service, AdminGateway gateway, String databaseName) {
+            RpcGatewayService service,
+            AdminGateway gateway,
+            AdminOperationAuthorizer adminOperationAuthorizer,
+            String databaseName) {
         this.service = checkNotNull(service);
         this.gateway = checkNotNull(gateway);
+        this.adminOperationAuthorizer = checkNotNull(adminOperationAuthorizer);
         this.databaseName = checkNotNull(databaseName);
         this.topicMapper = new KafkaTopicMapper(databaseName);
     }
@@ -71,9 +79,20 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
             boolean validateOnly,
             String listenerName,
             @Nullable InetAddress clientAddress) {
+        return createTopics(
+                topics, validateOnly, listenerName, clientAddress, FlussPrincipal.ANONYMOUS);
+    }
+
+    @Override
+    public CompletableFuture<List<TopicResult>> createTopics(
+            List<CreateTopic> topics,
+            boolean validateOnly,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
         List<CompletableFuture<TopicResult>> futures = new ArrayList<>();
         for (CreateTopic topic : topics) {
-            futures.add(createTopic(topic, validateOnly, listenerName, clientAddress));
+            futures.add(createTopic(topic, validateOnly, listenerName, clientAddress, principal));
         }
         return collect(futures);
     }
@@ -81,9 +100,18 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
     @Override
     public CompletableFuture<List<TopicResult>> deleteTopics(
             List<DeleteTopic> topics, String listenerName, @Nullable InetAddress clientAddress) {
+        return deleteTopics(topics, listenerName, clientAddress, FlussPrincipal.ANONYMOUS);
+    }
+
+    @Override
+    public CompletableFuture<List<TopicResult>> deleteTopics(
+            List<DeleteTopic> topics,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
         List<CompletableFuture<TopicResult>> futures = new ArrayList<>();
         for (DeleteTopic topic : topics) {
-            futures.add(deleteTopic(topic, listenerName, clientAddress));
+            futures.add(deleteTopic(topic, listenerName, clientAddress, principal));
         }
         return collect(futures);
     }
@@ -92,8 +120,16 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
             CreateTopic topic,
             boolean validateOnly,
             String listenerName,
-            @Nullable InetAddress clientAddress) {
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
         TableDescriptor descriptor = createDescriptor(topic);
+        Session session = clientSession(listenerName, clientAddress, principal);
+        try {
+            adminOperationAuthorizer.authorize(
+                    session, OperationType.CREATE, Resource.database(databaseName));
+        } catch (RuntimeException failure) {
+            return CompletableFuture.completedFuture(failed(topic.name(), failure));
+        }
         if (validateOnly) {
             return CompletableFuture.completedFuture(success(topic, Uuid.ZERO_UUID));
         }
@@ -104,24 +140,26 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
                 .setTablePath()
                 .setDatabaseName(databaseName)
                 .setTableName(topic.name());
-        setCurrentSession(listenerName, clientAddress);
+        setCurrentSession(session);
         return gateway.createTable(request)
-                .thenCompose(ignored -> getCreatedTopic(topic, listenerName, clientAddress))
+                .thenCompose(ignored -> getCreatedTopic(topic, session))
                 .exceptionally(failure -> failed(topic.name(), failure));
     }
 
-    private CompletableFuture<TopicResult> getCreatedTopic(
-            CreateTopic topic, String listenerName, @Nullable InetAddress clientAddress) {
+    private CompletableFuture<TopicResult> getCreatedTopic(CreateTopic topic, Session session) {
         GetTableInfoRequest request = new GetTableInfoRequest();
         request.setTablePath().setDatabaseName(databaseName).setTableName(topic.name());
-        setCurrentSession(listenerName, clientAddress);
+        setCurrentSession(session);
         return gateway.getTableInfo(request)
                 .thenApply(
                         response -> success(topic, topicMapper.toTopicId(response.getTableId())));
     }
 
     private CompletableFuture<TopicResult> deleteTopic(
-            DeleteTopic topic, String listenerName, @Nullable InetAddress clientAddress) {
+            DeleteTopic topic,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal) {
         if (topic.name() == null) {
             return CompletableFuture.completedFuture(
                     new TopicResult(
@@ -132,12 +170,20 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
                             -1,
                             (short) -1));
         }
+        Session session = clientSession(listenerName, clientAddress, principal);
+        try {
+            adminOperationAuthorizer.authorize(
+                    session, OperationType.DROP, Resource.table(databaseName, topic.name()));
+        } catch (RuntimeException failure) {
+            return CompletableFuture.completedFuture(
+                    failed(topic.name(), topic.topicId(), failure));
+        }
         DropTableRequest request = new DropTableRequest();
         request.setIgnoreIfNotExists(false)
                 .setTablePath()
                 .setDatabaseName(databaseName)
                 .setTableName(topic.name());
-        setCurrentSession(listenerName, clientAddress);
+        setCurrentSession(session);
         return gateway.dropTable(request)
                 .thenApply(
                         ignored ->
@@ -238,10 +284,13 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
         }
     }
 
-    private void setCurrentSession(String listenerName, @Nullable InetAddress clientAddress) {
-        service.setCurrentSession(
-                new Session(
-                        (short) 0, listenerName, false, clientAddress, FlussPrincipal.ANONYMOUS));
+    private static Session clientSession(
+            String listenerName, @Nullable InetAddress clientAddress, FlussPrincipal principal) {
+        return new Session((short) 0, listenerName, false, clientAddress, checkNotNull(principal));
+    }
+
+    private void setCurrentSession(Session session) {
+        service.setCurrentSession(session);
     }
 
     private static CompletableFuture<List<TopicResult>> collect(

@@ -82,7 +82,10 @@ public final class DeleteTopicsHandler implements KafkaApiHandler<DeleteTopicsRe
             }
         }
         return backend.deleteTopics(
-                        topics, context.listenerName(), clientAddress(context.remoteAddress()))
+                        topics,
+                        context.listenerName(),
+                        clientAddress(context.remoteAddress()),
+                        context.principal())
                 .thenApply(DeleteTopicsHandler::toResponse);
     }
 

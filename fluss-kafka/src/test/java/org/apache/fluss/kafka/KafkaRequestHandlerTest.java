@@ -17,8 +17,10 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
+import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
@@ -125,6 +127,75 @@ public class KafkaRequestHandlerTest {
                                 ApiKeys.DELETE_TOPICS.id,
                                 ApiKeys.DELETE_TOPICS.oldestVersion(),
                                 ApiKeys.DELETE_TOPICS.latestVersion()));
+    }
+
+    @Test
+    public void testSaslCapabilitiesAreAdvertisedOnlyForSaslConnection() {
+        KafkaRequestHandler handler = createKafkaRequestHandler();
+        short version = ApiKeys.API_VERSIONS.latestVersion();
+        ApiVersionsRequest requestBody = new ApiVersionsRequest.Builder().build(version);
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.API_VERSIONS,
+                        version,
+                        new RequestHeader(ApiKeys.API_VERSIONS, version, "client-id", 0),
+                        requestBody,
+                        "KAFKA",
+                        KafkaSaslConnection.sasl(() -> mock(ServerAuthenticator.class)),
+                        ByteBufAllocator.DEFAULT.buffer(),
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<>());
+
+        handler.processRequest(request);
+
+        ApiVersionsResponse response = parseApiVersionsResponse(request);
+        assertThat(response.data().apiKeys())
+                .extracting(ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
+                .contains(
+                        tuple(ApiKeys.SASL_HANDSHAKE.id, (short) 1, (short) 1),
+                        tuple(ApiKeys.SASL_AUTHENTICATE.id, (short) 0, (short) 2));
+    }
+
+    @Test
+    public void testApiVersionsDuringSaslAuthenticationReturnsIllegalState() {
+        assertApiVersionsDuringSaslAuthenticationReturnsIllegalState(
+                ApiKeys.API_VERSIONS.oldestVersion());
+    }
+
+    @Test
+    public void testUnsupportedApiVersionsDuringSaslAuthenticationReturnsIllegalState() {
+        assertApiVersionsDuringSaslAuthenticationReturnsIllegalState(
+                (short) (ApiKeys.API_VERSIONS.latestVersion() + 1));
+    }
+
+    private static void assertApiVersionsDuringSaslAuthenticationReturnsIllegalState(
+            short requestVersion) {
+        KafkaRequestHandler handler = createKafkaRequestHandler();
+        short parsedVersion = ApiKeys.API_VERSIONS.oldestVersion();
+        KafkaSaslConnection connection =
+                KafkaSaslConnection.sasl(() -> mock(ServerAuthenticator.class));
+        connection.beginAuthentication("PLAIN", "KAFKA", null);
+        ApiVersionsRequest requestBody = new ApiVersionsRequest.Builder().build(parsedVersion);
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.API_VERSIONS,
+                        requestVersion,
+                        new RequestHeader(ApiKeys.API_VERSIONS, requestVersion, "client-id", 17),
+                        requestBody,
+                        "KAFKA",
+                        connection,
+                        ByteBufAllocator.DEFAULT.buffer(),
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<>());
+
+        handler.processRequest(request);
+
+        ApiVersionsResponse response = parseApiVersionsResponse(request);
+        assertThat(response.errorCounts())
+                .containsExactlyEntriesOf(Collections.singletonMap(Errors.ILLEGAL_SASL_STATE, 1));
+        assertThat(response.data().apiKeys()).isEmpty();
+        assertThat(request.shouldCloseConnectionAfterResponse()).isTrue();
+        assertThat(request.header().correlationId()).isEqualTo(17);
     }
 
     private static ApiVersionsResponse requestApiVersions(
