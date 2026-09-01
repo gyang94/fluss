@@ -18,6 +18,7 @@
 package org.apache.fluss.rpc.protocol;
 
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metrics.groups.MetricGroup;
 import org.apache.fluss.plugin.Plugin;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
@@ -25,6 +26,7 @@ import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandler;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /** A network protocol plugin that provides the server side implementation of a network protocol. */
 public interface NetworkProtocolPlugin extends Plugin {
@@ -37,6 +39,17 @@ public interface NetworkProtocolPlugin extends Plugin {
 
     /** Setup network protocol plugin with the given {@link Configuration}. */
     void setup(Configuration conf);
+
+    /**
+     * Setup the network protocol plugin with server metrics access.
+     *
+     * <p>The default implementation preserves compatibility with plugins that only need
+     * configuration. Protocols may override this method to register metrics in the server's metric
+     * registry.
+     */
+    default void setup(Configuration conf, MetricGroup serverMetricGroup) {
+        setup(conf);
+    }
 
     /** Returns the names of the listeners that the protocol binds to. */
     List<String> listenerNames();
@@ -52,4 +65,11 @@ public interface NetworkProtocolPlugin extends Plugin {
      * protocol.
      */
     RequestHandler<?> createRequestHandler(RpcGatewayService service);
+
+    /**
+     * Closes protocol-owned resources after the server has stopped accepting and processing work.
+     */
+    default CompletableFuture<Void> closeAsync() {
+        return CompletableFuture.completedFuture(null);
+    }
 }

@@ -48,7 +48,9 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -294,6 +296,221 @@ public class RequestChannelTest {
         assertThat(thread.getState()).isIn(Thread.State.WAITING, Thread.State.BLOCKED);
     }
 
+    @Test
+    void testOverlappingReasonsAndSameReasonReferenceCounting() throws Exception {
+        RequestChannel channel = new RequestChannel(100);
+        TestChannel testChannel = new TestChannel();
+        channel.registerChannel(testChannel);
+
+        RequestChannel.PauseLease firstLiveRequestLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.LIVE_REQUEST_COUNT);
+        RequestChannel.PauseLease secondLiveRequestLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.LIVE_REQUEST_COUNT);
+        RequestChannel.PauseLease nativeInflightLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.NATIVE_INFLIGHT);
+
+        testChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(channel.activePauseReasons(testChannel))
+                .containsExactlyInAnyOrder(
+                        TestingPauseReason.LIVE_REQUEST_COUNT, TestingPauseReason.NATIVE_INFLIGHT);
+
+        firstLiveRequestLease.close();
+        assertThat(testChannel.isAutoRead()).isFalse();
+        nativeInflightLease.close();
+        assertThat(testChannel.isAutoRead()).isFalse();
+        assertThat(channel.activePauseReasons(testChannel))
+                .containsExactly(TestingPauseReason.LIVE_REQUEST_COUNT);
+
+        secondLiveRequestLease.close();
+        secondLiveRequestLease.close();
+        testChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(channel.activePauseReasons(testChannel)).isEmpty();
+
+        channel.unregisterChannel(testChannel);
+    }
+
+    @Test
+    void testQueueResumeDoesNotClearAnotherPauseReason() throws Exception {
+        RequestChannel channel = new RequestChannel(2);
+        TestChannel testChannel = new TestChannel();
+        channel.registerChannel(testChannel);
+        RequestChannel.PauseLease nativeInflightLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.NATIVE_INFLIGHT);
+
+        channel.putRequest(createTestRequest(1));
+        channel.putRequest(createTestRequest(2));
+        testChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(channel.activePauseReasons(testChannel))
+                .containsExactlyInAnyOrder(
+                        RequestChannel.BuiltInPauseReason.QUEUE_COUNT,
+                        TestingPauseReason.NATIVE_INFLIGHT);
+
+        assertThat(channel.pollRequest(10)).isNotNull();
+        assertThat(channel.activePauseReasons(testChannel))
+                .containsExactly(TestingPauseReason.NATIVE_INFLIGHT);
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        nativeInflightLease.close();
+        testChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(channel.pollRequest(10)).isNotNull();
+        channel.unregisterChannel(testChannel);
+    }
+
+    @Test
+    void testChannelRegisteredDuringQueuePressureInheritsPause() throws Exception {
+        RequestChannel channel = new RequestChannel(2);
+        channel.putRequest(createTestRequest(1));
+        channel.putRequest(createTestRequest(2));
+
+        TestChannel testChannel = new TestChannel();
+        channel.registerChannel(testChannel);
+        testChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(channel.activePauseReasons(testChannel))
+                .containsExactly(RequestChannel.BuiltInPauseReason.QUEUE_COUNT);
+
+        channel.unregisterChannel(testChannel);
+        channel.unregisterChannel(testChannel);
+        assertThat(channel.pollRequest(10)).isNotNull();
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        channel.registerChannel(testChannel);
+        testChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(channel.activePauseReasons(testChannel)).isEmpty();
+
+        assertThat(channel.pollRequest(10)).isNotNull();
+        channel.unregisterChannel(testChannel);
+    }
+
+    @Test
+    void testPauseReasonsAreIsolatedBetweenChannels() throws Exception {
+        RequestChannel channel = new RequestChannel(100);
+        TestChannel firstChannel = new TestChannel();
+        TestChannel secondChannel = new TestChannel();
+        channel.registerChannel(firstChannel);
+        channel.registerChannel(secondChannel);
+
+        RequestChannel.PauseLease pauseLease =
+                channel.pauseChannel(firstChannel, TestingPauseReason.LIVE_REQUEST_BYTES);
+        firstChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(secondChannel.isAutoRead()).isTrue();
+        assertThat(channel.isChannelPaused(firstChannel)).isTrue();
+        assertThat(channel.isChannelPaused(secondChannel)).isFalse();
+
+        pauseLease.close();
+        firstChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(secondChannel.isAutoRead()).isTrue();
+
+        channel.unregisterChannel(firstChannel);
+        channel.unregisterChannel(secondChannel);
+    }
+
+    @Test
+    void testResumeIsDeferredWhenLastLeaseClosesOnEventLoop() {
+        RequestChannel channel = new RequestChannel(100);
+        TestChannel.QueuedTestEventLoop eventLoop = new TestChannel.QueuedTestEventLoop(true);
+        TestChannel testChannel = new TestChannel(eventLoop);
+        channel.registerChannel(testChannel);
+        eventLoop.runPendingTasks();
+
+        RequestChannel.PauseLease pauseLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.LIVE_REQUEST_COUNT);
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        pauseLease.close();
+
+        assertThat(channel.activePauseReasons(testChannel)).isEmpty();
+        assertThat(testChannel.isAutoRead()).isFalse();
+        assertThat(eventLoop.queuedTaskCount()).isOne();
+
+        eventLoop.runPendingTasks();
+        assertThat(testChannel.isAutoRead()).isTrue();
+        channel.unregisterChannel(testChannel);
+    }
+
+    @Test
+    void testPendingResumeCannotOverrideNewPause() {
+        RequestChannel channel = new RequestChannel(100);
+        TestChannel.QueuedTestEventLoop eventLoop = new TestChannel.QueuedTestEventLoop(true);
+        TestChannel testChannel = new TestChannel(eventLoop);
+        channel.registerChannel(testChannel);
+        eventLoop.runPendingTasks();
+
+        RequestChannel.PauseLease firstPauseLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.LIVE_REQUEST_COUNT);
+        firstPauseLease.close();
+        assertThat(eventLoop.queuedTaskCount()).isOne();
+
+        RequestChannel.PauseLease secondPauseLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.NATIVE_INFLIGHT);
+        eventLoop.runPendingTasks();
+
+        assertThat(channel.activePauseReasons(testChannel))
+                .containsExactly(TestingPauseReason.NATIVE_INFLIGHT);
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        secondPauseLease.close();
+        assertThat(testChannel.isAutoRead()).isFalse();
+        eventLoop.runPendingTasks();
+        assertThat(testChannel.isAutoRead()).isTrue();
+        channel.unregisterChannel(testChannel);
+    }
+
+    @Test
+    void testOverlappingLeaseReleaseSchedulesOnlyFinalResume() {
+        RequestChannel channel = new RequestChannel(100);
+        TestChannel.QueuedTestEventLoop eventLoop = new TestChannel.QueuedTestEventLoop(true);
+        TestChannel testChannel = new TestChannel(eventLoop);
+        channel.registerChannel(testChannel);
+        eventLoop.runPendingTasks();
+
+        RequestChannel.PauseLease firstReasonLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.LIVE_REQUEST_COUNT);
+        RequestChannel.PauseLease secondReasonLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.NATIVE_INFLIGHT);
+
+        firstReasonLease.close();
+        assertThat(eventLoop.queuedTaskCount()).isZero();
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        secondReasonLease.close();
+        assertThat(eventLoop.queuedTaskCount()).isOne();
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        eventLoop.runPendingTasks();
+        assertThat(testChannel.isAutoRead()).isTrue();
+        channel.unregisterChannel(testChannel);
+    }
+
+    @Test
+    void testStaleControllerTasksCannotOverrideReregisteredChannel() {
+        RequestChannel channel = new RequestChannel(100);
+        TestChannel.QueuedTestEventLoop eventLoop = new TestChannel.QueuedTestEventLoop();
+        TestChannel testChannel = new TestChannel(eventLoop);
+
+        channel.registerChannel(testChannel);
+        RequestChannel.PauseLease oldPauseLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.LIVE_REQUEST_COUNT);
+        oldPauseLease.close();
+        channel.unregisterChannel(testChannel);
+
+        channel.registerChannel(testChannel);
+        RequestChannel.PauseLease newPauseLease =
+                channel.pauseChannel(testChannel, TestingPauseReason.NATIVE_INFLIGHT);
+
+        eventLoop.runLastTask();
+        assertThat(testChannel.isAutoRead()).isFalse();
+        eventLoop.runPendingTasks();
+        assertThat(testChannel.isAutoRead()).isFalse();
+
+        oldPauseLease.close();
+        assertThat(testChannel.isAutoRead()).isFalse();
+        newPauseLease.close();
+        eventLoop.runPendingTasks();
+        assertThat(testChannel.isAutoRead()).isTrue();
+
+        channel.unregisterChannel(testChannel);
+    }
+
     /** Helper method to create a test RpcRequest with a unique identifier. */
     private RpcRequest createTestRequest(int id) {
         return new FlussRequest(
@@ -310,15 +527,29 @@ public class RequestChannelTest {
                 new CompletableFuture<>());
     }
 
+    private enum TestingPauseReason implements RequestChannel.PauseReason {
+        LIVE_REQUEST_COUNT,
+        LIVE_REQUEST_BYTES,
+        NATIVE_INFLIGHT
+    }
+
     /**
      * A test Channel implementation that tracks autoRead state changes for backpressure testing.
      */
     private static class TestChannel implements Channel {
         private final AtomicBoolean autoRead = new AtomicBoolean(true);
         private final TestChannelConfig config = new TestChannelConfig(this);
-        private final TestEventLoop eventLoop = new TestEventLoop();
+        private final EventLoop eventLoop;
         private final ChannelId channelId = new TestChannelId();
         private final SocketAddress remoteAddress = new InetSocketAddress("localhost", 8080);
+
+        private TestChannel() {
+            this(new TestEventLoop());
+        }
+
+        private TestChannel(EventLoop eventLoop) {
+            this.eventLoop = eventLoop;
+        }
 
         @Override
         public ChannelConfig config() {
@@ -749,6 +980,44 @@ public class RequestChannelTest {
             @Override
             public ChannelPromise register(ChannelPromise promise) {
                 throw new UnsupportedOperationException();
+            }
+        }
+
+        private static final class QueuedTestEventLoop extends TestEventLoop {
+            private final Deque<Runnable> tasks = new ArrayDeque<>();
+            private final boolean inEventLoop;
+
+            private QueuedTestEventLoop() {
+                this(false);
+            }
+
+            private QueuedTestEventLoop(boolean inEventLoop) {
+                this.inEventLoop = inEventLoop;
+            }
+
+            @Override
+            public boolean inEventLoop(Thread thread) {
+                return inEventLoop;
+            }
+
+            @Override
+            public void execute(Runnable task) {
+                tasks.addLast(task);
+            }
+
+            private int queuedTaskCount() {
+                return tasks.size();
+            }
+
+            private void runLastTask() {
+                assertThat(tasks).isNotEmpty();
+                tasks.removeLast().run();
+            }
+
+            private void runPendingTasks() {
+                while (!tasks.isEmpty()) {
+                    tasks.removeFirst().run();
+                }
             }
         }
 

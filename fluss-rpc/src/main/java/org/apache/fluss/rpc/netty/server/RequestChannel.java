@@ -24,12 +24,18 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.concurrent.ThreadSafe;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
  * A queue channel that can receive requests and send responses.
@@ -39,12 +45,37 @@ import java.util.concurrent.locks.ReentrantLock;
  * reads when the queue size exceeds the backpressure threshold.
  *
  * <p>Each RequestChannel instance manages its own associated Netty channels (those hashed to this
- * RequestChannel) and independently controls their backpressure state. This design encapsulates all
- * backpressure logic within the RequestChannel, eliminating the need for global state management.
+ * RequestChannel). Each associated channel has a pause controller that arbitrates queue pressure
+ * and other resource-specific pause reasons, so one component cannot resume reads while another
+ * reason is still active.
  */
 @ThreadSafe
 public class RequestChannel {
     private static final Logger LOG = LoggerFactory.getLogger(RequestChannel.class);
+
+    /**
+     * A stable token that identifies why a channel's inbound reads are paused.
+     *
+     * <p>Implementations must keep {@link #equals(Object)} and {@link #hashCode()} stable while a
+     * lease is active. Enums are recommended.
+     */
+    public interface PauseReason {
+
+        /** Returns the stable, human-readable name of this reason. */
+        String name();
+    }
+
+    /** Pause reasons owned by the protocol-independent request channel. */
+    public enum BuiltInPauseReason implements PauseReason {
+        QUEUE_COUNT
+    }
+
+    /** A reference-counted pause lease. Closing the lease more than once has no effect. */
+    public interface PauseLease extends AutoCloseable {
+
+        @Override
+        void close();
+    }
 
     /** Unbounded blocking queue to hold incoming requests. Never blocks on put. */
     protected final BlockingQueue<RpcRequest> requestQueue;
@@ -65,31 +96,31 @@ public class RequestChannel {
      * All Netty channels that are hashed to this RequestChannel. Channels are registered when they
      * become active and unregistered when they become inactive.
      *
-     * <p>When backpressure is applied, ALL channels in this set are paused simultaneously. When
-     * backpressure is released, ALL channels are resumed simultaneously.
+     * <p>Queue pressure applies one pause lease to every controller. Other pause reasons remain
+     * isolated to their own channel.
      */
-    private final Set<Channel> associatedChannels = ConcurrentHashMap.newKeySet();
+    private final Map<Channel, ChannelPauseController> associatedChannels = new HashMap<>();
+
+    /** The queue-pressure lease owned for each currently registered channel. */
+    private final Map<Channel, PauseLease> queuePauseLeases = new HashMap<>();
 
     /**
-     * Indicates whether backpressure is currently active. When true, all associated channels have
-     * been paused (setAutoRead(false)). When false, all channels are running normally.
+     * Indicates whether queue-count backpressure is currently active. Other reasons are tracked by
+     * each channel's pause controller.
      *
      * <p>Volatile ensures visibility for fast-path reads (outside the lock). All modifications are
-     * protected by backpressureLock, so atomicity is guaranteed by the lock, not by atomic
-     * operations.
+     * protected by pauseLock, so atomicity is guaranteed by the lock, not by atomic operations.
      */
-    private volatile boolean isBackpressureActive = false;
+    private volatile boolean isQueueBackpressureActive = false;
 
     /**
-     * Lock to protect backpressure state transitions and task submissions. This lock ensures that:
-     * 1. State checks and task submissions are atomic (preventing permanent channel blocking) 2.
-     * Pause and resume operations are mutually exclusive 3. New channel registration correctly
-     * synchronizes with current backpressure state
+     * Lock protecting channel registration, pause reason reference counts, queue-pressure state,
+     * and task submissions.
      *
      * <p>The lock eliminates the need for CAS operations - simple boolean checks and assignments
      * under the lock are sufficient for correctness.
      */
-    private final ReentrantLock backpressureLock = new ReentrantLock();
+    private final ReentrantLock pauseLock = new ReentrantLock();
 
     public RequestChannel(int backpressureThreshold) {
         this.requestQueue = new LinkedBlockingQueue<>();
@@ -105,8 +136,9 @@ public class RequestChannel {
      * queue size exceeds the backpressure threshold, ALL channels associated with this
      * RequestChannel will be paused to prevent further memory growth.
      *
-     * <p>The common path uses lock-free state and queue-size reads. The lock is acquired only when
-     * a backpressure transition may be required.
+     * <p>The high-watermark check is performed after every enqueue. This closes the race where a
+     * concurrent low-watermark transition could release queue pressure after an enqueue observed
+     * the old active state.
      */
     public void putRequest(RpcRequest request) {
         requestQueue.add(request);
@@ -151,24 +183,39 @@ public class RequestChannel {
      * Registers a Netty channel as being associated with this RequestChannel. This is called when a
      * channel becomes active and is hashed to this RequestChannel.
      *
-     * <p>IMPORTANT: New channels are NOT immediately paused even if backpressure is active. This is
-     * critical for system health: 1. Health check connections must not be blocked at startup 2. New
-     * connections will naturally be controlled by the next backpressure check 3. Immediately
-     * pausing new connections can cause deadlock at startup when queue is full but processing is
-     * slow
+     * <p>If queue pressure is already active, the newly registered channel immediately inherits a
+     * queue pause lease. Re-registering the same channel is idempotent.
      *
      * @param channel the channel to register
      */
     public void registerChannel(Channel channel) {
-        associatedChannels.add(channel);
+        checkNotNull(channel, "channel");
+        pauseLock.lock();
+        try {
+            if (associatedChannels.containsKey(channel)) {
+                return;
+            }
 
-        if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Registered channel {} to RequestChannel (backpressure threshold: {}, associated channels: {}, backpressure active: {})",
-                    channel.remoteAddress(),
-                    backpressureThreshold,
-                    associatedChannels.size(),
-                    isBackpressureActive);
+            ChannelPauseController pauseController = new ChannelPauseController(channel);
+            associatedChannels.put(channel, pauseController);
+            if (isQueueBackpressureActive) {
+                queuePauseLeases.put(
+                        channel,
+                        acquirePauseLeaseLocked(pauseController, BuiltInPauseReason.QUEUE_COUNT));
+            } else {
+                scheduleChannelStateReconciliation(pauseController);
+            }
+
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(
+                        "Registered channel {} to RequestChannel (backpressure threshold: {}, associated channels: {}, queue backpressure active: {})",
+                        channel.remoteAddress(),
+                        backpressureThreshold,
+                        associatedChannels.size(),
+                        isQueueBackpressureActive);
+            }
+        } finally {
+            pauseLock.unlock();
         }
     }
 
@@ -179,84 +226,252 @@ public class RequestChannel {
      * @param channel the channel to unregister
      */
     public void unregisterChannel(Channel channel) {
-        associatedChannels.remove(channel);
-        if (LOG.isDebugEnabled()) {
-            LOG.debug(
-                    "Unregistered channel {} from RequestChannel (associated channels: {}, backpressure active: {})",
-                    channel.remoteAddress(),
-                    associatedChannels.size(),
-                    isBackpressureActive);
+        checkNotNull(channel, "channel");
+        pauseLock.lock();
+        try {
+            ChannelPauseController pauseController = associatedChannels.remove(channel);
+            queuePauseLeases.remove(channel);
+            if (pauseController == null) {
+                return;
+            }
+            pauseController.registered = false;
+            pauseController.activeReasonRefCounts.clear();
+
+            if (LOG.isDebugEnabled()) {
+                LOG.debug(
+                        "Unregistered channel {} from RequestChannel (associated channels: {}, queue backpressure active: {})",
+                        channel.remoteAddress(),
+                        associatedChannels.size(),
+                        isQueueBackpressureActive);
+            }
+        } finally {
+            pauseLock.unlock();
         }
     }
 
-    /** Reconciles the backpressure state with the current queue size. */
+    /**
+     * Pauses reads for one registered channel for the supplied reason.
+     *
+     * <p>Each call owns one reference. The channel resumes only after every lease for every reason
+     * has been closed. The returned lease is thread-safe and idempotent.
+     *
+     * @param channel the registered channel to pause
+     * @param reason the reason token owned by the caller
+     * @return a lease that releases exactly this pause reference
+     * @throws IllegalStateException if the channel is not registered
+     */
+    public PauseLease pauseChannel(Channel channel, PauseReason reason) {
+        checkNotNull(channel, "channel");
+        checkNotNull(reason, "reason");
+        pauseLock.lock();
+        try {
+            ChannelPauseController pauseController = associatedChannels.get(channel);
+            if (pauseController == null) {
+                throw new IllegalStateException(
+                        "Channel is not registered with this RequestChannel");
+            }
+            return acquirePauseLeaseLocked(pauseController, reason);
+        } finally {
+            pauseLock.unlock();
+        }
+    }
+
+    /** Returns whether the registered channel has at least one active pause reason. */
+    public boolean isChannelPaused(Channel channel) {
+        checkNotNull(channel, "channel");
+        pauseLock.lock();
+        try {
+            ChannelPauseController pauseController = associatedChannels.get(channel);
+            return pauseController != null && !pauseController.activeReasonRefCounts.isEmpty();
+        } finally {
+            pauseLock.unlock();
+        }
+    }
+
+    /** Returns a snapshot of the registered channel's active pause reasons. */
+    public Set<PauseReason> activePauseReasons(Channel channel) {
+        checkNotNull(channel, "channel");
+        pauseLock.lock();
+        try {
+            ChannelPauseController pauseController = associatedChannels.get(channel);
+            if (pauseController == null) {
+                return Collections.emptySet();
+            }
+            return Collections.unmodifiableSet(
+                    new HashSet<>(pauseController.activeReasonRefCounts.keySet()));
+        } finally {
+            pauseLock.unlock();
+        }
+    }
+
+    /** Reconciles queue pressure while preserving independent channel pause reasons. */
     private void reconcileBackpressure() {
         int queueSize = requestQueue.size();
-        boolean backpressureActive = isBackpressureActive;
+        boolean backpressureActive = isQueueBackpressureActive;
         if (backpressureActive ? queueSize > resumeThreshold : queueSize < backpressureThreshold) {
             return;
         }
 
-        backpressureLock.lock();
+        pauseLock.lock();
         try {
             while (true) {
                 queueSize = requestQueue.size();
-                if (isBackpressureActive) {
+                if (isQueueBackpressureActive) {
                     if (queueSize > resumeThreshold) {
                         return;
                     }
-                    isBackpressureActive = false;
-                    resumeAllChannels(queueSize);
+                    isQueueBackpressureActive = false;
+                    for (PauseLease queuePauseLease : queuePauseLeases.values()) {
+                        queuePauseLease.close();
+                    }
+                    queuePauseLeases.clear();
                 } else {
                     if (queueSize < backpressureThreshold) {
                         return;
                     }
-                    isBackpressureActive = true;
-                    pauseAllChannels(queueSize);
+                    isQueueBackpressureActive = true;
+                    for (ChannelPauseController pauseController : associatedChannels.values()) {
+                        queuePauseLeases.put(
+                                pauseController.channel,
+                                acquirePauseLeaseLocked(pauseController, BuiltInPauseReason.QUEUE_COUNT));
+                    }
                 }
             }
         } finally {
-            backpressureLock.unlock();
+            pauseLock.unlock();
         }
     }
 
-    private void pauseAllChannels(int queueSize) {
-        for (Channel channel : associatedChannels) {
-            if (channel.isActive()) {
-                // Submit to the channel's EventLoop to ensure thread safety
-                channel.eventLoop()
-                        .execute(
-                                () -> {
-                                    if (channel.isActive() && channel.config().isAutoRead()) {
-                                        channel.config().setAutoRead(false);
-                                        LOG.warn(
-                                                "Queue size ({}) reached backpressure threshold ({}), paused channel: {}",
-                                                queueSize,
-                                                backpressureThreshold,
-                                                channel.remoteAddress());
-                                    }
-                                });
+    private PauseLease acquirePauseLeaseLocked(
+            ChannelPauseController pauseController, PauseReason reason) {
+        boolean wasPaused = !pauseController.activeReasonRefCounts.isEmpty();
+        Integer currentRefCount = pauseController.activeReasonRefCounts.get(reason);
+        if (currentRefCount == null) {
+            pauseController.activeReasonRefCounts.put(reason, 1);
+        } else {
+            if (currentRefCount == Integer.MAX_VALUE) {
+                throw new IllegalStateException(
+                        "Pause reason reference count overflow: " + reason.name());
             }
+            pauseController.activeReasonRefCounts.put(reason, currentRefCount + 1);
+        }
+        if (!wasPaused) {
+            applyPauseImmediatelyOrSchedule(pauseController);
+        }
+        return new RefCountedPauseLease(pauseController, reason);
+    }
+
+    private void releasePauseLease(RefCountedPauseLease pauseLease) {
+        if (!pauseLease.closed.compareAndSet(false, true)) {
+            return;
+        }
+
+        pauseLock.lock();
+        try {
+            ChannelPauseController pauseController = pauseLease.pauseController;
+            if (!pauseController.registered) {
+                return;
+            }
+            Integer currentRefCount = pauseController.activeReasonRefCounts.get(pauseLease.reason);
+            if (currentRefCount == null) {
+                return;
+            }
+            if (currentRefCount == 1) {
+                pauseController.activeReasonRefCounts.remove(pauseLease.reason);
+            } else {
+                pauseController.activeReasonRefCounts.put(pauseLease.reason, currentRefCount - 1);
+            }
+            if (pauseController.activeReasonRefCounts.isEmpty()) {
+                // Enabling auto-read can synchronously issue a channel read and re-enter protocol
+                // handlers. Always defer resume until the lease owner's state transition has
+                // returned; pause acquisition remains synchronous on the event loop so additional
+                // frames from the current socket read cannot pass the flow controller.
+                scheduleChannelStateReconciliation(pauseController);
+            }
+        } finally {
+            pauseLock.unlock();
         }
     }
 
-    private void resumeAllChannels(int queueSize) {
-        for (Channel channel : associatedChannels) {
-            if (channel.isActive()) {
-                // Submit resume task to the channel's EventLoop to ensure thread safety
-                channel.eventLoop()
-                        .execute(
-                                () -> {
-                                    if (channel.isActive() && !channel.config().isAutoRead()) {
-                                        channel.config().setAutoRead(true);
-                                        LOG.info(
-                                                "Queue size ({}) reached resume threshold ({}), resumed channel: {}",
-                                                queueSize,
-                                                resumeThreshold,
-                                                channel.remoteAddress());
-                                    }
-                                });
+    private void applyPauseImmediatelyOrSchedule(ChannelPauseController pauseController) {
+        Channel channel = pauseController.channel;
+        if (channel.eventLoop().inEventLoop()) {
+            // Admission is commonly activated while decoding a request on this event loop. Apply
+            // the pause before channelRead returns so FlowControlHandler cannot deliver additional
+            // frames from the same socket read after the high watermark has been reached.
+            try {
+                reconcileChannelState(pauseController);
+            } catch (RuntimeException e) {
+                // putRequest has already transferred the request to the worker queue. A channel
+                // configuration failure must not turn that successful transfer into an apparent
+                // enqueue failure and let the decoder release the worker-owned buffer.
+                LOG.debug("Unable to reconcile auto-read for channel {}.", channel, e);
             }
+            return;
+        }
+        scheduleChannelStateReconciliation(pauseController);
+    }
+
+    private void scheduleChannelStateReconciliation(ChannelPauseController pauseController) {
+        Channel channel = pauseController.channel;
+        try {
+            channel.eventLoop().execute(() -> reconcileChannelState(pauseController));
+        } catch (RuntimeException e) {
+            LOG.debug("Unable to schedule auto-read reconciliation for channel {}.", channel, e);
+        }
+    }
+
+    private void reconcileChannelState(ChannelPauseController pauseController) {
+        pauseLock.lock();
+        try {
+            Channel channel = pauseController.channel;
+            if (!pauseController.registered
+                    || associatedChannels.get(channel) != pauseController
+                    || !channel.isActive()) {
+                return;
+            }
+
+            boolean shouldAutoRead = pauseController.activeReasonRefCounts.isEmpty();
+            if (channel.config().isAutoRead() == shouldAutoRead) {
+                return;
+            }
+            channel.config().setAutoRead(shouldAutoRead);
+            if (shouldAutoRead) {
+                LOG.info("Resumed channel {} after all pause reasons were released.", channel);
+            } else {
+                LOG.warn(
+                        "Paused channel {} for reasons {}.",
+                        channel,
+                        pauseController.activeReasonRefCounts.keySet());
+            }
+        } finally {
+            pauseLock.unlock();
+        }
+    }
+
+    private static final class ChannelPauseController {
+        private final Channel channel;
+        private final Map<PauseReason, Integer> activeReasonRefCounts = new HashMap<>();
+        private boolean registered = true;
+
+        private ChannelPauseController(Channel channel) {
+            this.channel = channel;
+        }
+    }
+
+    private final class RefCountedPauseLease implements PauseLease {
+        private final ChannelPauseController pauseController;
+        private final PauseReason reason;
+        private final AtomicBoolean closed = new AtomicBoolean(false);
+
+        private RefCountedPauseLease(ChannelPauseController pauseController, PauseReason reason) {
+            this.pauseController = pauseController;
+            this.reason = reason;
+        }
+
+        @Override
+        public void close() {
+            releasePauseLease(this);
         }
     }
 }
