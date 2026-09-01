@@ -111,6 +111,7 @@ public class KafkaRequestHandlerTest {
         assertThat(response.data().apiKeys())
                 .extracting(ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
                 .containsExactly(
+                        tuple(ApiKeys.PRODUCE.id, (short) 3, ApiKeys.PRODUCE.latestVersion()),
                         tuple(ApiKeys.METADATA.id, ApiKeys.METADATA.oldestVersion(), (short) 11),
                         tuple(
                                 ApiKeys.API_VERSIONS.id,
@@ -164,6 +165,7 @@ public class KafkaRequestHandlerTest {
         assertThat(response.data().apiKeys())
                 .extracting(ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
                 .containsExactly(
+                        tuple(ApiKeys.PRODUCE.id, (short) 3, ApiKeys.PRODUCE.latestVersion()),
                         tuple(ApiKeys.METADATA.id, ApiKeys.METADATA.oldestVersion(), (short) 11),
                         tuple(
                                 ApiKeys.API_VERSIONS.id,
