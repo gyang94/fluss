@@ -19,6 +19,7 @@ package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.MemorySize;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.kafka.admission.KafkaNativeProduceAdmissionController;
 import org.apache.fluss.kafka.admission.KafkaProduceAdmissionController;
@@ -63,8 +64,10 @@ import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.requests.RequestUtils;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
@@ -352,14 +355,149 @@ class KafkaProtocolPluginTest {
         }
     }
 
+    @Test
+    void testArrowBatchLimitUsesNativeAdmissionBytesInsteadOfWireLimit() {
+        Configuration configuration = nativeLimitAboveWireConfiguration();
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin();
+        plugin.setup(configuration);
+
+        try {
+            int maxWireBytes =
+                    (int) configuration.get(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE).getBytes();
+            int maxNativeBytesPerConnection =
+                    (int)
+                            configuration
+                                    .get(
+                                            ConfigOptions
+                                                    .KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES_PER_CONNECTION)
+                                    .getBytes();
+
+            assertThat(maxNativeBytesPerConnection).isGreaterThan(maxWireBytes);
+            assertThat(plugin.getArrowWriterManagerForTesting().maxBatchSizeBytes())
+                    .isEqualTo(maxNativeBytesPerConnection);
+        } finally {
+            plugin.closeAsync().join();
+        }
+    }
+
+    @Test
+    void testExactWireLimitProduceUsesNativeCopyBudget() throws Exception {
+        Configuration configuration = nativeLimitAboveWireConfiguration();
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin();
+        plugin.setup(configuration);
+        NeverCompletingMetadataService service = new NeverCompletingMetadataService();
+        KafkaRequestHandler handler = (KafkaRequestHandler) plugin.createRequestHandler(service);
+        KafkaNativeProduceAdmissionController.ConnectionHandle connection =
+                plugin.getNativeAdmissionControllerForTesting().registerConnection();
+        java.util.concurrent.ScheduledExecutorService scheduler =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        short version = 3;
+        RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, version, "client-id", 1);
+        int maxWireBytes =
+                (int) configuration.get(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE).getBytes();
+        ProduceRequest produceRequest = exactWireProduceRequest(version, header, maxWireBytes);
+        MemoryRecords records =
+                (MemoryRecords)
+                        produceRequest
+                                .data()
+                                .topicData()
+                                .iterator()
+                                .next()
+                                .partitionData()
+                                .get(0)
+                                .records();
+        org.apache.kafka.common.record.Record exactRecord = records.records().iterator().next();
+        assertThat(Record.estimateBaseCopiedBytes(exactRecord.keySize(), exactRecord.valueSize()))
+                .isGreaterThan(maxWireBytes);
+        org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf buffer =
+                org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator.DEFAULT.buffer();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.PRODUCE,
+                        version,
+                        header,
+                        produceRequest,
+                        "KAFKA",
+                        KafkaSaslConnection.plaintext(),
+                        buffer,
+                        new TestingChannelHandlerContext(),
+                        new CompletableFuture<AbstractResponse>(),
+                        System.nanoTime(),
+                        maxWireBytes,
+                        connection,
+                        scheduler);
+        CompletableFuture<Void> closeFuture = null;
+
+        try {
+            handler.processRequest(request);
+
+            assertThat(service.lookupStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(request.future()).isNotDone();
+
+            closeFuture = plugin.closeAsync();
+            ProduceResponse response = (ProduceResponse) request.future().get(5, TimeUnit.SECONDS);
+            assertThat(response.errorCounts()).containsEntry(Errors.REQUEST_TIMED_OUT, 1);
+            closeFuture.get(5, TimeUnit.SECONDS);
+        } finally {
+            connection.close();
+            scheduler.shutdownNow();
+            if (closeFuture == null) {
+                closeFuture = plugin.closeAsync();
+            }
+            closeFuture.handle((ignored, failure) -> null).get(5, TimeUnit.SECONDS);
+            buffer.release();
+        }
+    }
+
+    private static Configuration nativeLimitAboveWireConfiguration() {
+        Configuration configuration = new Configuration();
+        configuration.set(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE, MemorySize.parse("1mb"));
+        configuration.set(
+                ConfigOptions.KAFKA_CONTROL_ADMISSION_MAX_FRAME_BYTES, MemorySize.parse("1mb"));
+        configuration.set(
+                ConfigOptions.KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES, MemorySize.parse("4mb"));
+        configuration.set(
+                ConfigOptions.KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES_PER_CONNECTION,
+                MemorySize.parse("2mb"));
+        return configuration;
+    }
+
+    private static ProduceRequest exactWireProduceRequest(
+            short version, RequestHeader header, int targetWireBytes) {
+        ProduceRequest emptyRequest = produceRequest(version, null, new byte[0]);
+        int valueBytes = targetWireBytes - Integer.BYTES - serializedBytes(header, emptyRequest);
+        for (int attempt = 0; attempt < 8; attempt++) {
+            ProduceRequest candidate = produceRequest(version, null, new byte[valueBytes]);
+            int candidateWireBytes = Integer.BYTES + serializedBytes(header, candidate);
+            if (candidateWireBytes == targetWireBytes) {
+                return candidate;
+            }
+            valueBytes += targetWireBytes - candidateWireBytes;
+        }
+        throw new IllegalArgumentException(
+                "Could not construct an exact " + targetWireBytes + "-byte Produce frame.");
+    }
+
+    private static int serializedBytes(RequestHeader header, ProduceRequest request) {
+        ByteBuffer serialized =
+                RequestUtils.serialize(
+                        header.data(), header.headerVersion(), request.data(), request.version());
+        return serialized.remaining();
+    }
+
     private static ProduceRequest produceRequest(short version) {
+        return produceRequest(
+                version,
+                "key".getBytes(StandardCharsets.UTF_8),
+                "value".getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static ProduceRequest produceRequest(short version, byte[] key, byte[] value) {
         MemoryRecords records =
                 MemoryRecords.withRecords(
                         org.apache.kafka.common.record.RecordBatch.MAGIC_VALUE_V2,
                         Compression.NONE,
-                        new SimpleRecord(
-                                "key".getBytes(StandardCharsets.UTF_8),
-                                "value".getBytes(StandardCharsets.UTF_8)));
+                        new SimpleRecord(key, value));
         TopicProduceData topic =
                 new TopicProduceData()
                         .setName("topic")

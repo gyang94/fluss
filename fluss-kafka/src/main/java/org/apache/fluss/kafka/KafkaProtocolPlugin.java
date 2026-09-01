@@ -175,17 +175,8 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
                             + service.getClass().getSimpleName());
         }
         TabletServerGateway gateway = (TabletServerGateway) service;
-        long maxCopiedBytesPerRequest =
-                Math.min(
-                        conf.get(ConfigOptions.KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES).getBytes(),
-                        conf.get(
-                                        ConfigOptions
-                                                .KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES_PER_CONNECTION)
-                                .getBytes());
-        long maxCopiedBytesPerRecord =
-                Math.min(
-                        maxCopiedBytesPerRequest,
-                        conf.get(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE).getBytes());
+        long maxCopiedBytesPerRequest = maxNativeAdmissionBytesPerRequest(conf);
+        long maxCopiedBytesPerRecord = maxCopiedBytesPerRequest;
         if (service instanceof AdminGatewayProvider) {
             if (!(service instanceof AdminOperationAuthorizer)) {
                 throw new IllegalArgumentException(
@@ -401,15 +392,25 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
 
     private static KafkaArrowWriterManager createArrowWriterManager(
             Configuration configuration, KafkaProduceMetrics produceMetrics) {
-        long maxRequestBytes =
-                configuration.get(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE).getBytes();
+        int maxBatchSizeBytes =
+                (int) Math.min(maxNativeAdmissionBytesPerRequest(configuration), Integer.MAX_VALUE);
         return new KafkaArrowWriterManager(
                 configuration.get(ConfigOptions.KAFKA_PRODUCE_ARROW_ALLOCATOR_MEMORY).getBytes(),
                 configuration.get(ConfigOptions.KAFKA_PRODUCE_ARROW_MAX_CONCURRENT_WRITERS),
                 configuration.get(ConfigOptions.KAFKA_PRODUCE_ARROW_WRITER_CACHE_MAX_SCHEMA_KEYS),
                 configuration.get(ConfigOptions.KAFKA_PRODUCE_ARROW_ACQUIRE_TIMEOUT),
-                (int) maxRequestBytes,
+                maxBatchSizeBytes,
                 produceMetrics);
+    }
+
+    private static long maxNativeAdmissionBytesPerRequest(Configuration configuration) {
+        return Math.min(
+                configuration
+                        .get(ConfigOptions.KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES)
+                        .getBytes(),
+                configuration
+                        .get(ConfigOptions.KAFKA_PRODUCE_NATIVE_ADMISSION_MAX_BYTES_PER_CONNECTION)
+                        .getBytes());
     }
 
     private static KafkaRequestAdmissionController createAdmissionController(
