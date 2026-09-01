@@ -39,6 +39,7 @@ import org.apache.fluss.shaded.arrow.org.apache.arrow.vector.ipc.message.ArrowRe
 import org.apache.fluss.shaded.arrow.org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.ArrowUtils;
+import org.apache.fluss.utils.ExceptionUtils;
 import org.apache.fluss.utils.PagedMemorySegmentWritableChannel;
 
 import java.io.IOException;
@@ -119,23 +120,30 @@ public class ArrowWriter implements AutoCloseable {
         this.writerKey = writerKey;
         this.schema = schema;
         this.root = VectorSchemaRoot.create(ArrowUtils.toArrowSchema(schema), allocator);
-        this.provider = checkNotNull(provider);
-        this.compressionCodec = compressionInfo.createCompressionCodec();
-        this.compressionRatioEstimator = compressionRatioEstimator;
-        this.estimatedCompressionRatio = compressionRatioEstimator.estimation();
+        try {
+            this.provider = checkNotNull(provider);
+            this.compressionCodec = compressionInfo.createCompressionCodec();
+            this.compressionRatioEstimator = compressionRatioEstimator;
+            this.estimatedCompressionRatio = compressionRatioEstimator.estimation();
 
-        this.metadataLength =
-                ArrowUtils.estimateArrowMetadataLength(
-                        root.getSchema(), CompressionUtil.createBodyCompression(compressionCodec));
-        this.writeLimitInBytes = (int) (bufferSizeInBytes * BUFFER_USAGE_RATIO);
-        this.estimatedMaxRecordsCount = -1;
-        this.recordsCount = 0;
-        this.epoch = 0;
-        this.fieldWriters = new ArrowFieldWriter[schema.getFieldCount()];
-        for (int i = 0; i < fieldWriters.length; i++) {
-            FieldVector fieldVector = root.getVector(i);
-            initFieldVector(fieldVector);
-            fieldWriters[i] = ArrowUtils.createArrowFieldWriter(fieldVector, schema.getTypeAt(i));
+            this.metadataLength =
+                    ArrowUtils.estimateArrowMetadataLength(
+                            root.getSchema(),
+                            CompressionUtil.createBodyCompression(compressionCodec));
+            this.writeLimitInBytes = (int) (bufferSizeInBytes * BUFFER_USAGE_RATIO);
+            this.estimatedMaxRecordsCount = -1;
+            this.recordsCount = 0;
+            this.epoch = 0;
+            this.fieldWriters = new ArrowFieldWriter[schema.getFieldCount()];
+            for (int i = 0; i < fieldWriters.length; i++) {
+                FieldVector fieldVector = root.getVector(i);
+                initFieldVector(fieldVector);
+                fieldWriters[i] =
+                        ArrowUtils.createArrowFieldWriter(fieldVector, schema.getTypeAt(i));
+            }
+        } catch (Throwable failure) {
+            closeRootAndRethrow(failure);
+            throw new AssertionError("Unreachable");
         }
     }
 
@@ -305,13 +313,20 @@ public class ArrowWriter implements AutoCloseable {
      */
     public void recycle(long epoch) {
         if (this.epoch == epoch) {
-            root.clear();
-            recordsCount = 0;
-            // Reset array writers when recycling
-            for (ArrowFieldWriter fieldWriter : fieldWriters) {
-                fieldWriter.reset();
+            try {
+                root.clear();
+                recordsCount = 0;
+                // Reset array writers when recycling
+                for (ArrowFieldWriter fieldWriter : fieldWriters) {
+                    fieldWriter.reset();
+                }
+                provider.recycleWriter(this);
+            } catch (Throwable failure) {
+                // The provider may have failed before taking ownership. Invalidate this epoch and
+                // close the root here so that callers cannot lose an untracked writer.
+                this.epoch++;
+                closeRootAndRethrow(failure);
             }
-            provider.recycleWriter(this);
         }
     }
 
@@ -346,6 +361,15 @@ public class ArrowWriter implements AutoCloseable {
         } else {
             return (int) (currentBytes * estimatedCompressionRatio);
         }
+    }
+
+    private void closeRootAndRethrow(Throwable failure) {
+        try {
+            root.close();
+        } catch (Throwable closeFailure) {
+            failure = ExceptionUtils.firstOrSuppressed(closeFailure, failure);
+        }
+        ExceptionUtils.rethrow(failure);
     }
 
     @VisibleForTesting

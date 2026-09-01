@@ -17,8 +17,13 @@
 
 package org.apache.fluss.row.arrow;
 
+import org.apache.fluss.compression.ArrowCompressionInfo;
+import org.apache.fluss.compression.ArrowCompressionRatioEstimator;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.AllocationListener;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.ArrowBuf;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.RootAllocator;
+import org.apache.fluss.types.RowType;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,11 +31,13 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Deque;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.fluss.compression.ArrowCompressionInfo.DEFAULT_COMPRESSION;
 import static org.apache.fluss.record.TestData.DATA1_ROW_TYPE;
 import static org.apache.fluss.row.arrow.ArrowWriter.BUFFER_USAGE_RATIO;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link ArrowWriterPool}. */
 public class ArrowWriterPoolTest {
@@ -83,5 +90,144 @@ public class ArrowWriterPoolTest {
         writer1.recycle(writer1.getEpoch());
         assertThat(arrowWriters.size()).isEqualTo(2);
         arrowWriterPool.close();
+    }
+
+    @Test
+    void testConstructorAllocationFailureClosesPartialRoot() {
+        try (BufferAllocator limitedAllocator = new RootAllocator(1);
+                ArrowWriterPool pool = new ArrowWriterPool(limitedAllocator)) {
+            assertThatThrownBy(
+                            () ->
+                                    pool.getOrCreateWriter(
+                                            1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION))
+                    .isInstanceOf(RuntimeException.class);
+            assertThat(limitedAllocator.getAllocatedMemory()).isZero();
+            assertThat(pool.compressionRatioEstimators()).isEmpty();
+        }
+    }
+
+    @Test
+    void testNewWriterResetFailureClosesConstructedWriter() {
+        CountingAllocationListener countingListener = new CountingAllocationListener();
+        int constructorAllocations;
+        try (BufferAllocator countingAllocator =
+                        new RootAllocator(countingListener, Long.MAX_VALUE);
+                ArrowWriterPool pool = new ArrowWriterPool(countingAllocator)) {
+            ArrowWriter writer =
+                    new ArrowWriter(
+                            "count-constructor-allocations",
+                            1024,
+                            DATA1_ROW_TYPE,
+                            countingAllocator,
+                            pool,
+                            DEFAULT_COMPRESSION,
+                            new ArrowCompressionRatioEstimator());
+            constructorAllocations = countingListener.allocationAttempts.get();
+            writer.root.close();
+        }
+
+        RuntimeException expected = new RuntimeException("reset allocation failure");
+        CountingAllocationListener failingListener =
+                new CountingAllocationListener(constructorAllocations + 1, expected);
+        try (BufferAllocator failingAllocator = new RootAllocator(failingListener, Long.MAX_VALUE);
+                ArrowWriterPool pool = new ArrowWriterPool(failingAllocator)) {
+            assertThatThrownBy(
+                            () ->
+                                    pool.getOrCreateWriter(
+                                            1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION))
+                    .isSameAs(expected);
+            assertThat(failingAllocator.getAllocatedMemory()).isZero();
+            assertThat(pool.freeWriters()).isEmpty();
+            assertThat(pool.compressionRatioEstimators()).isEmpty();
+        }
+    }
+
+    @Test
+    void testIdleWriterResetFailureClosesPolledWriter() {
+        final long allocatorLimit = 1L << 20;
+        try (BufferAllocator limitedAllocator = new RootAllocator(allocatorLimit);
+                ArrowWriterPool pool = new ArrowWriterPool(limitedAllocator)) {
+            ArrowWriter writer =
+                    pool.getOrCreateWriter(1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION);
+            writer.recycle(writer.getEpoch());
+            assertThat(limitedAllocator.getAllocatedMemory()).isZero();
+
+            try (ArrowBuf blocker = limitedAllocator.buffer(allocatorLimit)) {
+                assertThatThrownBy(
+                                () ->
+                                        pool.getOrCreateWriter(
+                                                1L, 1, 1024, DATA1_ROW_TYPE, DEFAULT_COMPRESSION))
+                        .isInstanceOf(RuntimeException.class);
+                assertThat(limitedAllocator.getAllocatedMemory()).isEqualTo(blocker.capacity());
+                assertThat(pool.freeWriters()).isEmpty();
+            }
+            assertThat(limitedAllocator.getAllocatedMemory()).isZero();
+        }
+    }
+
+    @Test
+    void testRecycleProviderFailureClosesWriterAndInvalidatesEpoch() {
+        AtomicInteger recycleCalls = new AtomicInteger();
+        RuntimeException expected = new RuntimeException("recycle failure");
+        ArrowWriterProvider failingProvider =
+                new ArrowWriterProvider() {
+                    @Override
+                    public ArrowWriter getOrCreateWriter(
+                            long tableId,
+                            int schemaId,
+                            int bufferSizeInBytes,
+                            RowType schema,
+                            ArrowCompressionInfo compressionInfo) {
+                        throw new UnsupportedOperationException();
+                    }
+
+                    @Override
+                    public void recycleWriter(ArrowWriter arrowWriter) {
+                        recycleCalls.incrementAndGet();
+                        throw expected;
+                    }
+
+                    @Override
+                    public void close() {}
+                };
+
+        ArrowWriter writer =
+                new ArrowWriter(
+                        "test",
+                        1024,
+                        DATA1_ROW_TYPE,
+                        allocator,
+                        failingProvider,
+                        DEFAULT_COMPRESSION,
+                        new ArrowCompressionRatioEstimator());
+        long epoch = writer.getEpoch();
+        assertThat(allocator.getAllocatedMemory()).isPositive();
+
+        assertThatThrownBy(() -> writer.recycle(epoch)).isSameAs(expected);
+        assertThat(allocator.getAllocatedMemory()).isZero();
+        writer.recycle(epoch);
+        assertThat(recycleCalls).hasValue(1);
+    }
+
+    private static final class CountingAllocationListener implements AllocationListener {
+        private final AtomicInteger allocationAttempts = new AtomicInteger();
+        private final int failureAttempt;
+        private final RuntimeException failure;
+
+        private CountingAllocationListener() {
+            this(Integer.MAX_VALUE, null);
+        }
+
+        private CountingAllocationListener(int failureAttempt, RuntimeException failure) {
+            this.failureAttempt = failureAttempt;
+            this.failure = failure;
+        }
+
+        @Override
+        public void onPreAllocation(long size) {
+            if (allocationAttempts.incrementAndGet() == failureAttempt) {
+                throw failure;
+            }
+        }
     }
 }

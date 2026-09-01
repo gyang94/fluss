@@ -25,6 +25,7 @@ import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.fluss.types.RowType;
+import org.apache.fluss.utils.ExceptionUtils;
 
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
@@ -98,22 +99,41 @@ public class ArrowWriterPool implements ArrowWriterProvider {
                                 "Arrow VectorSchemaRoot pool closed while getting/creating root.");
                     }
                     Deque<ArrowWriter> writers = freeWriters.get(writerKey);
+                    boolean newlyCreatedEstimator =
+                            !compressionRatioEstimators.containsKey(writerKey);
                     ArrowCompressionRatioEstimator compressionRatioEstimator =
                             compressionRatioEstimators.computeIfAbsent(
                                     writerKey, k -> new ArrowCompressionRatioEstimator());
-                    if (writers != null && !writers.isEmpty()) {
-                        return initialize(writers.pollFirst(), bufferSizeInBytes);
-                    } else {
-                        return initialize(
-                                new ArrowWriter(
-                                        writerKey,
-                                        bufferSizeInBytes,
-                                        schema,
-                                        allocator,
-                                        this,
-                                        compressionInfo,
-                                        compressionRatioEstimator),
-                                bufferSizeInBytes);
+                    ArrowWriter writer = null;
+                    try {
+                        writer =
+                                writers != null && !writers.isEmpty()
+                                        ? writers.pollFirst()
+                                        : new ArrowWriter(
+                                                writerKey,
+                                                bufferSizeInBytes,
+                                                schema,
+                                                allocator,
+                                                this,
+                                                compressionInfo,
+                                                compressionRatioEstimator);
+                        return initialize(writer, bufferSizeInBytes);
+                    } catch (Throwable failure) {
+                        if (writer != null) {
+                            try {
+                                writer.root.close();
+                            } catch (Throwable closeFailure) {
+                                failure = ExceptionUtils.firstOrSuppressed(closeFailure, failure);
+                            }
+                        }
+                        if (writers != null && writers.isEmpty()) {
+                            freeWriters.remove(writerKey);
+                        }
+                        if (newlyCreatedEstimator && (writers == null || writers.isEmpty())) {
+                            compressionRatioEstimators.remove(writerKey);
+                        }
+                        ExceptionUtils.rethrow(failure);
+                        throw new AssertionError("Unreachable");
                     }
                 });
     }
@@ -125,23 +145,40 @@ public class ArrowWriterPool implements ArrowWriterProvider {
 
     @Override
     public void close() {
+        Throwable failure = null;
         lock.lock();
         try {
+            if (closed) {
+                return;
+            }
+            closed = true;
             for (Deque<ArrowWriter> writers : freeWriters.values()) {
-                for (ArrowWriter writer : writers) {
-                    writer.root.close();
+                ArrowWriter writer;
+                while ((writer = writers.pollFirst()) != null) {
+                    try {
+                        writer.root.close();
+                    } catch (Throwable closeFailure) {
+                        failure = ExceptionUtils.firstOrSuppressed(closeFailure, failure);
+                    }
                 }
             }
             freeWriters.clear();
             compressionRatioEstimators.clear();
-            closed = true;
         } finally {
             lock.unlock();
+        }
+        if (failure != null) {
+            ExceptionUtils.rethrow(failure);
         }
     }
 
     @VisibleForTesting
     public Map<String, Deque<ArrowWriter>> freeWriters() {
         return freeWriters;
+    }
+
+    @VisibleForTesting
+    Map<String, ArrowCompressionRatioEstimator> compressionRatioEstimators() {
+        return compressionRatioEstimators;
     }
 }
