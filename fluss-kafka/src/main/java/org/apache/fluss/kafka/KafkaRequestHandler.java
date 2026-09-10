@@ -18,11 +18,14 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.kafka.api.metadata.MetadataHandler;
+import org.apache.fluss.kafka.api.produce.ProduceHandler;
 import org.apache.fluss.kafka.api.versions.ApiVersionsHandler;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
+import org.apache.fluss.kafka.backend.produce.GatewayKafkaProduceBackend;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
+import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
@@ -42,6 +45,10 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         KafkaApiRegistry registry = new KafkaApiRegistry();
         registry.register(new ApiVersionsHandler(registry));
         registry.register(new MetadataHandler(new GatewayKafkaMetadataBackend(service, gateway)));
+        registry.register(
+                new ProduceHandler(
+                        new GatewayKafkaProduceBackend(
+                                service, gateway, new ArrowKafkaRecordTranscoder())));
         registry.freeze();
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
