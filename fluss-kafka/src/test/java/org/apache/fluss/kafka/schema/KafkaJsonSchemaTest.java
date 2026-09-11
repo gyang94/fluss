@@ -67,8 +67,9 @@ class KafkaJsonSchemaTest {
                                                         Schema.newBuilder()
                                                                 .column(
                                                                         "items",
-                                                                        DataTypes.ARRAY(
-                                                                                DataTypes.INT()))
+                                                                        DataTypes.MAP(
+                                                                                DataTypes.INT(),
+                                                                                DataTypes.STRING()))
                                                                 .build())
                                                 .distributedBy(1)
                                                 .logFormat(LogFormat.ARROW)
@@ -76,7 +77,7 @@ class KafkaJsonSchemaTest {
                                                         KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
                                                 .build()))
                 .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("does not support");
+                .hasMessageContaining("only supports STRING map keys");
     }
 
     private static TableDescriptor.Builder descriptor() {

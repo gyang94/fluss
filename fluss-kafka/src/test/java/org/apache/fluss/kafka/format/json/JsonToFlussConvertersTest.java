@@ -291,10 +291,13 @@ class JsonToFlussConvertersTest {
     }
 
     @Test
-    void testComplexTypesRemainUnsupportedAtThisStage() {
-        assertThatThrownBy(() -> JsonToFlussConverters.create(DataTypes.ARRAY(DataTypes.INT())))
+    void testRejectsUnsupportedMapKeys() {
+        assertThatThrownBy(
+                        () ->
+                                JsonToFlussConverters.create(
+                                        DataTypes.MAP(DataTypes.INT(), DataTypes.STRING())))
                 .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("does not support");
+                .hasMessageContaining("only supports STRING map keys");
     }
 
     private static Object convert(DataType type, String json) throws Exception {
