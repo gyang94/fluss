@@ -144,7 +144,7 @@ public class KafkaTopicSchemaResolverTest {
     @Test
     public void testRejectsUnsupportedKafkaOptions() {
         assertInvalid(
-                valueTable().customProperty("kafka.value.rescue-column", "body"),
+                valueTable().customProperty("kafka.value.unknown-option", "body"),
                 "Unsupported Kafka table property");
         assertInvalid(
                 valueTable().customProperty("kafka.key.field", "body"),

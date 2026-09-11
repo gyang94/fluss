@@ -61,7 +61,8 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                         ? null
                         : formats.createDecoder(schema.keyFormat(), schema.keyProjection());
         KafkaFieldDecoder valueDecoder =
-                formats.createDecoder(schema.valueFormat(), schema.valueProjection());
+                formats.createDecoder(
+                        schema.valueFormat(), schema.valueProjection(), schema.valueRescueColumn());
         KafkaRowAssembler assembler = plan.rowAssembler();
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {

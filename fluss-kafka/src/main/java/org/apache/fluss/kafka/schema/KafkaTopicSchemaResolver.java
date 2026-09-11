@@ -54,7 +54,8 @@ public final class KafkaTopicSchemaResolver {
                             KafkaDataFormat.VALUE_FORMAT_CONFIG,
                             KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG,
                             KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG,
-                            KafkaDataFormat.HEADERS_COLUMN_CONFIG));
+                            KafkaDataFormat.HEADERS_COLUMN_CONFIG,
+                            KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG));
 
     /** Resolves one table's Kafka record mapping contract. */
     public KafkaTopicSchema resolve(TableDescriptor table) {
@@ -130,8 +131,18 @@ public final class KafkaTopicSchemaResolver {
 
         validateSingleFieldFormat(keyFormat, keyProjection, "key");
         validateSingleFieldFormat(valueFormat, valueProjection, "value");
+        String valueRescueColumn = properties.get(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG);
+        if (valueRescueColumn != null) {
+            valueRescueColumn = valueRescueColumn.trim();
+            if (valueRescueColumn.isEmpty()) {
+                throw invalid("Kafka value rescue column name must not be empty.");
+            }
+            if (valueFormat != KafkaDataFormat.JSON) {
+                throw invalid("Kafka value rescue column is only supported for JSON format.");
+            }
+        }
         if (valueFormat == KafkaDataFormat.JSON) {
-            new JsonKafkaFieldDecoder(valueProjection);
+            new JsonKafkaFieldDecoder(valueProjection, valueRescueColumn);
         }
         return new KafkaTopicSchema(
                 rowType,
@@ -139,6 +150,7 @@ public final class KafkaTopicSchemaResolver {
                 keyProjection,
                 valueFormat,
                 valueProjection,
+                valueRescueColumn,
                 timestampPosition,
                 headersPosition);
     }
