@@ -23,6 +23,8 @@ import org.apache.fluss.kafka.format.KafkaFieldDecoder;
 import org.apache.fluss.kafka.format.KafkaFormatFactory;
 import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 
+import javax.annotation.Nullable;
+
 /** Factory for schema-aware Kafka JSON value decoding. */
 @Internal
 public final class JsonKafkaFormatFactory implements KafkaFormatFactory {
@@ -35,5 +37,11 @@ public final class JsonKafkaFormatFactory implements KafkaFormatFactory {
     @Override
     public KafkaFieldDecoder createDecoder(KafkaFieldProjection projection) {
         return new JsonKafkaFieldDecoder(projection);
+    }
+
+    @Override
+    public KafkaFieldDecoder createDecoder(
+            KafkaFieldProjection projection, @Nullable String valueRescueColumn) {
+        return new JsonKafkaFieldDecoder(projection, valueRescueColumn);
     }
 }

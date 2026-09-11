@@ -36,6 +36,7 @@ public final class KafkaTopicSchema {
     private final KafkaFieldProjection keyProjection;
     private final KafkaDataFormat valueFormat;
     private final KafkaFieldProjection valueProjection;
+    private final @Nullable String valueRescueColumn;
     private final int timestampPosition;
     private final int headersPosition;
 
@@ -48,11 +49,33 @@ public final class KafkaTopicSchema {
             KafkaFieldProjection valueProjection,
             int timestampPosition,
             int headersPosition) {
+        this(
+                rowType,
+                keyFormat,
+                keyProjection,
+                valueFormat,
+                valueProjection,
+                null,
+                timestampPosition,
+                headersPosition);
+    }
+
+    /** Creates a resolved schema with an optional JSON rescue column. */
+    public KafkaTopicSchema(
+            RowType rowType,
+            @Nullable KafkaDataFormat keyFormat,
+            KafkaFieldProjection keyProjection,
+            KafkaDataFormat valueFormat,
+            KafkaFieldProjection valueProjection,
+            @Nullable String valueRescueColumn,
+            int timestampPosition,
+            int headersPosition) {
         this.rowType = checkNotNull(rowType);
         this.keyFormat = keyFormat;
         this.keyProjection = checkNotNull(keyProjection);
         this.valueFormat = checkNotNull(valueFormat);
         this.valueProjection = checkNotNull(valueProjection);
+        this.valueRescueColumn = valueRescueColumn;
         this.timestampPosition = timestampPosition;
         this.headersPosition = headersPosition;
     }
@@ -80,6 +103,11 @@ public final class KafkaTopicSchema {
     /** Returns the value field projection. */
     public KafkaFieldProjection valueProjection() {
         return valueProjection;
+    }
+
+    /** Returns the optional JSON rescue column, or null for strict unknown-field handling. */
+    public @Nullable String valueRescueColumn() {
+        return valueRescueColumn;
     }
 
     /** Returns the timestamp physical position, or -1 when it is not mapped. */

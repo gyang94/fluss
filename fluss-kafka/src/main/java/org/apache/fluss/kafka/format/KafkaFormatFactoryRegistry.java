@@ -22,6 +22,8 @@ import org.apache.fluss.kafka.format.json.JsonKafkaFormatFactory;
 import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 
+import javax.annotation.Nullable;
+
 import java.util.EnumMap;
 import java.util.Map;
 
@@ -42,12 +44,20 @@ public final class KafkaFormatFactoryRegistry {
     /** Creates a decoder for the requested format and projection. */
     public KafkaFieldDecoder createDecoder(
             KafkaDataFormat format, KafkaFieldProjection projection) {
+        return createDecoder(format, projection, null);
+    }
+
+    /** Creates a decoder with an optional JSON rescue column. */
+    public KafkaFieldDecoder createDecoder(
+            KafkaDataFormat format,
+            KafkaFieldProjection projection,
+            @Nullable String valueRescueColumn) {
         KafkaFormatFactory factory = factories.get(format);
         if (factory == null) {
             throw new KafkaTopicSchemaException(
                     "No Kafka format factory is registered for '" + format.value() + "'.");
         }
-        return factory.createDecoder(projection);
+        return factory.createDecoder(projection, valueRescueColumn);
     }
 
     private void register(KafkaFormatFactory factory) {

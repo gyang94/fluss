@@ -80,6 +80,101 @@ class KafkaJsonSchemaTest {
                 .hasMessageContaining("only supports STRING map keys");
     }
 
+    @Test
+    void testRescueColumnMustBeNullableStringInTheValueProjection() {
+        KafkaTopicSchema schema = resolver.resolve(rescueDescriptor(DataTypes.STRING()).build());
+        assertThat(schema.valueRescueColumn()).isEqualTo("rescue");
+        for (String name : new String[] {"", " ", "missing", "id"}) {
+            assertThatThrownBy(
+                            () ->
+                                    resolver.resolve(
+                                            rescueDescriptor(DataTypes.STRING())
+                                                    .customProperty(
+                                                            KafkaDataFormat
+                                                                    .VALUE_RESCUE_COLUMN_CONFIG,
+                                                            name)
+                                                    .build()))
+                    .isInstanceOf(KafkaTopicSchemaException.class);
+        }
+        assertThatThrownBy(
+                        () ->
+                                resolver.resolve(
+                                        rescueDescriptor(DataTypes.STRING().copy(false)).build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("nullable STRING");
+        assertThatThrownBy(() -> resolver.resolve(rescueDescriptor(DataTypes.INT()).build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("nullable STRING");
+        assertThatThrownBy(
+                        () ->
+                                resolver.resolve(
+                                        descriptor()
+                                                .customProperty(
+                                                        KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
+                                                .customProperty(
+                                                        KafkaDataFormat.KEY_FIELDS_CONFIG, "key")
+                                                .customProperty(
+                                                        KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG,
+                                                        "EXCEPT_KEY")
+                                                .customProperty(
+                                                        KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG,
+                                                        "key")
+                                                .build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("not in the value projection");
+        assertThatThrownBy(
+                        () ->
+                                resolver.resolve(
+                                        descriptor()
+                                                .customProperty(
+                                                        KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG,
+                                                        "time")
+                                                .customProperty(
+                                                        KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG,
+                                                        "time")
+                                                .build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("not in the value projection");
+    }
+
+    @Test
+    void testRawAndStringFormatsRejectRescueOptions() {
+        for (String format : new String[] {"raw", "string"}) {
+            TableDescriptor table =
+                    TableDescriptor.builder()
+                            .schema(
+                                    Schema.newBuilder()
+                                            .column(
+                                                    "body",
+                                                    format.equals("raw")
+                                                            ? DataTypes.BYTES()
+                                                            : DataTypes.STRING())
+                                            .build())
+                            .distributedBy(1)
+                            .logFormat(LogFormat.ARROW)
+                            .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, format)
+                            .customProperty(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG, "body")
+                            .build();
+            assertThatThrownBy(() -> resolver.resolve(table))
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining("only supported for JSON");
+        }
+    }
+
+    private static TableDescriptor.Builder rescueDescriptor(
+            org.apache.fluss.types.DataType rescueType) {
+        return TableDescriptor.builder()
+                .schema(
+                        Schema.newBuilder()
+                                .column("id", DataTypes.INT())
+                                .column("rescue", rescueType)
+                                .build())
+                .distributedBy(1)
+                .logFormat(LogFormat.ARROW)
+                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                .customProperty(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG, "rescue");
+    }
+
     private static TableDescriptor.Builder descriptor() {
         return TableDescriptor.builder()
                 .schema(

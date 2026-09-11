@@ -19,6 +19,9 @@ package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.schema.KafkaFieldProjection;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
+
+import javax.annotation.Nullable;
 
 /** Creates a decoder for one Kafka key or value format and Fluss field projection. */
 @Internal
@@ -29,4 +32,14 @@ public interface KafkaFormatFactory {
 
     /** Creates and validates a decoder for the projection. */
     KafkaFieldDecoder createDecoder(KafkaFieldProjection projection);
+
+    /** Creates a decoder with optional unknown-field rescue, when supported by the format. */
+    default KafkaFieldDecoder createDecoder(
+            KafkaFieldProjection projection, @Nullable String valueRescueColumn) {
+        if (valueRescueColumn != null) {
+            throw new KafkaTopicSchemaException(
+                    "Kafka value rescue column is only supported for JSON format.");
+        }
+        return createDecoder(projection);
+    }
 }

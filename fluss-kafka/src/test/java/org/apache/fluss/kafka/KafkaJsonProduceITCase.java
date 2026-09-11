@@ -192,6 +192,55 @@ class KafkaJsonProduceITCase {
         }
     }
 
+    @Test
+    void testRescuedUnknownFieldsReachNativeStorage() throws Exception {
+        TableDescriptor descriptor =
+                descriptor(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT())
+                                        .column(
+                                                "details",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "name", DataTypes.STRING())))
+                                        .column("rescue", DataTypes.STRING())
+                                        .build())
+                        .customProperty(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG, "rescue")
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            TablePath path = TablePath.of(DATABASE, "json_rescue");
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                assertThat(producer.partitionsFor(path.toString())).hasSize(1);
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(record(path, "{\"rescue\":\"forged\"}"))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(InvalidRecordException.class);
+                assertThat(
+                                producer.send(
+                                                record(
+                                                        path,
+                                                        "{\"id\":1,\"extra\":2,\"details\":{\"name\":\"Alice\",\"other\":3}}"))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        row -> {
+                            assertThat(row.getInt(0)).isEqualTo(1);
+                            assertThat(row.getRow(1, 1).getString(0).toString()).isEqualTo("Alice");
+                            assertThat(row.getString(2).toString())
+                                    .isEqualTo("{\"extra\":2,\"details\":{\"other\":3}}");
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
     private static void create(Admin admin, TablePath path, TableDescriptor descriptor)
             throws Exception {
         admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
