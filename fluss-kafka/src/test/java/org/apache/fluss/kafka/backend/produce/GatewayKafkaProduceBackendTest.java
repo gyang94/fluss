@@ -811,6 +811,69 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testInvalidRecordDoesNotAppendValidPrefixWithMetadata(boolean malformedUtf8)
+            throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+        Schema schema =
+                Schema.newBuilder()
+                        .column("_kafka_value", DataTypes.STRING())
+                        .column("_kafka_key", DataTypes.BYTES())
+                        .column(
+                                "_kafka_metadata",
+                                DataTypes.ROW(
+                                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                        DataTypes.FIELD("partition", DataTypes.INT())))
+                        .build();
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false)
+                                .setTableJson(
+                                        TableDescriptor.builder(original)
+                                                .schema(schema)
+                                                .build()
+                                                .toJsonBytes()));
+        Record valid = new Record(1L, new byte[] {1}, new byte[] {65}, Collections.emptyList());
+        Record invalid =
+                malformedUtf8
+                        ? new Record(
+                                2L,
+                                new byte[] {1},
+                                new byte[] {(byte) 0xc3, 0x28},
+                                Collections.emptyList())
+                        : new Record(
+                                2L,
+                                new byte[] {1},
+                                new byte[] {(byte) 0xff},
+                                Collections.emptyList());
+        GatewayKafkaProduceBackend backend = backend(service);
+        assertErrors(
+                backend.write(
+                                command(
+                                        (short) 1,
+                                        topic(
+                                                "topic",
+                                                new PartitionWrite(
+                                                        2, Arrays.asList(valid, invalid)))))
+                        .join(),
+                Errors.INVALID_RECORD);
+        assertThat(service.appends).isEmpty();
+        assertErrors(
+                backend.write(
+                                command(
+                                        (short) 1,
+                                        topic(
+                                                "topic",
+                                                new PartitionWrite(
+                                                        1, Collections.singletonList(valid)))))
+                        .join(),
+                Errors.NONE);
+        assertThat(service.appends).hasSize(1);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"binary", "string"})
     void testNullValueViolationRejectsNotNullTableContractBeforeAppending(String format)
             throws Exception {
