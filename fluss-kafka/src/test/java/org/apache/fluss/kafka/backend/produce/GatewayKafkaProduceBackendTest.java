@@ -103,8 +103,7 @@ class GatewayKafkaProduceBackendTest {
                                         (short) 1,
                                         topic("kafka.topic", malformed, good(1), good(8))))
                         .join();
-        assertErrors(
-                result, Errors.CORRUPT_MESSAGE, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+        assertErrors(result, Errors.INVALID_RECORD, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
         assertThat(service.append.getBucketsReqsList()).hasSize(1);
         assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
         assertThat(service.drains).isEqualTo(1);
@@ -382,6 +381,52 @@ class GatewayKafkaProduceBackendTest {
         } finally {
             executor.closeAsync().get(10, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    void testJsonConversionRejectsOnlyTheInvalidPartition() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT().copy(false))
+                                        .build())
+                        .distributedBy(2)
+                        .logFormat(LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .build();
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        new GetTableInfoResponse()
+                                .setTableId(42L)
+                                .setSchemaId(1)
+                                .setTableJson(descriptor.toJsonBytes())
+                                .setCreatedTime(1L)
+                                .setModifiedTime(1L));
+        PartitionWrite valid = json(1, "{\"id\":1}");
+        KafkaProduceResult result =
+                backend(service)
+                        .write(
+                                command(
+                                        (short) 1,
+                                        topic("kafka.topic", json(0, "{\"id\":\"bad\"}"), valid)))
+                        .get();
+        assertErrors(result, Errors.INVALID_RECORD, Errors.NONE);
+        assertThat(service.append.getBucketsReqsList()).hasSize(1);
+        assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
+        assertThat(result.topics().get(0).partitions().get(1).baseOffset()).isEqualTo(17L);
+    }
+
+    private static PartitionWrite json(int id, String value) {
+        return new PartitionWrite(
+                id,
+                Collections.singletonList(
+                        new Record(
+                                123L,
+                                null,
+                                value.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                                Collections.emptyList())));
     }
 
     private static GatewayKafkaProduceBackend backend(TestingProduceService service) {

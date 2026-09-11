@@ -131,7 +131,7 @@ public class KafkaTopicSchemaResolverTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"json", "avro", ""})
+    @ValueSource(strings = {"protobuf", "avro", ""})
     public void testRejectsUnavailableFormats(String format) {
         assertInvalid(
                 valueTable().customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, format),
