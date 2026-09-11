@@ -341,6 +341,32 @@ public class KafkaMetadataHandlerTest {
     }
 
     @Test
+    public void testJsonTableIsDiscoverableForEveryMetadataVersion() {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        service.putTable(
+                "kafka.json_topic",
+                140L,
+                TableDescriptor.builder(defaultDescriptor())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT())
+                                        .column("name", DataTypes.STRING())
+                                        .build())
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .build());
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse response =
+                    handle(
+                            service,
+                            new MetadataRequest(
+                                    namedTopicRequest("kafka.json_topic").data(), version),
+                            version);
+            assertThat(response.data().topics().find("kafka.json_topic").errorCode()).isZero();
+            assertThat(response.data().topics().find("kafka.json_topic").partitions()).hasSize(2);
+        }
+    }
+
+    @Test
     public void testMetadataUsesDdlContractForEveryVersion() {
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
         service.putTable(
@@ -354,7 +380,7 @@ public class KafkaMetadataHandlerTest {
                 "kafka.bad_format",
                 126L,
                 TableDescriptor.builder(defaultDescriptor())
-                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "avro")
                         .build());
         service.putTable(
                 "kafka.primary_key",

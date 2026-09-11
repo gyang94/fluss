@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.TableConfig;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.kafka.format.json.JsonKafkaFieldDecoder;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.types.ArrayType;
@@ -80,6 +81,9 @@ public final class KafkaTopicSchemaResolver {
 
         String keyFormatValue = properties.get(KafkaDataFormat.KEY_FORMAT_CONFIG);
         KafkaDataFormat keyFormat = keyFormatValue == null ? null : parseFormat(keyFormatValue);
+        if (keyFormat == KafkaDataFormat.JSON) {
+            throw invalid("Kafka JSON format is only supported for record values.");
+        }
         List<Integer> keyPositions =
                 resolveKeyPositions(
                         rowType, keyFormat, properties.get(KafkaDataFormat.KEY_FIELDS_CONFIG));
@@ -126,6 +130,9 @@ public final class KafkaTopicSchemaResolver {
 
         validateSingleFieldFormat(keyFormat, keyProjection, "key");
         validateSingleFieldFormat(valueFormat, valueProjection, "value");
+        if (valueFormat == KafkaDataFormat.JSON) {
+            new JsonKafkaFieldDecoder(valueProjection);
+        }
         return new KafkaTopicSchema(
                 rowType,
                 keyFormat,

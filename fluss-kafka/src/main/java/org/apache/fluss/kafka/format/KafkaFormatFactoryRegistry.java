@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.format.json.JsonKafkaFormatFactory;
 import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 
@@ -35,6 +36,7 @@ public final class KafkaFormatFactoryRegistry {
         factories = new EnumMap<>(KafkaDataFormat.class);
         register(new RawKafkaFormatFactory());
         register(new StringKafkaFormatFactory());
+        register(new JsonKafkaFormatFactory());
     }
 
     /** Creates a decoder for the requested format and projection. */

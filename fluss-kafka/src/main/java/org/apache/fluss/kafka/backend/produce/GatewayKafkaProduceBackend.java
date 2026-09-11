@@ -309,7 +309,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                                         || cause instanceof InvalidTopicException
                                 ? Errors.INVALID_TOPIC_EXCEPTION
                                 : cause instanceof KafkaRecordEncodingException
-                                        ? Errors.CORRUPT_MESSAGE
+                                        ? Errors.INVALID_RECORD
                                         : cause instanceof IllegalArgumentException
                                                 ? Errors.INVALID_REQUEST
                                                 : toKafkaError(

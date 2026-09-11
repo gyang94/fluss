@@ -30,7 +30,7 @@ import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 
-/** Converts raw/string Kafka records using the DDL mapping into owned Fluss Arrow log bytes. */
+/** Converts schema-mapped Kafka records using the DDL mapping into owned Fluss Arrow log bytes. */
 @Internal
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final KafkaFormatFactoryRegistry formats = new KafkaFormatFactoryRegistry();

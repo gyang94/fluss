@@ -25,7 +25,8 @@ import java.util.Locale;
 @Internal
 public enum KafkaDataFormat {
     RAW("raw"),
-    STRING("string");
+    STRING("string"),
+    JSON("json");
 
     /** Fluss table custom property controlling the record key format. */
     public static final String KEY_FORMAT_CONFIG = "kafka.key.format";
@@ -66,7 +67,7 @@ public enum KafkaDataFormat {
             }
         }
         throw new IllegalArgumentException(
-                "Unsupported Kafka data format '" + value + "'. Expected raw or string.");
+                "Unsupported Kafka data format '" + value + "'. Expected raw, string or json.");
     }
 
     /** Returns the persisted table property value. */
