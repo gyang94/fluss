@@ -21,14 +21,22 @@ import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.Decimal;
+import org.apache.fluss.row.GenericArray;
+import org.apache.fluss.row.GenericMap;
+import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BinaryType;
 import org.apache.fluss.types.CharType;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
+import org.apache.fluss.types.DataTypeRoot;
 import org.apache.fluss.types.DecimalType;
 import org.apache.fluss.types.LocalZonedTimestampType;
+import org.apache.fluss.types.MapType;
+import org.apache.fluss.types.RowType;
 import org.apache.fluss.types.TimeType;
 import org.apache.fluss.types.TimestampType;
 
@@ -45,17 +53,36 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.apache.fluss.utils.DateTimeUtils.timestampToMicros;
 import static org.apache.fluss.utils.DateTimeUtils.timestampToNanos;
 
-/** Strict JSON-to-Fluss scalar converter construction. */
+/** Strict recursive JSON-to-Fluss converter construction. */
 final class JsonToFlussConverters {
+
+    static final int MAX_SCHEMA_NESTING_DEPTH = 64;
+    static final int MAX_CONTAINER_ELEMENTS = 10_000;
 
     private JsonToFlussConverters() {}
 
     static JsonToFlussConverter create(DataType dataType) {
-        final JsonToFlussConverter notNullConverter = createNotNull(dataType);
+        return create(dataType, 0);
+    }
+
+    private static JsonToFlussConverter create(DataType dataType, int nestingDepth) {
+        if (nestingDepth > MAX_SCHEMA_NESTING_DEPTH) {
+            throw new KafkaTopicSchemaException(
+                    "Kafka JSON schema exceeds the maximum nesting depth of "
+                            + MAX_SCHEMA_NESTING_DEPTH
+                            + ".");
+        }
+        final JsonToFlussConverter notNullConverter = createNotNull(dataType, nestingDepth);
         return (node, path) -> {
             if (node == null || node.isNull()) {
                 if (!dataType.isNullable()) {
@@ -73,7 +100,7 @@ final class JsonToFlussConverters {
         };
     }
 
-    private static JsonToFlussConverter createNotNull(DataType dataType) {
+    private static JsonToFlussConverter createNotNull(DataType dataType, int nestingDepth) {
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:
                 return (node, path) -> {
@@ -159,6 +186,12 @@ final class JsonToFlussConverters {
                 return timestampConverter((TimestampType) dataType);
             case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 return timestampLtzConverter((LocalZonedTimestampType) dataType);
+            case ROW:
+                return rowConverter((RowType) dataType, nestingDepth);
+            case ARRAY:
+                return arrayConverter((ArrayType) dataType, nestingDepth);
+            case MAP:
+                return mapConverter((MapType) dataType, nestingDepth);
             default:
                 throw new KafkaTopicSchemaException(
                         "Kafka JSON format does not support Fluss type "
@@ -302,6 +335,86 @@ final class JsonToFlussConverters {
         } catch (ArithmeticException e) {
             throw invalid(path, dataType, "timestamp exceeds storage range", e);
         }
+    }
+
+    private static JsonToFlussConverter rowConverter(RowType dataType, int nestingDepth) {
+        List<DataField> fields = dataType.getFields();
+        String[] fieldNames = new String[fields.size()];
+        Set<String> declaredFieldNames = new HashSet<>();
+        JsonToFlussConverter[] fieldConverters = new JsonToFlussConverter[fields.size()];
+        for (int i = 0; i < fields.size(); i++) {
+            DataField field = fields.get(i);
+            fieldNames[i] = field.getName();
+            if (!declaredFieldNames.add(field.getName())) {
+                throw new KafkaTopicSchemaException(
+                        "Duplicate Kafka JSON row field '" + field.getName() + "'.");
+            }
+            fieldConverters[i] = create(field.getType(), nestingDepth + 1);
+        }
+        return (node, path) -> {
+            require(node.isObject(), path, dataType, "expected a JSON object");
+            requireContainerSize(node.size(), path, dataType);
+            Iterator<String> inputFieldNames = node.fieldNames();
+            while (inputFieldNames.hasNext()) {
+                String inputFieldName = inputFieldNames.next();
+                require(
+                        declaredFieldNames.contains(inputFieldName),
+                        JsonPath.field(path, inputFieldName),
+                        dataType,
+                        "unknown field");
+            }
+            GenericRow row = new GenericRow(fieldNames.length);
+            for (int i = 0; i < fieldNames.length; i++) {
+                String fieldPath = JsonPath.field(path, fieldNames[i]);
+                row.setField(i, fieldConverters[i].convert(node.get(fieldNames[i]), fieldPath));
+            }
+            return row;
+        };
+    }
+
+    private static JsonToFlussConverter arrayConverter(ArrayType dataType, int nestingDepth) {
+        JsonToFlussConverter elementConverter = create(dataType.getElementType(), nestingDepth + 1);
+        return (node, path) -> {
+            require(node.isArray(), path, dataType, "expected a JSON array");
+            requireContainerSize(node.size(), path, dataType);
+            Object[] elements = new Object[node.size()];
+            for (int i = 0; i < node.size(); i++) {
+                elements[i] = elementConverter.convert(node.get(i), JsonPath.index(path, i));
+            }
+            return new GenericArray(elements);
+        };
+    }
+
+    private static JsonToFlussConverter mapConverter(MapType dataType, int nestingDepth) {
+        if (dataType.getKeyType().getTypeRoot() != DataTypeRoot.STRING) {
+            throw new KafkaTopicSchemaException(
+                    "Kafka JSON format only supports STRING map keys, but found "
+                            + dataType.asSummaryString()
+                            + ".");
+        }
+        JsonToFlussConverter valueConverter = create(dataType.getValueType(), nestingDepth + 1);
+        return (node, path) -> {
+            require(node.isObject(), path, dataType, "expected a JSON object");
+            requireContainerSize(node.size(), path, dataType);
+            Map<BinaryString, Object> values = new LinkedHashMap<>();
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                values.put(
+                        BinaryString.fromString(field.getKey()),
+                        valueConverter.convert(
+                                field.getValue(), JsonPath.field(path, field.getKey())));
+            }
+            return new GenericMap(values);
+        };
+    }
+
+    private static void requireContainerSize(int size, String path, DataType dataType) {
+        require(
+                size <= MAX_CONTAINER_ELEMENTS,
+                path,
+                dataType,
+                "container size exceeds " + MAX_CONTAINER_ELEMENTS);
     }
 
     private static long integralValue(JsonNode node, String path, DataType dataType) {

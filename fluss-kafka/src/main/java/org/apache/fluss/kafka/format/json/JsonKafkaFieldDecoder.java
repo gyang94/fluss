@@ -47,7 +47,7 @@ import java.util.Map;
 @Internal
 public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
     static final int MAX_JSON_NESTING_DEPTH = 64;
-    static final int MAX_CONTAINER_ELEMENTS = 10_000;
+    static final int MAX_CONTAINER_ELEMENTS = JsonToFlussConverters.MAX_CONTAINER_ELEMENTS;
     private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
 
     private final KafkaFieldProjection projection;
@@ -101,14 +101,8 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                     throw new KafkaRecordEncodingException(
                             "Invalid Kafka record value at " + path + ": unknown field.");
                 }
-                JsonToken token = parser.nextToken();
-                // This stage supports scalar fields only. Reject containers before readTree
-                // can allocate their contents, even when the container is wide and shallow.
-                if (token == JsonToken.START_OBJECT || token == JsonToken.START_ARRAY) {
-                    throw new KafkaRecordEncodingException(
-                            "Invalid Kafka record value at " + path + ": expected a JSON scalar.");
-                }
-                JsonNode value = readScalar(parser, projection.dataTypeAt(position));
+                parser.nextToken();
+                JsonNode value = readValue(parser, projection.dataTypeAt(position), path);
                 values[position] = converters[position].convert(value, path);
                 present[position] = true;
             }
@@ -132,7 +126,20 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
         }
     }
 
-    private static JsonNode readScalar(JsonParser parser, DataType dataType) throws IOException {
+    private static JsonNode readValue(JsonParser parser, DataType dataType, String path)
+            throws IOException {
+        if (parser.currentToken() == JsonToken.START_OBJECT
+                || parser.currentToken() == JsonToken.START_ARRAY) {
+            switch (dataType.getTypeRoot()) {
+                case ROW:
+                case ARRAY:
+                case MAP:
+                    break;
+                default:
+                    throw new KafkaRecordEncodingException(
+                            "Invalid Kafka record value at " + path + ": expected a JSON scalar.");
+            }
+        }
         if (parser.currentToken().isNumeric()) {
             // Parse floating-point targets from the original token: BigDecimal loses negative
             // zero, and parsing FLOAT through a double can round twice. Other numeric targets
@@ -174,7 +181,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                                 .build());
         mapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         mapper.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-        // Trailing content is checked after the root object, not after individual scalar values.
+        // Trailing content is checked after the root object, not after individual field values.
         return mapper;
     }
 }

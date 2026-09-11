@@ -76,7 +76,9 @@ class KafkaJsonProduceITCase {
                                         .column("id", DataTypes.INT().copy(false))
                                         .column("message_key", DataTypes.STRING())
                                         .column("amount", DataTypes.DECIMAL(30, 10))
-                                        .column("received_at", DataTypes.TIMESTAMP(3).copy(false))
+                                        .column(
+                                                "received_at",
+                                                DataTypes.TIMESTAMP(3).copy(false))
                                         .column("float_value", DataTypes.FLOAT())
                                         .column("double_value", DataTypes.DOUBLE())
                                         .build())
@@ -114,11 +116,75 @@ class KafkaJsonProduceITCase {
                             assertThat(row.getDecimal(2, 30, 10).toBigDecimal())
                                     .isEqualByComparingTo(
                                             new BigDecimal("12345678901234567890.1234567890"));
-                            assertThat(row.getTimestampNtz(3, 3).getMillisecond()).isEqualTo(123L);
+                            assertThat(row.getTimestampNtz(3, 3).getMillisecond())
+                                    .isEqualTo(123L);
                             assertThat(Float.floatToRawIntBits(row.getFloat(4)))
                                     .isEqualTo(Float.floatToRawIntBits(-0.0F));
                             assertThat(Double.doubleToRawLongBits(row.getDouble(5)))
                                     .isEqualTo(Double.doubleToRawLongBits(-0.0D));
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
+    void testNestedJsonRoundTrip() throws Exception {
+        TableDescriptor descriptor =
+                descriptor(
+                                Schema.newBuilder()
+                                        .column(
+                                                "customer",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "name",
+                                                                DataTypes.STRING().copy(false))))
+                                        .column(
+                                                "items",
+                                                DataTypes.ARRAY(DataTypes.INT().copy(false)))
+                                        .column(
+                                                "attributes",
+                                                DataTypes.MAP(
+                                                        DataTypes.STRING(),
+                                                        DataTypes.ROW(
+                                                                DataTypes.FIELD(
+                                                                        "count", DataTypes.INT()))))
+                                        .build())
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            TablePath path = TablePath.of(DATABASE, "json_complex");
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                assertThat(producer.partitionsFor(path.toString())).hasSize(1);
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(
+                                                        record(
+                                                                path,
+                                                                "{\"customer\":{\"name\":\"Alice\",\"extra\":1}}"))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(InvalidRecordException.class);
+                assertThat(
+                                producer.send(
+                                                record(
+                                                        path,
+                                                        "{\"customer\":{\"name\":\"Alice\"},\"items\":[1,2],\"attributes\":{\"dynamic\":{\"count\":3}}}"))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        row -> {
+                            assertThat(row.getRow(0, 1).getString(0).toString()).isEqualTo("Alice");
+                            assertThat(row.getArray(1).size()).isEqualTo(2);
+                            assertThat(row.getArray(1).getInt(1)).isEqualTo(2);
+                            assertThat(row.getMap(2).keyArray().getString(0).toString())
+                                    .isEqualTo("dynamic");
+                            assertThat(row.getMap(2).valueArray().getRow(0, 1).getInt(0))
+                                    .isEqualTo(3);
                         });
             } finally {
                 admin.dropTable(path, true).get();
