@@ -19,19 +19,13 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.kafka.format.KafkaFieldDecoder;
+import org.apache.fluss.kafka.format.KafkaFormatFactoryRegistry;
 import org.apache.fluss.kafka.schema.KafkaTopicSchema;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.bytesview.BytesView;
-import org.apache.fluss.row.BinaryString;
 
-import javax.annotation.Nullable;
-
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -39,6 +33,7 @@ import static org.apache.fluss.utils.Preconditions.checkArgument;
 /** Converts raw/string Kafka records using the DDL mapping into owned Fluss Arrow log bytes. */
 @Internal
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
+    private final KafkaFormatFactoryRegistry formats = new KafkaFormatFactoryRegistry();
     private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
     private final FlussArrowRecordEncoder arrowRecordEncoder = new FlussArrowRecordEncoder();
     private final KafkaCompiledWritePlanCache writePlanCache = new KafkaCompiledWritePlanCache();
@@ -61,46 +56,28 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     public BytesView transcode(List<Record> records, KafkaTopicWritePlan plan) throws Exception {
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTopicSchema schema = plan.topicSchema();
+        KafkaFieldDecoder keyDecoder =
+                schema.keyFormat() == null
+                        ? null
+                        : formats.createDecoder(schema.keyFormat(), schema.keyProjection());
+        KafkaFieldDecoder valueDecoder =
+                formats.createDecoder(schema.valueFormat(), schema.valueProjection());
         KafkaRowAssembler assembler = plan.rowAssembler();
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {
                     for (Record record : records) {
                         Object[] key =
-                                schema.keyFormat() == null
+                                keyDecoder == null
                                         ? new Object[0]
-                                        : new Object[] {
-                                            decode(schema.keyFormat(), record.borrowedKey())
-                                        };
+                                        : keyDecoder.decode(record.borrowedKey());
                         consumer.append(
                                 assembler.assemble(
                                         key,
-                                        new Object[] {
-                                            decode(schema.valueFormat(), record.borrowedValue())
-                                        },
+                                        valueDecoder.decode(record.borrowedValue()),
                                         record.timestamp(),
                                         record.headers()));
                     }
                 },
                 plan.tableInfo());
-    }
-
-    private static @Nullable Object decode(KafkaDataFormat format, @Nullable byte[] bytes) {
-        if (bytes == null || format == KafkaDataFormat.RAW) {
-            return bytes;
-        }
-        if (format != KafkaDataFormat.STRING) {
-            throw new KafkaRecordEncodingException("Unsupported Kafka data format: " + format);
-        }
-        try {
-            return BinaryString.fromString(
-                    StandardCharsets.UTF_8
-                            .newDecoder()
-                            .onMalformedInput(CodingErrorAction.REPORT)
-                            .onUnmappableCharacter(CodingErrorAction.REPORT)
-                            .decode(ByteBuffer.wrap(bytes))
-                            .toString());
-        } catch (CharacterCodingException e) {
-            throw new KafkaRecordEncodingException("Kafka string field is not valid UTF-8.", e);
-        }
     }
 }
