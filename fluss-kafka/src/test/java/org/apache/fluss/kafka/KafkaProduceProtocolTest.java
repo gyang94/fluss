@@ -419,6 +419,8 @@ class KafkaProduceProtocolTest {
                                         parsed.fail(error);
                                     }
                                 });
+                // This test polls RequestChannel directly, so mirror RequestProcessor cleanup.
+                parsed.releaseBuffer();
                 assertThat(parsed.future()).isNotDone();
                 if (failure) {
                     pending.completeExceptionally(new TimeoutException("failure"));

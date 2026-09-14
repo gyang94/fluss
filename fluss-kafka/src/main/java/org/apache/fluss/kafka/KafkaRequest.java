@@ -57,6 +57,8 @@ public class KafkaRequest implements RpcRequest {
     private final long startTimeMs;
     private final CompletableFuture<AbstractResponse> future;
     private final AtomicBoolean bufferReleased = new AtomicBoolean();
+    private final AtomicBoolean responseBufferReleased = new AtomicBoolean();
+    private boolean responseBufferRetained;
     private volatile boolean cancelled = false;
     private volatile boolean closeConnectionAfterResponse;
 
@@ -135,6 +137,22 @@ public class KafkaRequest implements RpcRequest {
     @Override
     public void releaseBuffer() {
         if (bufferReleased.compareAndSet(false, true)) {
+            ReferenceCountUtil.safeRelease(buffer);
+        }
+    }
+
+    /** Retains an independent reference for the ordered-response queue. */
+    void retainBufferForResponseQueue() {
+        buffer.retain();
+        responseBufferRetained = true;
+    }
+
+    /** Releases response ownership without invalidating a queued or running processor. */
+    void releaseResponseBuffer() {
+        if (!responseBufferRetained) {
+            // Direct handler callers have only the constructor's reference.
+            releaseBuffer();
+        } else if (responseBufferReleased.compareAndSet(false, true)) {
             ReferenceCountUtil.safeRelease(buffer);
         }
     }
@@ -219,7 +237,7 @@ public class KafkaRequest implements RpcRequest {
             AbstractResponse response = request.getErrorResponse(t);
             return serialize(response);
         } finally {
-            releaseBuffer();
+            releaseResponseBuffer();
         }
     }
 

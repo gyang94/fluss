@@ -19,6 +19,9 @@ package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.AuthorizationException;
+import org.apache.fluss.exception.ConfigException;
+import org.apache.fluss.security.acl.FlussPrincipal;
 
 import org.junit.jupiter.api.Test;
 
@@ -28,9 +31,28 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests for Kafka configuration. */
 public class KafkaConfigsTest {
+    @Test
+    public void testKafkaPluginPreservesSuperUserCredentialProtection() {
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.SUPER_USERS, "User:root");
+        config.set(
+                ConfigOptions.SERVER_SASL_CREDENTIALS,
+                Collections.singletonMap("root", "old-secret"));
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin();
+        plugin.setup(config);
+        Configuration changed = new Configuration(config);
+        changed.set(
+                ConfigOptions.SERVER_SASL_CREDENTIALS,
+                Collections.singletonMap("root", "new-secret"));
+        assertThatThrownBy(() -> plugin.validate(changed, new FlussPrincipal("operator", "User")))
+                .isInstanceOf(AuthorizationException.class);
+        plugin.validate(changed, new FlussPrincipal("root", "User"));
+    }
+
     @Test
     public void testFromMap() throws Exception {
         Map<String, String> map = new HashMap<>();
@@ -52,5 +74,58 @@ public class KafkaConfigsTest {
         assertThat(configuration.get(ConfigOptions.KAFKA_LISTENER_NAMES))
                 .isEqualTo(Collections.singletonList("KAFKA"));
         assertThat(configuration.getString(ConfigOptions.KAFKA_DATABASE)).isEqualTo("kafka");
+    }
+
+    @Test
+    public void testKafkaSaslPlainConfiguration() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "sasl"));
+        configuration.set(
+                ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
+                Collections.singletonList("PLAIN"));
+        configuration.set(
+                ConfigOptions.SERVER_SASL_CREDENTIALS,
+                Collections.singletonMap("writer", "writer-secret"));
+
+        new KafkaProtocolPlugin().setup(configuration);
+    }
+
+    @Test
+    public void testKafkaSaslRequiresPlainMechanism() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "sasl"));
+        configuration.set(
+                ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
+                Collections.singletonList("SCRAM-SHA-256"));
+
+        assertThatThrownBy(() -> new KafkaProtocolPlugin().setup(configuration))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining("require PLAIN");
+    }
+
+    @Test
+    public void testKafkaListenerRejectsNonSaslAuthenticationPlugin() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "custom"));
+
+        assertThatThrownBy(() -> new KafkaProtocolPlugin().setup(configuration))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining("supports only PLAINTEXT or SASL authentication");
+    }
+
+    @Test
+    public void testKafkaListenerAcceptsExplicitPlaintextProtocol() {
+        Configuration configuration = new Configuration();
+        configuration.set(
+                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                Collections.singletonMap("KAFKA", "PLAINTEXT"));
+
+        new KafkaProtocolPlugin().setup(configuration);
     }
 }
