@@ -129,7 +129,8 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                         request.timeout(),
                         topics,
                         context.listenerName(),
-                        clientAddress(context.remoteAddress()));
+                        clientAddress(context.remoteAddress()),
+                        context.principal());
         CompletableFuture<KafkaProduceResult> result;
         try {
             result =
