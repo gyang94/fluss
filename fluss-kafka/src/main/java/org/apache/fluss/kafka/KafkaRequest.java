@@ -17,8 +17,10 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RpcRequest;
 import org.apache.fluss.rpc.protocol.RequestType;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
@@ -48,13 +50,17 @@ public class KafkaRequest implements RpcRequest {
     private final RequestHeader header;
     private final AbstractRequest request;
     private final String listenerName;
+    private final KafkaSaslConnection saslConnection;
+    private final FlussPrincipal principal;
     private final ByteBuf buffer;
     private final ChannelHandlerContext ctx;
     private final long startTimeMs;
     private final CompletableFuture<AbstractResponse> future;
     private final AtomicBoolean bufferReleased = new AtomicBoolean();
     private volatile boolean cancelled = false;
+    private volatile boolean closeConnectionAfterResponse;
 
+    /** Creates an anonymous request with an unknown listener name. */
     protected KafkaRequest(
             ApiKeys apiKey,
             short apiVersion,
@@ -63,9 +69,19 @@ public class KafkaRequest implements RpcRequest {
             ByteBuf buffer,
             ChannelHandlerContext ctx,
             CompletableFuture<AbstractResponse> future) {
-        this(apiKey, apiVersion, header, request, "UNKNOWN", buffer, ctx, future);
+        this(
+                apiKey,
+                apiVersion,
+                header,
+                request,
+                "UNKNOWN",
+                KafkaSaslConnection.plaintext(),
+                buffer,
+                ctx,
+                future);
     }
 
+    /** Creates an anonymous request for the supplied listener. */
     protected KafkaRequest(
             ApiKeys apiKey,
             short apiVersion,
@@ -75,11 +91,36 @@ public class KafkaRequest implements RpcRequest {
             ByteBuf buffer,
             ChannelHandlerContext ctx,
             CompletableFuture<AbstractResponse> future) {
+        this(
+                apiKey,
+                apiVersion,
+                header,
+                request,
+                listenerName,
+                KafkaSaslConnection.plaintext(),
+                buffer,
+                ctx,
+                future);
+    }
+
+    /** Creates a request that snapshots identity from the supplied connection security state. */
+    protected KafkaRequest(
+            ApiKeys apiKey,
+            short apiVersion,
+            RequestHeader header,
+            AbstractRequest request,
+            String listenerName,
+            KafkaSaslConnection saslConnection,
+            ByteBuf buffer,
+            ChannelHandlerContext ctx,
+            CompletableFuture<AbstractResponse> future) {
         this.apiKey = apiKey;
         this.apiVersion = apiVersion;
         this.header = header;
         this.request = request;
         this.listenerName = listenerName;
+        this.saslConnection = saslConnection;
+        this.principal = saslConnection.principal();
         this.buffer = buffer.retain();
         this.ctx = ctx;
         this.startTimeMs = System.currentTimeMillis();
@@ -122,6 +163,16 @@ public class KafkaRequest implements RpcRequest {
         return listenerName;
     }
 
+    /** Returns the connection-level SASL state associated with this request. */
+    public KafkaSaslConnection saslConnection() {
+        return saslConnection;
+    }
+
+    /** Returns the principal captured when this request was parsed. */
+    public FlussPrincipal principal() {
+        return principal;
+    }
+
     public ChannelHandlerContext ctx() {
         return ctx;
     }
@@ -148,6 +199,16 @@ public class KafkaRequest implements RpcRequest {
 
     public boolean cancelled() {
         return cancelled;
+    }
+
+    /** Marks this request so the channel closes only after its response has been flushed. */
+    public void closeConnectionAfterResponse() {
+        closeConnectionAfterResponse = true;
+    }
+
+    /** Returns whether the channel must close after this request's response is flushed. */
+    public boolean shouldCloseConnectionAfterResponse() {
+        return closeConnectionAfterResponse;
     }
 
     public ByteBuf responseBuffer() {

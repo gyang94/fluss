@@ -33,8 +33,12 @@ import org.apache.fluss.rpc.messages.PbBucketMetadata;
 import org.apache.fluss.rpc.messages.PbServerNode;
 import org.apache.fluss.rpc.messages.PbTableMetadata;
 import org.apache.fluss.rpc.messages.PbTablePath;
+import org.apache.fluss.rpc.netty.server.Session;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
+import org.apache.fluss.shaded.netty4.io.netty.channel.Channel;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.concurrent.FutureUtils;
@@ -60,6 +64,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -73,11 +79,87 @@ import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Protocol compatibility tests for the Kafka Metadata API. */
 public class KafkaMetadataHandlerTest {
 
     private static final Uuid TOPIC_ID = new Uuid(0x466c757373000000L, 123L);
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testAuthenticatedPrincipalPropagatesToMetadataGatewaySessions(boolean allTopics)
+            throws Exception {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        if (allTopics) {
+            service.putTable("other.topic", 125L);
+            service.pendingDatabases = new CompletableFuture<>();
+            service.failNextMetadataAsMissing = true;
+        }
+        FlussPrincipal principal = new FlussPrincipal("kafka-user", "User");
+        InetAddress clientAddress = InetAddress.getByAddress(new byte[] {(byte) 192, 0, 2, 3});
+        Channel channel = mock(Channel.class);
+        ChannelHandlerContext channelContext = mock(ChannelHandlerContext.class);
+        when(channelContext.channel()).thenReturn(channel);
+        when(channelContext.alloc()).thenReturn(ByteBufAllocator.DEFAULT);
+        when(channel.remoteAddress()).thenReturn(new InetSocketAddress(clientAddress, 12345));
+        ByteBuf buffer = ByteBufAllocator.DEFAULT.buffer();
+        MetadataRequest requestBody =
+                allTopics
+                        ? MetadataRequest.Builder.allTopics().build((short) 11)
+                        : namedTopicRequest("kafka.topic");
+        short version = requestBody.version();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.METADATA,
+                        version,
+                        new RequestHeader(ApiKeys.METADATA, version, "client-id", 1),
+                        requestBody,
+                        "KAFKA",
+                        buffer,
+                        channelContext,
+                        new CompletableFuture<>()) {
+                    @Override
+                    public FlussPrincipal principal() {
+                        return principal;
+                    }
+                };
+
+        buffer.release();
+        new KafkaRequestHandler(new Configuration(), service, service).processRequest(request);
+        if (allTopics) {
+            assertThat(request.future()).isNotDone();
+            CompletableFuture.runAsync(
+                            () -> {
+                                service.setCurrentSession(
+                                        new Session(
+                                                (short) 0,
+                                                "OTHER",
+                                                true,
+                                                null,
+                                                FlussPrincipal.ANONYMOUS));
+                                service.pendingDatabases.complete(
+                                        new ListDatabasesResponse()
+                                                .addAllDatabaseNames(
+                                                        Arrays.asList("kafka", "other")));
+                            })
+                    .get();
+        }
+        assertThat(request.future().get().errorCounts()).containsOnlyKeys(Errors.NONE);
+        ByteBuf responseBuffer = request.responseBuffer();
+        responseBuffer.release();
+
+        assertThat(service.sessions)
+                .hasSize(allTopics ? 8 : 1)
+                .allSatisfy(
+                        session -> {
+                            assertThat(session.getPrincipal()).isEqualTo(principal);
+                            assertThat(session.getListenerName()).isEqualTo("KAFKA");
+                            assertThat(session.getInetAddress()).isEqualTo(clientAddress);
+                            assertThat(session.isInternal()).isFalse();
+                        });
+    }
 
     @Test
     public void testNamedTopicForEverySupportedVersion() {
@@ -1138,11 +1220,13 @@ public class KafkaMetadataHandlerTest {
         private final Set<String> hiddenTopics = new LinkedHashSet<>();
         private final Map<String, Long> tables = new LinkedHashMap<>();
         private final Map<String, TableDescriptor> descriptors = new LinkedHashMap<>();
+        private final List<Session> sessions = new ArrayList<>();
         private int gatewayCalls;
         private int listDatabasesCalls;
         private final Set<String> requestedTables = new LinkedHashSet<>();
         private final Set<String> listedDatabases = new LinkedHashSet<>();
         private String lastListenerName;
+        private CompletableFuture<ListDatabasesResponse> pendingDatabases;
         private boolean topicLeaderAvailable = true;
         private int[] topicIsr = new int[] {1, 2};
         private Integer topicBucketEpoch = 7;
@@ -1162,7 +1246,11 @@ public class KafkaMetadataHandlerTest {
                 ListDatabasesRequest request) {
             gatewayCalls++;
             listDatabasesCalls++;
+            sessions.add(currentSession());
             assertThat(currentListenerName()).isEqualTo("KAFKA");
+            if (pendingDatabases != null) {
+                return pendingDatabases;
+            }
             return CompletableFuture.completedFuture(
                     new ListDatabasesResponse().addAllDatabaseNames(databases));
         }
@@ -1170,6 +1258,7 @@ public class KafkaMetadataHandlerTest {
         @Override
         public CompletableFuture<ListTablesResponse> listTables(ListTablesRequest request) {
             gatewayCalls++;
+            sessions.add(currentSession());
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             String database = request.getDatabaseName();
             listedDatabases.add(database);
@@ -1203,6 +1292,7 @@ public class KafkaMetadataHandlerTest {
                 org.apache.fluss.rpc.messages.MetadataRequest request) {
             gatewayCalls++;
             lastListenerName = currentListenerName();
+            sessions.add(currentSession());
             if (failMetadata) {
                 CompletableFuture<org.apache.fluss.rpc.messages.MetadataResponse> failure =
                         new CompletableFuture<>();
