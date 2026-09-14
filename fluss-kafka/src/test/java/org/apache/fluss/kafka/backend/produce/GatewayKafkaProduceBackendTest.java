@@ -42,6 +42,8 @@ import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.rpc.netty.server.Session;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.common.protocol.Errors;
@@ -59,11 +61,166 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /**
  * Tests append admission, error isolation, session propagation and asynchronous acknowledgements.
  */
 class GatewayKafkaProduceBackendTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testPrincipalSurvivesAsynchronousMetadataCompletion(boolean useExecutor) throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        service.pendingMetadata = new CompletableFuture<>();
+        service.metadataEntered = new CountDownLatch(1);
+        FlussPrincipal principal = new FlussPrincipal("writer", "User");
+        KafkaProduceCommand command =
+                new KafkaProduceCommand(
+                        (short) 1,
+                        4321,
+                        Collections.singletonList(topic("kafka.topic", good(0))),
+                        "KAFKA",
+                        InetAddress.getLoopbackAddress(),
+                        principal);
+        KafkaProduceConversionExecutor executor =
+                useExecutor ? new KafkaProduceConversionExecutor(1, 1) : null;
+        try {
+            GatewayKafkaProduceBackend backend =
+                    new GatewayKafkaProduceBackend(
+                            service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
+            CompletableFuture<KafkaProduceResult> result = backend.write(command);
+            assertThat(service.metadataEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(service.metadataPrincipal).isEqualTo(principal);
+            if (useExecutor) {
+                assertThat(service.metadataThread).isNotSameAs(Thread.currentThread());
+            }
+            assertThat(result).isNotDone();
+            CompletableFuture.runAsync(
+                            () -> {
+                                service.setCurrentSession(
+                                        new Session(
+                                                (short) 0,
+                                                "OTHER",
+                                                false,
+                                                InetAddress.getLoopbackAddress(),
+                                                FlussPrincipal.ANONYMOUS));
+                                service.pendingMetadata.complete(metadata(false));
+                            })
+                    .get(10, TimeUnit.SECONDS);
+            assertErrors(result.get(10, TimeUnit.SECONDS), Errors.NONE);
+            assertThat(service.appendPrincipal).isEqualTo(principal);
+        } finally {
+            if (executor != null) {
+                executor.closeAsync().get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testCachedMetadataKeepsSessionsAndAuthorizationIsolated(boolean allNull) throws Exception {
+        FlussPrincipal writer = new FlussPrincipal("writer", "User");
+        FlussPrincipal denied = new FlussPrincipal("denied", "User");
+        InetAddress writerAddress = InetAddress.getByAddress(new byte[] {(byte) 192, 0, 2, 1});
+        InetAddress deniedAddress = InetAddress.getByAddress(new byte[] {(byte) 192, 0, 2, 2});
+        List<Session> metadataSessions = new ArrayList<>();
+        List<Session> authorizationSessions = new ArrayList<>();
+        List<TablePath> metadataPaths = new ArrayList<>();
+        List<ProduceLogRequest> appends = new ArrayList<>();
+        TestingTabletGatewayService service =
+                new TestingTabletGatewayService() {
+                    @Override
+                    public CompletableFuture<GetTableInfoResponse> getTableInfo(
+                            GetTableInfoRequest request) {
+                        metadataSessions.add(currentSession());
+                        metadataPaths.add(
+                                TablePath.of(
+                                        request.getTablePath().getDatabaseName(),
+                                        request.getTablePath().getTableName()));
+                        return CompletableFuture.completedFuture(
+                                GatewayKafkaProduceBackendTest.metadata(false));
+                    }
+
+                    @Override
+                    public CompletableFuture<ProduceLogResponse> produceLog(
+                            ProduceLogRequest request) {
+                        assertThat(request.getTableId()).isEqualTo(42L);
+                        authorizationSessions.add(currentSession());
+                        if (!currentSession().getPrincipal().equals(writer)) {
+                            throw new AuthorizationException("Write denied");
+                        }
+                        appends.add(request);
+                        return CompletableFuture.completedFuture(success(0));
+                    }
+                };
+        PartitionWrite partition = allNull ? nullValue(0) : good(0);
+        KafkaProduceCommand allowedCommand =
+                new KafkaProduceCommand(
+                        (short) 1,
+                        4321,
+                        Collections.singletonList(topic("fluss.topic", partition)),
+                        "WRITER",
+                        writerAddress,
+                        writer);
+        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 2);
+        try {
+            GatewayKafkaProduceBackend backend =
+                    new GatewayKafkaProduceBackend(
+                            service,
+                            service,
+                            new KafkaTopicMapper(new Configuration()),
+                            new ArrowKafkaRecordTranscoder(),
+                            executor);
+            KafkaProduceResult allowedResult =
+                    backend.write(allowedCommand).get(10, TimeUnit.SECONDS);
+            assertErrors(allowedResult, Errors.NONE);
+            assertThat(allowedResult.topics().get(0).partitions().get(0).baseOffset())
+                    .isEqualTo(17L);
+            for (String name : Arrays.asList("topic", "fluss.topic")) {
+                KafkaProduceCommand deniedCommand =
+                        new KafkaProduceCommand(
+                                (short) 1,
+                                4321,
+                                Collections.singletonList(topic(name, partition)),
+                                "DENIED",
+                                deniedAddress,
+                                denied);
+                assertErrors(
+                        backend.write(deniedCommand).get(10, TimeUnit.SECONDS),
+                        Errors.TOPIC_AUTHORIZATION_FAILED);
+            }
+            KafkaProduceCommand allowedAlias =
+                    new KafkaProduceCommand(
+                            (short) 1,
+                            4321,
+                            Collections.singletonList(topic("topic", partition)),
+                            "WRITER",
+                            writerAddress,
+                            writer);
+            KafkaProduceResult aliasResult = backend.write(allowedAlias).get(10, TimeUnit.SECONDS);
+            assertErrors(aliasResult, Errors.NONE);
+            assertThat(aliasResult.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
+            for (List<Session> sessions : Arrays.asList(metadataSessions, authorizationSessions)) {
+                assertThat(sessions)
+                        .extracting(
+                                Session::getPrincipal,
+                                Session::getListenerName,
+                                Session::getInetAddress)
+                        .containsExactly(
+                                tuple(writer, "WRITER", writerAddress),
+                                tuple(denied, "DENIED", deniedAddress),
+                                tuple(denied, "DENIED", deniedAddress),
+                                tuple(writer, "WRITER", writerAddress));
+                assertThat(sessions)
+                        .allSatisfy(session -> assertThat(session.isInternal()).isFalse());
+            }
+            assertThat(appends).hasSize(2);
+            assertThat(metadataPaths).hasSize(4).containsOnly(TablePath.of("fluss", "topic"));
+        } finally {
+            executor.closeAsync().get(10, TimeUnit.SECONDS);
+        }
+    }
 
     @Test
     void testAllNullValuesUseNativeAppendAndAuthorization() throws Exception {
@@ -1196,6 +1353,8 @@ class GatewayKafkaProduceBackendTest {
     private static class TestingProduceService extends TestingTabletGatewayService {
         private final List<TablePath> metadataPaths = new ArrayList<>();
         private final List<ProduceLogRequest> appends = new ArrayList<>();
+        private FlussPrincipal metadataPrincipal;
+        private FlussPrincipal appendPrincipal;
         private ProduceLogRequest append;
         private CompletableFuture<ProduceLogResponse> pendingAppend;
         private CompletableFuture<GetTableInfoResponse> pendingMetadata;
@@ -1209,6 +1368,7 @@ class GatewayKafkaProduceBackendTest {
 
         @Override
         public CompletableFuture<GetTableInfoResponse> getTableInfo(GetTableInfoRequest request) {
+            metadataPrincipal = currentSession().getPrincipal();
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             String database = request.getTablePath().getDatabaseName();
             String name = request.getTablePath().getTableName();
@@ -1249,6 +1409,7 @@ class GatewayKafkaProduceBackendTest {
         @Override
         public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
             checkWriteAuthorization(request.getTableId());
+            appendPrincipal = currentSession().getPrincipal();
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             assertThat(currentSession().getInetAddress())
                     .isEqualTo(InetAddress.getLoopbackAddress());
