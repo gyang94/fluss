@@ -20,6 +20,8 @@ package org.apache.fluss.kafka;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.kafka.api.metadata.MetadataHandler;
 import org.apache.fluss.kafka.api.produce.ProduceHandler;
+import org.apache.fluss.kafka.api.sasl.SaslAuthenticateHandler;
+import org.apache.fluss.kafka.api.sasl.SaslHandshakeHandler;
 import org.apache.fluss.kafka.api.versions.ApiVersionsHandler;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
 import org.apache.fluss.kafka.backend.produce.GatewayKafkaProduceBackend;
@@ -61,6 +63,8 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 new KafkaApiRegistry(
                         Arrays.asList(
                                 new ApiVersionsHandler(this::apiRegistry),
+                                new SaslHandshakeHandler(),
+                                new SaslAuthenticateHandler(),
                                 new MetadataHandler(
                                         new GatewayKafkaMetadataBackend(service, topicMapper),
                                         topicMapper),
