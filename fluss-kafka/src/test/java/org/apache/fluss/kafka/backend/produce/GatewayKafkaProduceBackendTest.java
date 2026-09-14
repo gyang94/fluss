@@ -38,10 +38,13 @@ import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.common.protocol.Errors;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetAddress;
 import java.util.ArrayList;
@@ -56,6 +59,45 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests append admission, error isolation, session propagation and delayed-fetch completion. */
 class GatewayKafkaProduceBackendTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testPrincipalSurvivesAsynchronousMetadataCompletion(boolean useExecutor) throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        service.pendingMetadata = new CompletableFuture<>();
+        service.metadataEntered = new CountDownLatch(1);
+        FlussPrincipal principal = new FlussPrincipal("writer", "User");
+        KafkaProduceCommand command =
+                new KafkaProduceCommand(
+                        (short) 1,
+                        4321,
+                        Collections.singletonList(topic("kafka.topic", good(0))),
+                        "KAFKA",
+                        InetAddress.getLoopbackAddress(),
+                        principal);
+        KafkaProduceConversionExecutor executor =
+                useExecutor ? new KafkaProduceConversionExecutor(1, 1) : null;
+        try {
+            GatewayKafkaProduceBackend backend =
+                    new GatewayKafkaProduceBackend(
+                            service, service, new ArrowKafkaRecordTranscoder(), executor);
+            CompletableFuture<KafkaProduceResult> result = backend.write(command);
+            assertThat(service.metadataEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(service.metadataPrincipal).isEqualTo(principal);
+            if (useExecutor) {
+                assertThat(service.metadataThread).isNotSameAs(Thread.currentThread());
+            }
+            assertThat(result).isNotDone();
+            CompletableFuture.runAsync(() -> service.pendingMetadata.complete(metadata(false)))
+                    .get(10, TimeUnit.SECONDS);
+            assertErrors(result.get(10, TimeUnit.SECONDS), Errors.NONE);
+            assertThat(service.appendPrincipal).isEqualTo(principal);
+        } finally {
+            if (executor != null) {
+                executor.closeAsync().get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
 
     @Test
     void testDrainsImmediatelyWhileAcksAllResponseIsPending() throws Exception {
@@ -488,6 +530,8 @@ class GatewayKafkaProduceBackendTest {
     private static class TestingProduceService extends TestingTabletGatewayService {
         private final List<TablePath> metadataPaths = new ArrayList<>();
         private final List<ProduceLogRequest> appends = new ArrayList<>();
+        private FlussPrincipal metadataPrincipal;
+        private FlussPrincipal appendPrincipal;
         private ProduceLogRequest append;
         private CompletableFuture<ProduceLogResponse> pendingAppend;
         private CompletableFuture<GetTableInfoResponse> pendingMetadata;
@@ -500,6 +544,7 @@ class GatewayKafkaProduceBackendTest {
 
         @Override
         public CompletableFuture<GetTableInfoResponse> getTableInfo(GetTableInfoRequest request) {
+            metadataPrincipal = currentSession().getPrincipal();
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             String database = request.getTablePath().getDatabaseName();
             String name = request.getTablePath().getTableName();
@@ -525,6 +570,7 @@ class GatewayKafkaProduceBackendTest {
 
         @Override
         public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
+            appendPrincipal = currentSession().getPrincipal();
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             assertThat(currentSession().getInetAddress())
                     .isEqualTo(InetAddress.getLoopbackAddress());
