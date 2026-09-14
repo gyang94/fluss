@@ -17,6 +17,9 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
+import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 
@@ -27,12 +30,42 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Tests for {@link KafkaRequest}. */
 public class KafkaRequestTest {
+
+    @Test
+    public void testPrincipalIsAnImmutableConnectionSnapshot() {
+        ServerAuthenticator authenticator = mock(ServerAuthenticator.class);
+        FlussPrincipal principal = new FlussPrincipal("writer", "User");
+        when(authenticator.isCompleted()).thenReturn(true);
+        when(authenticator.createPrincipal()).thenReturn(principal);
+        KafkaSaslConnection connection = KafkaSaslConnection.sasl(() -> authenticator);
+        connection.beginAuthentication("PLAIN", "KAFKA", null);
+        connection.authenticate(new byte[0]);
+        ByteBuf buffer = mock(ByteBuf.class);
+        when(buffer.retain()).thenReturn(buffer);
+        short version = ApiKeys.API_VERSIONS.oldestVersion();
+        KafkaRequest request =
+                new KafkaRequest(
+                        ApiKeys.API_VERSIONS,
+                        version,
+                        new RequestHeader(ApiKeys.API_VERSIONS, version, "client", 1),
+                        new ApiVersionsRequest.Builder().build(version),
+                        "KAFKA",
+                        connection,
+                        buffer,
+                        mock(ChannelHandlerContext.class),
+                        new CompletableFuture<>());
+        connection.failAuthentication();
+        assertThat(connection.principal()).isEqualTo(FlussPrincipal.ANONYMOUS);
+        assertThat(request.principal()).isEqualTo(principal);
+        request.releaseBuffer();
+    }
 
     @Test
     public void testReleaseBufferIsIdempotent() {
