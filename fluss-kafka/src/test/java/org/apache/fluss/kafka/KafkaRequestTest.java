@@ -21,6 +21,7 @@ import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
+import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -37,6 +38,40 @@ import static org.mockito.Mockito.when;
 
 /** Tests for {@link KafkaRequest}. */
 public class KafkaRequestTest {
+
+    @Test
+    public void testWorkerAndResponseReferencesAreReleasedIndependently() {
+        for (boolean workerFirst : new boolean[] {true, false}) {
+            ByteBuf buffer = Unpooled.buffer(1);
+            short version = ApiKeys.API_VERSIONS.oldestVersion();
+            KafkaRequest request =
+                    new KafkaRequest(
+                            ApiKeys.API_VERSIONS,
+                            version,
+                            new RequestHeader(ApiKeys.API_VERSIONS, version, "client", 1),
+                            new ApiVersionsRequest.Builder().build(version),
+                            buffer,
+                            mock(ChannelHandlerContext.class),
+                            new CompletableFuture<>());
+            request.retainBufferForResponseQueue();
+            buffer.release();
+            assertThat(buffer.refCnt()).isEqualTo(2);
+            if (workerFirst) {
+                request.releaseBuffer();
+                request.releaseBuffer();
+                assertThat(buffer.refCnt()).isOne();
+                request.releaseResponseBuffer();
+                request.releaseResponseBuffer();
+            } else {
+                request.releaseResponseBuffer();
+                request.releaseResponseBuffer();
+                assertThat(buffer.refCnt()).isOne();
+                request.releaseBuffer();
+                request.releaseBuffer();
+            }
+            assertThat(buffer.refCnt()).isZero();
+        }
+    }
 
     @Test
     public void testPrincipalIsAnImmutableConnectionSnapshot() {

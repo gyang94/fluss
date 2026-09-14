@@ -20,6 +20,7 @@ package org.apache.fluss.kafka.dispatcher;
 import org.apache.fluss.kafka.KafkaRequest;
 import org.apache.fluss.kafka.KafkaRequestContext;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 
 import org.apache.kafka.common.errors.InvalidRequestException;
@@ -183,6 +184,7 @@ class KafkaRequestDispatcherTest {
     private static KafkaRequest request(short version) {
         KafkaRequest request = mock(KafkaRequest.class);
         when(request.apiKey()).thenReturn(ApiKeys.API_VERSIONS);
+        when(request.saslConnection()).thenReturn(KafkaSaslConnection.plaintext());
         when(request.apiVersion()).thenReturn(version);
         when(request.request()).thenReturn(new ApiVersionsRequest.Builder().build(version));
         when(request.header())
