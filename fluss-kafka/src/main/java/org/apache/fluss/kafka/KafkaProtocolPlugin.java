@@ -187,7 +187,6 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
                     gateway,
                     ((AdminGatewayProvider) service).getAdminGateway(),
                     (AdminOperationAuthorizer) service,
-                    conf.get(ConfigOptions.KAFKA_DATABASE),
                     KafkaDataFormat.parse(conf.get(ConfigOptions.KAFKA_DEFAULT_KEY_FORMAT)),
                     KafkaDataFormat.parse(conf.get(ConfigOptions.KAFKA_DEFAULT_VALUE_FORMAT)),
                     produceMetrics,
@@ -202,7 +201,6 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
         return new KafkaRequestHandler(
                 service,
                 gateway,
-                conf.get(ConfigOptions.KAFKA_DATABASE),
                 produceMetrics,
                 recordTranscoder,
                 conversionExecutor,

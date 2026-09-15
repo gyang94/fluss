@@ -107,7 +107,7 @@ public class KafkaRequestHandlerTest {
     public void testAdminCapabilitiesAreAdvertisedWhenCoordinatorGatewayIsAvailable() {
         TestingTabletGatewayService service = new TestingTabletGatewayService();
         KafkaRequestHandler handler =
-                new KafkaRequestHandler(service, service, mock(AdminGateway.class), "kafka");
+                new KafkaRequestHandler(service, service, mock(AdminGateway.class));
         short version = ApiKeys.API_VERSIONS.latestVersion();
         ApiVersionsRequest requestBody = new ApiVersionsRequest.Builder().build(version);
         KafkaRequest request =
@@ -334,7 +334,7 @@ public class KafkaRequestHandlerTest {
                 new KafkaProduceMetrics(TestMetricGroup.newBuilder().build(), new ThrowingClock());
         KafkaRequestHandler handler =
                 new KafkaRequestHandler(
-                        service, service, "kafka", metrics, mock(KafkaRecordTranscoder.class));
+                        service, service, metrics, mock(KafkaRecordTranscoder.class));
         short version = ApiKeys.PRODUCE.latestVersion();
         ProduceRequest requestBody =
                 new ProduceRequest(
@@ -400,7 +400,7 @@ public class KafkaRequestHandlerTest {
 
     private static KafkaRequestHandler createKafkaRequestHandler() {
         TestingTabletGatewayService service = new TestingTabletGatewayService();
-        return new KafkaRequestHandler(service, service, "kafka");
+        return new KafkaRequestHandler(service, service);
     }
 
     private static final class FailingApiVersionsHandler

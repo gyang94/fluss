@@ -107,7 +107,7 @@ public class KafkaMetadataFailoverITCase {
 
     @Test
     public void testAdvertisedListenersAndTopicIdentityLifecycle() throws Exception {
-        String topic = "metadata-lifecycle-topic";
+        String topic = "kafka.metadata-lifecycle-topic";
         try (Admin admin = Admin.create(adminConfig())) {
             deleteIgnoringErrors(admin, topic);
             createTopic(admin, topic);
@@ -139,7 +139,7 @@ public class KafkaMetadataFailoverITCase {
 
     @Test
     public void testProducerRefreshesMetadataAfterLeaderFailover() throws Exception {
-        String topic = "metadata-leader-failover-topic";
+        String topic = "kafka.metadata-leader-failover-topic";
         int stoppedLeader = -1;
         try (Admin admin = Admin.create(adminConfig())) {
             deleteIgnoringErrors(admin, topic);
@@ -317,7 +317,6 @@ public class KafkaMetadataFailoverITCase {
     private static Configuration clusterConfig() {
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_ENABLED, true);
-        config.set(ConfigOptions.KAFKA_DATABASE, DATABASE);
         config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 3);
         return config;
     }

@@ -32,6 +32,7 @@ import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
@@ -55,9 +56,68 @@ import java.util.concurrent.CompletableFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class GatewayKafkaProduceBackendCacheTest {
+
+    @Test
+    void testQualifiedTopicsRouteAndCacheByFullTablePath() {
+        RpcGatewayService service = mock(RpcGatewayService.class);
+        TabletServerGateway gateway = mock(TabletServerGateway.class);
+        List<TablePath> lookups = new ArrayList<>();
+        when(gateway.getTableInfo(any(GetTableInfoRequest.class)))
+                .thenAnswer(
+                        invocation -> {
+                            GetTableInfoRequest request = invocation.getArgument(0);
+                            TablePath path =
+                                    TablePath.of(
+                                            request.getTablePath().getDatabaseName(),
+                                            request.getTablePath().getTableName());
+                            lookups.add(path);
+                            return CompletableFuture.completedFuture(
+                                    new GetTableInfoResponse()
+                                            .setTableId(
+                                                    "sales".equals(path.getDatabaseName())
+                                                            ? 12L
+                                                            : 13L)
+                                            .setSchemaId(3)
+                                            .setTableJson(descriptor().toJsonBytes())
+                                            .setCreatedTime(1L)
+                                            .setModifiedTime(2L));
+                        });
+        when(gateway.produceLog(any(ProduceLogRequest.class)))
+                .thenReturn(CompletableFuture.completedFuture(produceResponse()));
+        CountingTranscoder transcoder = new CountingTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, gateway, transcoder);
+        for (String name : Arrays.asList("sales.orders", "archive.orders", "sales.orders")) {
+            assertThat(backend.write(command(name)).join().topics().get(0).partitions())
+                    .allSatisfy(partition -> assertThat(partition.error()).isEqualTo(Errors.NONE));
+        }
+        assertThat(lookups)
+                .contains(TablePath.of("sales", "orders"), TablePath.of("archive", "orders"));
+        assertThat(transcoder.preparedTableInfos.get(0))
+                .isNotSameAs(transcoder.preparedTableInfos.get(1));
+        assertThat(transcoder.preparedTableInfos.get(0))
+                .isSameAs(transcoder.preparedTableInfos.get(2));
+        assertThat(transcoder.preparedTableInfos.get(0).getTableId()).isEqualTo(12L);
+        assertThat(transcoder.preparedTableInfos.get(1).getTableId()).isEqualTo(13L);
+    }
+
+    @Test
+    void testBareTopicIsRejectedBeforeNativeLookupOrWrite() {
+        RpcGatewayService service = mock(RpcGatewayService.class);
+        TabletServerGateway gateway = mock(TabletServerGateway.class);
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, gateway, new CountingTranscoder());
+        assertThat(backend.write(command("orders")).join().topics().get(0).partitions())
+                .allSatisfy(
+                        partition ->
+                                assertThat(partition.error())
+                                        .isEqualTo(Errors.INVALID_TOPIC_EXCEPTION));
+        verifyNoInteractions(gateway);
+    }
 
     @Test
     void testReusesTableInfoAndOneWritePlanAcrossPartitionsAndRequests() {
@@ -78,7 +138,7 @@ class GatewayKafkaProduceBackendCacheTest {
 
         CountingTranscoder transcoder = new CountingTranscoder();
         GatewayKafkaProduceBackend backend =
-                new GatewayKafkaProduceBackend(service, gateway, "kafka", transcoder);
+                new GatewayKafkaProduceBackend(service, gateway, transcoder);
         KafkaProduceCommand firstCommand = command();
         KafkaProduceCommand secondCommand = command();
 
@@ -136,7 +196,7 @@ class GatewayKafkaProduceBackendCacheTest {
                 };
 
         KafkaProduceResult result =
-                new GatewayKafkaProduceBackend(service, gateway, "kafka", transcoder)
+                new GatewayKafkaProduceBackend(service, gateway, transcoder)
                         .write(command())
                         .join();
 
@@ -145,6 +205,10 @@ class GatewayKafkaProduceBackendCacheTest {
     }
 
     private static KafkaProduceCommand command() {
+        return command("kafka.orders");
+    }
+
+    private static KafkaProduceCommand command(String topicName) {
         Record record =
                 new Record(
                         1L,
@@ -153,7 +217,7 @@ class GatewayKafkaProduceBackendCacheTest {
                         Collections.emptyList());
         TopicWrite topic =
                 new TopicWrite(
-                        "orders",
+                        topicName,
                         Arrays.asList(
                                 new PartitionWrite(0, Collections.singletonList(record)),
                                 new PartitionWrite(1, Collections.singletonList(record))));

@@ -118,13 +118,18 @@ public class KafkaAcksAllITCase {
         try {
             CreateTopicsResponse createResponse = createTopics();
             assertThat(createResponse.errorCounts()).containsOnlyKeys(Errors.NONE);
-            assertThat(createResponse.data().topics().find(REPLICATED_TOPIC).replicationFactor())
+            assertThat(
+                            createResponse
+                                    .data()
+                                    .topics()
+                                    .find(DATABASE + "." + REPLICATED_TOPIC)
+                                    .replicationFactor())
                     .isEqualTo((short) 3);
             assertThat(
                             createResponse
                                     .data()
                                     .topics()
-                                    .find(UNDER_REPLICATED_TOPIC)
+                                    .find(DATABASE + "." + UNDER_REPLICATED_TOPIC)
                                     .replicationFactor())
                     .isEqualTo((short) 1);
 
@@ -188,11 +193,11 @@ public class KafkaAcksAllITCase {
         List<CreateTopicsRequestData.CreatableTopic> topics =
                 Arrays.asList(
                         new CreateTopicsRequestData.CreatableTopic()
-                                .setName(REPLICATED_TOPIC)
+                                .setName(DATABASE + "." + REPLICATED_TOPIC)
                                 .setNumPartitions(1)
                                 .setReplicationFactor((short) 3),
                         new CreateTopicsRequestData.CreatableTopic()
-                                .setName(UNDER_REPLICATED_TOPIC)
+                                .setName(DATABASE + "." + UNDER_REPLICATED_TOPIC)
                                 .setNumPartitions(1)
                                 .setReplicationFactor((short) 1));
         CreateTopicsRequest request =
@@ -250,7 +255,9 @@ public class KafkaAcksAllITCase {
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig())) {
             return producer.send(
                             new ProducerRecord<>(
-                                    topic, KEY, value.getBytes(StandardCharsets.UTF_8)))
+                                    DATABASE + "." + topic,
+                                    KEY,
+                                    value.getBytes(StandardCharsets.UTF_8)))
                     .get(30, TimeUnit.SECONDS);
         }
     }
@@ -284,7 +291,6 @@ public class KafkaAcksAllITCase {
     private static Configuration clusterConfig() {
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_ENABLED, true);
-        config.set(ConfigOptions.KAFKA_DATABASE, DATABASE);
         config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 3);
         config.set(ConfigOptions.LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER, 2);
         return config;

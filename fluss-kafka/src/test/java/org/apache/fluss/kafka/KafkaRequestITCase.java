@@ -35,6 +35,8 @@ import org.apache.fluss.rpc.messages.DropTableRequest;
 import org.apache.fluss.rpc.messages.DropTableResponse;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
+import org.apache.fluss.rpc.messages.ListDatabasesRequest;
+import org.apache.fluss.rpc.messages.ListDatabasesResponse;
 import org.apache.fluss.rpc.messages.ListTablesRequest;
 import org.apache.fluss.rpc.messages.ListTablesResponse;
 import org.apache.fluss.rpc.messages.PbBucketMetadata;
@@ -300,7 +302,7 @@ public class KafkaRequestITCase {
                         new SimpleRecord(123L, new byte[] {1}, new byte[] {2}));
         TopicProduceData topic =
                 new TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(
                                 Collections.singletonList(
                                         new PartitionProduceData()
@@ -338,7 +340,7 @@ public class KafkaRequestITCase {
             assertThat(
                             response.data()
                                     .responses()
-                                    .find("topic")
+                                    .find("kafka.topic")
                                     .partitionResponses()
                                     .get(0)
                                     .baseOffset())
@@ -352,7 +354,7 @@ public class KafkaRequestITCase {
         config.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, node.host() + ":" + node.port());
         config.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 60000);
         try (Admin admin = Admin.create(config)) {
-            admin.createTopics(Collections.singleton(new NewTopic("topic", 1, (short) 1)))
+            admin.createTopics(Collections.singleton(new NewTopic("kafka.topic", 1, (short) 1)))
                     .all()
                     .get();
 
@@ -365,11 +367,11 @@ public class KafkaRequestITCase {
             producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
             producerConfig.put(ProducerConfig.ACKS_CONFIG, "1");
             try (KafkaProducer<String, String> producer = new KafkaProducer<>(producerConfig)) {
-                assertThat(producer.send(new ProducerRecord<>("topic", "key", "value")).get())
+                assertThat(producer.send(new ProducerRecord<>("kafka.topic", "key", "value")).get())
                         .isNotNull();
             }
 
-            admin.deleteTopics(Collections.singleton("topic")).all().get();
+            admin.deleteTopics(Collections.singleton("kafka.topic")).all().get();
         }
         verify(gatewayService.adminGateway).createTable(any(CreateTableRequest.class));
         assertThat(gatewayService.produced).isTrue();
@@ -487,6 +489,14 @@ public class KafkaRequestITCase {
         @Override
         public AdminGateway getAdminGateway() {
             return adminGateway;
+        }
+
+        @Override
+        public CompletableFuture<ListDatabasesResponse> listDatabases(
+                ListDatabasesRequest request) {
+            return CompletableFuture.completedFuture(
+                    new ListDatabasesResponse()
+                            .addAllDatabaseNames(Collections.singletonList("kafka")));
         }
 
         @Override

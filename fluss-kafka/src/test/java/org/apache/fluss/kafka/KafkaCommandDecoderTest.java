@@ -249,7 +249,7 @@ public class KafkaCommandDecoderTest {
     public void testApiVersionsDuringAuthenticationIsFlushedBeforeChannelCloses() throws Exception {
         RequestChannel requestChannel = new RequestChannel(100);
         TestingTabletGatewayService service = new TestingTabletGatewayService();
-        KafkaRequestHandler requestHandler = new KafkaRequestHandler(service, service, "kafka");
+        KafkaRequestHandler requestHandler = new KafkaRequestHandler(service, service);
         EmbeddedChannel channel =
                 new EmbeddedChannel(
                         new LengthFieldPrepender(4),
@@ -532,7 +532,6 @@ public class KafkaCommandDecoderTest {
                 new KafkaRequestHandler(
                         service,
                         service,
-                        "kafka",
                         KafkaProduceMetrics.noOp(),
                         new TestingKafkaRecordTranscoder());
         EmbeddedChannel channel =
@@ -1277,7 +1276,7 @@ public class KafkaCommandDecoderTest {
                 new ProduceRequestData.PartitionProduceData().setIndex(0).setRecords(records);
         ProduceRequestData.TopicProduceData topic =
                 new ProduceRequestData.TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(Collections.singletonList(partition));
         ProduceRequest request =
                 new ProduceRequest(
@@ -1713,7 +1712,6 @@ public class KafkaCommandDecoderTest {
                 new KafkaRequestHandler(
                         service,
                         service,
-                        "kafka",
                         KafkaProduceMetrics.noOp(),
                         new TestingKafkaRecordTranscoder());
         private final EmbeddedChannel channel =

@@ -262,7 +262,7 @@ public class KafkaFlussRoundTripITCase {
         adminConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBootstrapServer);
         adminConfig.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, 60000);
         try (Admin kafkaAdmin = Admin.create(adminConfig)) {
-            NewTopic newTopic = new NewTopic(topic, 1, (short) 1);
+            NewTopic newTopic = new NewTopic(DATABASE + "." + topic, 1, (short) 1);
             newTopic.configs(topicConfigs);
             kafkaAdmin.createTopics(Collections.singleton(newTopic)).all().get();
 
@@ -270,7 +270,7 @@ public class KafkaFlussRoundTripITCase {
             assertFlussRecord(topic, stringFormat);
             assertProjectedFlussRecord(topic, stringFormat);
 
-            kafkaAdmin.deleteTopics(Collections.singleton(topic)).all().get();
+            kafkaAdmin.deleteTopics(Collections.singleton(DATABASE + "." + topic)).all().get();
         }
     }
 
@@ -289,7 +289,7 @@ public class KafkaFlussRoundTripITCase {
                 new RecordHeaders(
                         Collections.singletonList(new RecordHeader(HEADER_KEY, HEADER_VALUE)));
         ProducerRecord<byte[], byte[]> record =
-                new ProducerRecord<>(topic, 0, TIMESTAMP, key, value, headers);
+                new ProducerRecord<>(DATABASE + "." + topic, 0, TIMESTAMP, key, value, headers);
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig)) {
             producer.send(record).get();
         }
@@ -370,7 +370,6 @@ public class KafkaFlussRoundTripITCase {
     private static Configuration clusterConfig() {
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_ENABLED, true);
-        config.set(ConfigOptions.KAFKA_DATABASE, DATABASE);
         config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 1);
         return config;
     }

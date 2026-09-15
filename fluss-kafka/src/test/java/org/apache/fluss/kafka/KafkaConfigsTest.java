@@ -40,7 +40,6 @@ public class KafkaConfigsTest {
         Map<String, String> map = new HashMap<>();
         map.put(ConfigOptions.KAFKA_ENABLED.key(), "true");
         map.put(ConfigOptions.KAFKA_LISTENER_NAMES.key(), "kafka,kafka_sasl");
-        map.put(ConfigOptions.KAFKA_DATABASE.key(), "fluss");
         map.put(ConfigOptions.KAFKA_DEFAULT_KEY_FORMAT.key(), "string");
         map.put(ConfigOptions.KAFKA_DEFAULT_VALUE_FORMAT.key(), "string");
         Configuration configuration = Configuration.fromMap(map);
@@ -48,7 +47,6 @@ public class KafkaConfigsTest {
         assertThat(configuration.getBoolean(ConfigOptions.KAFKA_ENABLED)).isTrue();
         assertThat(configuration.get(ConfigOptions.KAFKA_LISTENER_NAMES))
                 .isEqualTo(Arrays.asList("kafka", "kafka_sasl"));
-        assertThat(configuration.getString(ConfigOptions.KAFKA_DATABASE)).isEqualTo("fluss");
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_KEY_FORMAT))
                 .isEqualTo("string");
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_VALUE_FORMAT))
@@ -61,7 +59,6 @@ public class KafkaConfigsTest {
         assertThat(configuration.getBoolean(ConfigOptions.KAFKA_ENABLED)).isFalse();
         assertThat(configuration.get(ConfigOptions.KAFKA_LISTENER_NAMES))
                 .isEqualTo(Collections.singletonList("KAFKA"));
-        assertThat(configuration.getString(ConfigOptions.KAFKA_DATABASE)).isEqualTo("kafka");
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_KEY_FORMAT))
                 .isEqualTo("raw");
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_VALUE_FORMAT))

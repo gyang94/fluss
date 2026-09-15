@@ -24,6 +24,7 @@ import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
+import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.AdminGateway;
 import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
@@ -38,6 +39,7 @@ import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.protocol.Errors;
 
 import javax.annotation.Nullable;
@@ -57,20 +59,17 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
     private final RpcGatewayService service;
     private final AdminGateway gateway;
     private final AdminOperationAuthorizer adminOperationAuthorizer;
-    private final String databaseName;
     private final KafkaTopicMapper topicMapper;
 
     /** Creates a topic backend backed by the Fluss coordinator admin gateway. */
     public GatewayKafkaTopicAdminBackend(
             RpcGatewayService service,
             AdminGateway gateway,
-            AdminOperationAuthorizer adminOperationAuthorizer,
-            String databaseName) {
+            AdminOperationAuthorizer adminOperationAuthorizer) {
         this.service = checkNotNull(service);
         this.gateway = checkNotNull(gateway);
         this.adminOperationAuthorizer = checkNotNull(adminOperationAuthorizer);
-        this.databaseName = checkNotNull(databaseName);
-        this.topicMapper = new KafkaTopicMapper(databaseName);
+        this.topicMapper = new KafkaTopicMapper();
     }
 
     @Override
@@ -124,9 +123,11 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
             FlussPrincipal principal) {
         TableDescriptor descriptor = createDescriptor(topic);
         Session session = clientSession(listenerName, clientAddress, principal);
+        final TablePath tablePath;
         try {
+            tablePath = topicMapper.toTablePath(topic.name());
             adminOperationAuthorizer.authorize(
-                    session, OperationType.CREATE, Resource.database(databaseName));
+                    session, OperationType.CREATE, Resource.database(tablePath.getDatabaseName()));
         } catch (RuntimeException failure) {
             return CompletableFuture.completedFuture(failed(topic.name(), failure));
         }
@@ -138,8 +139,8 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
         request.setTableJson(descriptor.toJsonBytes())
                 .setIgnoreIfExists(false)
                 .setTablePath()
-                .setDatabaseName(databaseName)
-                .setTableName(topic.name());
+                .setDatabaseName(tablePath.getDatabaseName())
+                .setTableName(tablePath.getTableName());
         setCurrentSession(session);
         return gateway.createTable(request)
                 .thenCompose(ignored -> getCreatedTopic(topic, session))
@@ -148,7 +149,10 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
 
     private CompletableFuture<TopicResult> getCreatedTopic(CreateTopic topic, Session session) {
         GetTableInfoRequest request = new GetTableInfoRequest();
-        request.setTablePath().setDatabaseName(databaseName).setTableName(topic.name());
+        TablePath tablePath = topicMapper.toTablePath(topic.name());
+        request.setTablePath()
+                .setDatabaseName(tablePath.getDatabaseName())
+                .setTableName(tablePath.getTableName());
         setCurrentSession(session);
         return gateway.getTableInfo(request)
                 .thenApply(
@@ -171,9 +175,13 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
                             (short) -1));
         }
         Session session = clientSession(listenerName, clientAddress, principal);
+        final TablePath tablePath;
         try {
+            tablePath = topicMapper.toTablePath(topic.name());
             adminOperationAuthorizer.authorize(
-                    session, OperationType.DROP, Resource.table(databaseName, topic.name()));
+                    session,
+                    OperationType.DROP,
+                    Resource.table(tablePath.getDatabaseName(), tablePath.getTableName()));
         } catch (RuntimeException failure) {
             return CompletableFuture.completedFuture(
                     failed(topic.name(), topic.topicId(), failure));
@@ -181,8 +189,8 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
         DropTableRequest request = new DropTableRequest();
         request.setIgnoreIfNotExists(false)
                 .setTablePath()
-                .setDatabaseName(databaseName)
-                .setTableName(topic.name());
+                .setDatabaseName(tablePath.getDatabaseName())
+                .setTableName(tablePath.getTableName());
         setCurrentSession(session);
         return gateway.dropTable(request)
                 .thenApply(
@@ -268,6 +276,9 @@ public final class GatewayKafkaTopicAdminBackend implements KafkaTopicAdminBacke
     }
 
     private static Errors toKafkaError(Throwable failure) {
+        if (failure instanceof InvalidTopicException) {
+            return Errors.INVALID_TOPIC_EXCEPTION;
+        }
         org.apache.fluss.rpc.protocol.Errors error =
                 org.apache.fluss.rpc.protocol.Errors.forException(failure);
         switch (error) {

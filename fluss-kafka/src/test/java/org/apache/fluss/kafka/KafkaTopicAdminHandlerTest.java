@@ -108,7 +108,7 @@ public class KafkaTopicAdminHandlerTest {
                         createTopicsRequest(createVersion),
                         createVersion,
                         principal);
-        new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer, "kafka")
+        new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer)
                 .processRequest(createRequest);
         assertThat(((CreateTopicsResponse) parseResponse(createRequest)).errorCounts())
                 .containsOnlyKeys(Errors.NONE);
@@ -122,12 +122,12 @@ public class KafkaTopicAdminHandlerTest {
                                                 Collections.singletonList(
                                                         new DeleteTopicsRequestData
                                                                         .DeleteTopicState()
-                                                                .setName("topic")
+                                                                .setName("kafka.topic")
                                                                 .setTopicId(Uuid.ZERO_UUID))))
                         .build(deleteVersion);
         KafkaRequest deleteRequest =
                 kafkaRequest(ApiKeys.DELETE_TOPICS, deleteRequestBody, deleteVersion, principal);
-        new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer, "kafka")
+        new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer)
                 .processRequest(deleteRequest);
         assertThat(((DeleteTopicsResponse) parseResponse(deleteRequest)).errorCounts())
                 .containsOnlyKeys(Errors.NONE);
@@ -156,8 +156,7 @@ public class KafkaTopicAdminHandlerTest {
                 .when(adminOperationAuthorizer)
                 .authorize(any(), any(), any());
         KafkaRequestHandler handler =
-                new KafkaRequestHandler(
-                        service, service, adminGateway, adminOperationAuthorizer, "kafka");
+                new KafkaRequestHandler(service, service, adminGateway, adminOperationAuthorizer);
 
         short createVersion = ApiKeys.CREATE_TOPICS.latestVersion();
         KafkaRequest createRequest =
@@ -201,11 +200,11 @@ public class KafkaTopicAdminHandlerTest {
         CreateTopicsRequest requestBody = createTopicsRequest(version);
         KafkaRequest request = kafkaRequest(ApiKeys.CREATE_TOPICS, requestBody, version);
 
-        new KafkaRequestHandler(service, service, adminGateway, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service, adminGateway).processRequest(request);
 
         CreateTopicsResponse response = (CreateTopicsResponse) parseResponse(request);
         CreateTopicsResponseData.CreatableTopicResult result =
-                response.data().topics().find("topic");
+                response.data().topics().find("kafka.topic");
         assertThat(result.errorCode()).isEqualTo(Errors.NONE.code());
         assertThat(result.topicId()).isNotEqualTo(Uuid.ZERO_UUID);
         ArgumentCaptor<CreateTableRequest> captor =
@@ -257,7 +256,7 @@ public class KafkaTopicAdminHandlerTest {
         KafkaRequest request =
                 kafkaRequest(ApiKeys.CREATE_TOPICS, createTopicsRequest(version, configs), version);
 
-        new KafkaRequestHandler(service, service, adminGateway, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service, adminGateway).processRequest(request);
 
         assertThat(((CreateTopicsResponse) parseResponse(request)).errorCounts())
                 .containsOnlyKeys(Errors.NONE);
@@ -289,7 +288,6 @@ public class KafkaTopicAdminHandlerTest {
                         service,
                         service,
                         adminGateway,
-                        "kafka",
                         KafkaDataFormat.STRING,
                         KafkaDataFormat.STRING)
                 .processRequest(request);
@@ -322,11 +320,11 @@ public class KafkaTopicAdminHandlerTest {
                                         KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")),
                         version);
 
-        new KafkaRequestHandler(service, service, adminGateway, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service, adminGateway).processRequest(request);
 
         CreateTopicsResponse response = (CreateTopicsResponse) parseResponse(request);
         assertThat(response.errorCounts()).containsEntry(Errors.INVALID_CONFIG, 1);
-        assertThat(response.data().topics().find("topic").errorMessage())
+        assertThat(response.data().topics().find("kafka.topic").errorMessage())
                 .contains("cannot define a JSON Fluss table schema");
         verify(adminGateway, never()).createTable(any(CreateTableRequest.class));
     }
@@ -342,7 +340,7 @@ public class KafkaTopicAdminHandlerTest {
         KafkaRequest request =
                 kafkaRequest(ApiKeys.CREATE_TOPICS, createTopicsRequest(version), version);
 
-        new KafkaRequestHandler(service, service, adminGateway, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service, adminGateway).processRequest(request);
 
         CreateTopicsResponse response = (CreateTopicsResponse) parseResponse(request);
         assertThat(response.errorCounts()).containsEntry(Errors.TOPIC_ALREADY_EXISTS, 1);
@@ -361,12 +359,12 @@ public class KafkaTopicAdminHandlerTest {
                         .setTopics(
                                 Collections.singletonList(
                                         new DeleteTopicsRequestData.DeleteTopicState()
-                                                .setName("topic")
+                                                .setName("kafka.topic")
                                                 .setTopicId(Uuid.ZERO_UUID)));
         DeleteTopicsRequest requestBody = new DeleteTopicsRequest.Builder(data).build(version);
         KafkaRequest request = kafkaRequest(ApiKeys.DELETE_TOPICS, requestBody, version);
 
-        new KafkaRequestHandler(service, service, adminGateway, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service, adminGateway).processRequest(request);
 
         DeleteTopicsResponse response = (DeleteTopicsResponse) parseResponse(request);
         assertThat(response.errorCounts()).containsOnlyKeys(Errors.NONE);
@@ -384,7 +382,7 @@ public class KafkaTopicAdminHandlerTest {
             short version, Map<String, String> configs) {
         CreateTopicsRequestData.CreatableTopic topic =
                 new CreateTopicsRequestData.CreatableTopic()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setNumPartitions(3)
                         .setReplicationFactor((short) 2);
         for (Map.Entry<String, String> config : configs.entrySet()) {
@@ -410,7 +408,7 @@ public class KafkaTopicAdminHandlerTest {
                         .setTopics(
                                 Collections.singletonList(
                                         new DeleteTopicsRequestData.DeleteTopicState()
-                                                .setName("topic")
+                                                .setName("kafka.topic")
                                                 .setTopicId(Uuid.ZERO_UUID)));
         return new DeleteTopicsRequest.Builder(data).build(version);
     }

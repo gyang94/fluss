@@ -25,7 +25,11 @@ import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
+import org.apache.fluss.metadata.LogFormat;
+import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.security.acl.AccessControlEntry;
 import org.apache.fluss.security.acl.AclBinding;
@@ -35,6 +39,7 @@ import org.apache.fluss.security.acl.OperationType;
 import org.apache.fluss.security.acl.PermissionType;
 import org.apache.fluss.security.acl.Resource;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
+import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.admin.Admin;
@@ -55,6 +60,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -68,6 +74,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class KafkaSaslPlainAuthenticationITCase {
 
     private static final String DATABASE = "kafka";
+    private static final String SECOND_DATABASE = "warehouse";
     private static final String TOPIC = "sasl-plain-topic";
     private static final String USERNAME = "writer";
     private static final String PASSWORD = "writer-secret";
@@ -102,6 +109,7 @@ public class KafkaSaslPlainAuthenticationITCase {
         if (flussAdmin != null) {
             try {
                 flussAdmin.dropTable(TablePath.of(DATABASE, TOPIC), true).get();
+                flussAdmin.dropTable(TablePath.of(SECOND_DATABASE, TOPIC), true).get();
             } catch (Exception ignored) {
                 // Preserve the primary test failure when cleanup cannot complete.
             }
@@ -118,11 +126,88 @@ public class KafkaSaslPlainAuthenticationITCase {
     }
 
     @Test
+    public void testCrossDatabaseMetadataWritesAndPermissions() throws Exception {
+        flussAdmin.createDatabase(SECOND_DATABASE, DatabaseDescriptor.EMPTY, true).get();
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("record_key", DataTypes.BYTES())
+                                        .column("payload", DataTypes.BYTES())
+                                        .build())
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "raw")
+                        .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "record_key")
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                        .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                        .build();
+        TablePath first = TablePath.of(DATABASE, TOPIC);
+        TablePath second = TablePath.of(SECOND_DATABASE, TOPIC);
+        flussAdmin.createTable(first, descriptor, false).get();
+        flussAdmin.createTable(second, descriptor, false).get();
+        grantWriterDatabaseAccess();
+
+        Map<String, Object> clientConfig = kafkaClientConfig(USERNAME, PASSWORD);
+        try (Admin admin = Admin.create(clientConfig)) {
+            assertThat(admin.listTopics().names().get(30, TimeUnit.SECONDS))
+                    .contains(first.toString())
+                    .doesNotContain(second.toString());
+
+            grantWriterAccess(Resource.database(SECOND_DATABASE), OperationType.DESCRIBE);
+            assertThat(admin.listTopics().names().get(30, TimeUnit.SECONDS))
+                    .contains(first.toString(), second.toString());
+            assertThat(
+                            admin.describeTopics(Arrays.asList(first.toString(), second.toString()))
+                                    .allTopicNames()
+                                    .get(30, TimeUnit.SECONDS))
+                    .hasSize(2);
+
+            Map<String, Object> producerConfig = new HashMap<>(clientConfig);
+            producerConfig.put(
+                    ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+            producerConfig.put(
+                    ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+            producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
+            producerConfig.put(ProducerConfig.ACKS_CONFIG, "1");
+            byte[] secondValue = "warehouse-value".getBytes(StandardCharsets.UTF_8);
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig)) {
+                assertThat(
+                                producer.send(new ProducerRecord<>(first.toString(), KEY, VALUE))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(
+                                                        new ProducerRecord<>(
+                                                                second.toString(), KEY, VALUE))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasRootCauseInstanceOf(TopicAuthorizationException.class);
+            }
+            grantWriterAccess(Resource.table(SECOND_DATABASE, TOPIC), OperationType.WRITE);
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig)) {
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<>(
+                                                        second.toString(), KEY, secondValue))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+            }
+            assertFlussRecord(first, VALUE);
+            assertFlussRecord(second, secondValue);
+        }
+    }
+
+    @Test
     public void testAuthenticatedAdminAndProducerLifecycle() throws Exception {
         grantWriterDatabaseAccess();
         Map<String, Object> clientConfig = kafkaClientConfig(USERNAME, PASSWORD);
         try (Admin admin = Admin.create(clientConfig)) {
-            admin.createTopics(Collections.singleton(new NewTopic(TOPIC, 1, (short) 1)))
+            admin.createTopics(
+                            Collections.singleton(
+                                    new NewTopic(DATABASE + "." + TOPIC, 1, (short) 1)))
                     .all()
                     .get(30, TimeUnit.SECONDS);
 
@@ -134,12 +219,18 @@ public class KafkaSaslPlainAuthenticationITCase {
             producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
             producerConfig.put(ProducerConfig.ACKS_CONFIG, "1");
             try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig)) {
-                assertThat(producer.send(new ProducerRecord<>(TOPIC, KEY, VALUE)).get())
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<>(
+                                                        DATABASE + "." + TOPIC, KEY, VALUE))
+                                        .get())
                         .isNotNull();
             }
 
             assertFlussRecord();
-            admin.deleteTopics(Collections.singleton(TOPIC)).all().get(30, TimeUnit.SECONDS);
+            admin.deleteTopics(Collections.singleton(DATABASE + "." + TOPIC))
+                    .all()
+                    .get(30, TimeUnit.SECONDS);
         }
     }
 
@@ -150,7 +241,10 @@ public class KafkaSaslPlainAuthenticationITCase {
                             () ->
                                     admin.createTopics(
                                                     Collections.singleton(
-                                                            new NewTopic(TOPIC, 1, (short) 1)))
+                                                            new NewTopic(
+                                                                    DATABASE + "." + TOPIC,
+                                                                    1,
+                                                                    (short) 1)))
                                             .all()
                                             .get(30, TimeUnit.SECONDS))
                     .hasRootCauseInstanceOf(TopicAuthorizationException.class);
@@ -167,14 +261,18 @@ public class KafkaSaslPlainAuthenticationITCase {
     }
 
     private void assertFlussRecord() throws Exception {
-        try (Table table = connection.getTable(TablePath.of(DATABASE, TOPIC));
+        assertFlussRecord(TablePath.of(DATABASE, TOPIC), VALUE);
+    }
+
+    private void assertFlussRecord(TablePath tablePath, byte[] expectedValue) throws Exception {
+        try (Table table = connection.getTable(tablePath);
                 LogScanner scanner = table.newScan().createLogScanner()) {
             scanner.subscribeFromBeginning(0);
             for (int attempt = 0; attempt < 30; attempt++) {
                 ScanRecords records = scanner.poll(Duration.ofSeconds(1));
                 for (ScanRecord record : records) {
                     assertThat(record.getRow().getBytes(0)).containsExactly(KEY);
-                    assertThat(record.getRow().getBytes(1)).containsExactly(VALUE);
+                    assertThat(record.getRow().getBytes(1)).containsExactly(expectedValue);
                     return;
                 }
             }
@@ -183,13 +281,17 @@ public class KafkaSaslPlainAuthenticationITCase {
     }
 
     private void grantWriterDatabaseAccess() throws Exception {
+        grantWriterAccess(Resource.database(DATABASE), OperationType.ALL);
+    }
+
+    private void grantWriterAccess(Resource resource, OperationType operation) throws Exception {
         AclBinding aclBinding =
                 new AclBinding(
-                        Resource.database(DATABASE),
+                        resource,
                         new AccessControlEntry(
                                 new FlussPrincipal(USERNAME, "User"),
                                 AccessControlEntry.WILD_CARD_HOST,
-                                OperationType.ALL,
+                                operation,
                                 PermissionType.ALLOW));
         flussAdmin.createAcls(Collections.singletonList(aclBinding)).all().get();
         FLUSS_CLUSTER_EXTENSION.waitUntilAuthenticationSync(
@@ -215,7 +317,6 @@ public class KafkaSaslPlainAuthenticationITCase {
     private static Configuration clusterConfig() {
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_ENABLED, true);
-        config.set(ConfigOptions.KAFKA_DATABASE, DATABASE);
         config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 1);
         config.set(
                 ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,

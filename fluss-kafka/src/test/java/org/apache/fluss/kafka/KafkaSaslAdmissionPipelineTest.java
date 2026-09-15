@@ -77,7 +77,7 @@ class KafkaSaslAdmissionPipelineTest {
                         Duration.ofSeconds(10),
                         KafkaProduceMetrics.noOp());
         TestingTabletGatewayService service = new TestingTabletGatewayService();
-        KafkaRequestHandler requestHandler = new KafkaRequestHandler(service, service, "kafka");
+        KafkaRequestHandler requestHandler = new KafkaRequestHandler(service, service);
         EmbeddedChannel channel =
                 new EmbeddedChannel(
                         frameDecoder.newReadGate(),

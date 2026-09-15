@@ -29,6 +29,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaOutputMemoryBudget;
@@ -49,6 +50,7 @@ import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
 
+import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.protocol.Errors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -82,9 +84,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private static final Duration DEFAULT_NATIVE_COMPLETION_GRACE_TIMEOUT = Duration.ofMinutes(5);
     private static final Executor DIRECT_EXECUTOR = Runnable::run;
 
+    private final KafkaTopicMapper topicMapper = new KafkaTopicMapper();
     private final RpcGatewayService service;
     private final TabletServerGateway gateway;
-    private final String databaseName;
     private final KafkaRecordTranscoder transcoder;
     private final KafkaProduceMetrics produceMetrics;
     private final KafkaTableInfoCache tableInfoCache;
@@ -97,12 +99,10 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder) {
         this(
                 service,
                 gateway,
-                databaseName,
                 transcoder,
                 KafkaProduceMetrics.noOp(),
                 new KafkaTableInfoCache(),
@@ -115,13 +115,11 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder,
             KafkaProduceMetrics produceMetrics) {
         this(
                 service,
                 gateway,
-                databaseName,
                 transcoder,
                 produceMetrics,
                 new KafkaTableInfoCache(),
@@ -134,7 +132,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder,
             KafkaProduceMetrics produceMetrics,
             Executor conversionExecutor,
@@ -143,7 +140,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         this(
                 service,
                 gateway,
-                databaseName,
                 transcoder,
                 produceMetrics,
                 conversionExecutor,
@@ -156,7 +152,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder,
             KafkaProduceMetrics produceMetrics,
             Executor conversionExecutor,
@@ -166,7 +161,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         this(
                 service,
                 gateway,
-                databaseName,
                 transcoder,
                 produceMetrics,
                 new KafkaTableInfoCache(),
@@ -179,14 +173,12 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder,
             KafkaProduceMetrics produceMetrics,
             KafkaTableInfoCache tableInfoCache) {
         this(
                 service,
                 gateway,
-                databaseName,
                 transcoder,
                 produceMetrics,
                 tableInfoCache,
@@ -198,7 +190,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder,
             KafkaProduceMetrics produceMetrics,
             KafkaTableInfoCache tableInfoCache,
@@ -208,7 +199,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         this(
                 service,
                 gateway,
-                databaseName,
                 transcoder,
                 produceMetrics,
                 tableInfoCache,
@@ -221,7 +211,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String databaseName,
             KafkaRecordTranscoder transcoder,
             KafkaProduceMetrics produceMetrics,
             KafkaTableInfoCache tableInfoCache,
@@ -231,7 +220,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             KafkaNativeProduceOperationTracker operationTracker) {
         this.service = checkNotNull(service);
         this.gateway = checkNotNull(gateway);
-        this.databaseName = checkNotNull(databaseName);
         this.transcoder = checkNotNull(transcoder);
         this.produceMetrics = checkNotNull(produceMetrics);
         this.tableInfoCache = checkNotNull(tableInfoCache);
@@ -416,7 +404,10 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             KafkaProduceCommand command, TopicWrite topic) {
         setCurrentSession(command);
         GetTableInfoRequest request = new GetTableInfoRequest();
-        request.setTablePath().setDatabaseName(databaseName).setTableName(topic.topicName());
+        TablePath tablePath = topicMapper.toTablePath(topic.topicName());
+        request.setTablePath()
+                .setDatabaseName(tablePath.getDatabaseName())
+                .setTableName(tablePath.getTableName());
         long lookupStartedNanos = produceMetrics.nowNanos();
         CompletableFuture<GetTableInfoResponse> tableInfoFuture;
         try {
@@ -532,7 +523,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     }
 
     private TableInfo toTableInfo(TopicWrite topic, GetTableInfoResponse response) {
-        TablePath tablePath = TablePath.of(databaseName, topic.topicName());
+        TablePath tablePath = topicMapper.toTablePath(topic.topicName());
         return tableInfoCache.getOrLoad(
                 tablePath, response, () -> parseTableInfo(tablePath, response));
     }
@@ -608,7 +599,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             KafkaProduceCommand command, int partitionId, Throwable failure) {
         Throwable cause = unwrap(failure);
         Errors kafkaError;
-        if (cause instanceof KafkaRecordEncodingException) {
+        if (cause instanceof InvalidTopicException) {
+            kafkaError = Errors.INVALID_TOPIC_EXCEPTION;
+        } else if (cause instanceof KafkaRecordEncodingException) {
             kafkaError = Errors.INVALID_RECORD;
         } else if (cause instanceof KafkaTopicSchemaException) {
             kafkaError = Errors.INVALID_CONFIG;
@@ -626,30 +619,25 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private static TopicResult failedTopic(
             KafkaProduceCommand command, TopicWrite topic, Throwable failure) {
         Throwable cause = unwrap(failure);
-        Errors kafkaError =
-                cause instanceof KafkaRecordEncodingException
-                        ? Errors.INVALID_RECORD
-                        : cause instanceof KafkaTopicSchemaException
-                                ? Errors.INVALID_CONFIG
-                                : cause instanceof RequestTooLargeException
-                                        ? Errors.MESSAGE_TOO_LARGE
-                                        : cause instanceof OutOfMemoryException
-                                                ? Errors.REQUEST_TIMED_OUT
-                                                : cause instanceof AdmissionUnavailableException
-                                                                || cause
-                                                                        instanceof
-                                                                        CancellationException
-                                                                || cause
-                                                                        instanceof
-                                                                        RejectedExecutionException
-                                                        ? Errors.REQUEST_TIMED_OUT
-                                                        : cause instanceof IllegalArgumentException
-                                                                ? Errors.INVALID_REQUEST
-                                                                : toKafkaError(
-                                                                        org.apache.fluss.rpc
-                                                                                .protocol.Errors
-                                                                                .forException(
-                                                                                        cause));
+        Errors kafkaError;
+        if (cause instanceof InvalidTopicException) {
+            kafkaError = Errors.INVALID_TOPIC_EXCEPTION;
+        } else if (cause instanceof KafkaRecordEncodingException) {
+            kafkaError = Errors.INVALID_RECORD;
+        } else if (cause instanceof KafkaTopicSchemaException) {
+            kafkaError = Errors.INVALID_CONFIG;
+        } else if (cause instanceof RequestTooLargeException) {
+            kafkaError = Errors.MESSAGE_TOO_LARGE;
+        } else if (cause instanceof OutOfMemoryException
+                || cause instanceof AdmissionUnavailableException
+                || cause instanceof CancellationException
+                || cause instanceof RejectedExecutionException) {
+            kafkaError = Errors.REQUEST_TIMED_OUT;
+        } else if (cause instanceof IllegalArgumentException) {
+            kafkaError = Errors.INVALID_REQUEST;
+        } else {
+            kafkaError = toKafkaError(org.apache.fluss.rpc.protocol.Errors.forException(cause));
+        }
         String errorMessage =
                 KafkaProduceResult.limitErrorMessage(
                         cause.getMessage(), KafkaProduceResult.MAX_PARTITION_ERROR_MESSAGE_BYTES);
@@ -669,6 +657,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         switch (error) {
             case NONE:
                 return Errors.NONE;
+            case DATABASE_NOT_EXIST:
             case TABLE_NOT_EXIST:
             case UNKNOWN_TABLE_OR_BUCKET_EXCEPTION:
                 return Errors.UNKNOWN_TOPIC_OR_PARTITION;

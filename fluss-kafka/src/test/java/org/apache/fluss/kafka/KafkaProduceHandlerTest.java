@@ -106,7 +106,7 @@ public class KafkaProduceHandlerTest {
                     }
                 };
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
         assertThat(service.getTableInfoPrincipal).isEqualTo(principal);
@@ -120,12 +120,12 @@ public class KafkaProduceHandlerTest {
         ProduceRequest requestBody = produceRequest(version, (short) 1);
         KafkaRequest request = kafkaRequest(requestBody, version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponse response = parseResponse(request);
         assertThat(response.errorCounts()).containsOnlyKeys(Errors.NONE);
         ProduceResponseData.PartitionProduceResponse partitionResponse =
-                response.data().responses().find("topic").partitionResponses().get(0);
+                response.data().responses().find("kafka.topic").partitionResponses().get(0);
         assertThat(partitionResponse.baseOffset()).isEqualTo(42L);
         assertThat(service.lastProduceRequest.getTableId()).isEqualTo(TABLE_ID);
         assertThat(service.lastProduceRequest.getAcks()).isEqualTo(1);
@@ -163,7 +163,7 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(produceRequest(version, (short) 0), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         assertThat(request.future()).isCompleted();
         assertThat(service.lastProduceRequest.getAcks()).isZero();
@@ -199,7 +199,7 @@ public class KafkaProduceHandlerTest {
                     new KafkaProduceResult(
                             Collections.singletonList(
                                     new TopicResult(
-                                            "topic",
+                                            "kafka.topic",
                                             Collections.singletonList(
                                                     new PartitionResult(
                                                             0, Errors.NONE, 42L, null))))));
@@ -219,7 +219,7 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(produceRequest(version, (short) -1, 4321), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
         assertThat(service.lastProduceRequest.getAcks()).isEqualTo(-1);
@@ -232,10 +232,15 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(produceRequest(version, (short) 2), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponseData.PartitionProduceResponse partition =
-                parseResponse(request).data().responses().find("topic").partitionResponses().get(0);
+                parseResponse(request)
+                        .data()
+                        .responses()
+                        .find("kafka.topic")
+                        .partitionResponses()
+                        .get(0);
         assertThat(Errors.forCode(partition.errorCode())).isEqualTo(Errors.INVALID_REQUIRED_ACKS);
         assertThat(partition.baseOffset()).isEqualTo(-1L);
         assertThat(service.lastProduceRequest).isNull();
@@ -248,7 +253,7 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(produceRequest(version, (short) 1), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
         MemoryLogRecords records = service.lastProduceData.values().iterator().next();
@@ -280,7 +285,7 @@ public class KafkaProduceHandlerTest {
                                 bytes("{\"customer_id\":42,\"amount\":12.50}")),
                         version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
         MemoryLogRecords records = service.lastProduceData.values().iterator().next();
@@ -308,13 +313,13 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(jsonTwoPartitionProduceRequest(version), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponse response = parseResponse(request);
         ProduceResponseData.PartitionProduceResponse successful =
-                response.data().responses().find("topic").partitionResponses().get(0);
+                response.data().responses().find("kafka.topic").partitionResponses().get(0);
         ProduceResponseData.PartitionProduceResponse failed =
-                response.data().responses().find("topic").partitionResponses().get(1);
+                response.data().responses().find("kafka.topic").partitionResponses().get(1);
         assertThat(Errors.forCode(successful.errorCode())).isEqualTo(Errors.NONE);
         assertThat(successful.baseOffset()).isEqualTo(42L);
         assertThat(Errors.forCode(failed.errorCode())).isEqualTo(Errors.INVALID_RECORD);
@@ -340,7 +345,7 @@ public class KafkaProduceHandlerTest {
                                                 + "\"new_field\":\"preserved\"}")),
                         version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
         MemoryLogRecords records = service.lastProduceData.values().iterator().next();
@@ -365,13 +370,13 @@ public class KafkaProduceHandlerTest {
         KafkaRequest request =
                 kafkaRequest(complexJsonTwoPartitionProduceRequest(version), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponse response = parseResponse(request);
         ProduceResponseData.PartitionProduceResponse successful =
-                response.data().responses().find("topic").partitionResponses().get(0);
+                response.data().responses().find("kafka.topic").partitionResponses().get(0);
         ProduceResponseData.PartitionProduceResponse failed =
-                response.data().responses().find("topic").partitionResponses().get(1);
+                response.data().responses().find("kafka.topic").partitionResponses().get(1);
         assertThat(Errors.forCode(successful.errorCode())).isEqualTo(Errors.NONE);
         assertThat(successful.baseOffset()).isEqualTo(42L);
         assertThat(Errors.forCode(failed.errorCode())).isEqualTo(Errors.INVALID_RECORD);
@@ -394,7 +399,7 @@ public class KafkaProduceHandlerTest {
                                 version, (short) 1, new byte[] {(byte) 0xc3, 0x28}, bytes("value")),
                         version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponse response = parseResponse(request);
         assertThat(response.errorCounts()).containsEntry(Errors.INVALID_RECORD, 1);
@@ -441,13 +446,13 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(twoPartitionProduceRequest(version), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponse response = parseResponse(request);
         ProduceResponseData.PartitionProduceResponse successful =
-                response.data().responses().find("topic").partitionResponses().get(0);
+                response.data().responses().find("kafka.topic").partitionResponses().get(0);
         ProduceResponseData.PartitionProduceResponse failed =
-                response.data().responses().find("topic").partitionResponses().get(1);
+                response.data().responses().find("kafka.topic").partitionResponses().get(1);
         assertThat(Errors.forCode(successful.errorCode())).isEqualTo(Errors.NONE);
         assertThat(successful.baseOffset()).isEqualTo(42L);
         assertThat(Errors.forCode(failed.errorCode())).isEqualTo(Errors.NOT_ENOUGH_REPLICAS);
@@ -467,13 +472,13 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(twoPartitionProduceRequest(version), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponse response = parseResponse(request);
         ProduceResponseData.PartitionProduceResponse successful =
-                response.data().responses().find("topic").partitionResponses().get(0);
+                response.data().responses().find("kafka.topic").partitionResponses().get(0);
         ProduceResponseData.PartitionProduceResponse missing =
-                response.data().responses().find("topic").partitionResponses().get(1);
+                response.data().responses().find("kafka.topic").partitionResponses().get(1);
         assertThat(Errors.forCode(successful.errorCode())).isEqualTo(Errors.NONE);
         assertThat(successful.baseOffset()).isEqualTo(42L);
         assertThat(Errors.forCode(missing.errorCode())).isEqualTo(Errors.UNKNOWN_SERVER_ERROR);
@@ -487,7 +492,7 @@ public class KafkaProduceHandlerTest {
             TestingProduceGatewayService service = new TestingProduceGatewayService();
             KafkaRequest request = kafkaRequest(produceRequest(version, (short) 1), version);
 
-            new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+            new KafkaRequestHandler(service, service).processRequest(request);
 
             assertThat(parseResponse(request).errorCounts()).containsOnlyKeys(Errors.NONE);
         }
@@ -517,7 +522,7 @@ public class KafkaProduceHandlerTest {
                         new SimpleRecord(TIMESTAMP, key, value, headers));
         TopicProduceData topic =
                 new TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(
                                 Collections.singletonList(
                                         new PartitionProduceData()
@@ -536,7 +541,7 @@ public class KafkaProduceHandlerTest {
     private static ProduceRequest twoPartitionProduceRequest(short version) {
         TopicProduceData topic =
                 new TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(
                                 Arrays.asList(
                                         new PartitionProduceData()
@@ -558,7 +563,7 @@ public class KafkaProduceHandlerTest {
     private static ProduceRequest jsonTwoPartitionProduceRequest(short version) {
         TopicProduceData topic =
                 new TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(
                                 Arrays.asList(
                                         new PartitionProduceData()
@@ -601,7 +606,7 @@ public class KafkaProduceHandlerTest {
                                 + "\"quantity\":\"bad\"}],\"attributes\":{}}");
         TopicProduceData topic =
                 new TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(
                                 Arrays.asList(
                                         new PartitionProduceData()
@@ -645,10 +650,15 @@ public class KafkaProduceHandlerTest {
         short version = ApiKeys.PRODUCE.latestVersion();
         KafkaRequest request = kafkaRequest(produceRequest(version, (short) -1, 4321), version);
 
-        new KafkaRequestHandler(service, service, "kafka").processRequest(request);
+        new KafkaRequestHandler(service, service).processRequest(request);
 
         ProduceResponseData.PartitionProduceResponse partition =
-                parseResponse(request).data().responses().find("topic").partitionResponses().get(0);
+                parseResponse(request)
+                        .data()
+                        .responses()
+                        .find("kafka.topic")
+                        .partitionResponses()
+                        .get(0);
         assertThat(Errors.forCode(partition.errorCode())).isEqualTo(expectedKafkaError);
         assertThat(partition.baseOffset()).isEqualTo(expectedBaseOffset);
         assertThat(service.lastProduceRequest.getAcks()).isEqualTo(-1);

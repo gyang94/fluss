@@ -236,7 +236,6 @@ class KafkaProtocolPluginTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         service,
-                        "kafka",
                         mock(org.apache.fluss.kafka.transcode.KafkaRecordTranscoder.class),
                         KafkaProduceMetrics.noOp(),
                         executor,
@@ -500,7 +499,7 @@ class KafkaProtocolPluginTest {
                         new SimpleRecord(key, value));
         TopicProduceData topic =
                 new TopicProduceData()
-                        .setName("topic")
+                        .setName("kafka.topic")
                         .setPartitionData(
                                 Collections.singletonList(
                                         new PartitionProduceData()

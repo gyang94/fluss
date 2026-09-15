@@ -2685,13 +2685,6 @@ public class ConfigOptions {
                     .withDescription(
                             "The listener names for Kafka wire protocol communication. Support multiple listener names, separated by comma.");
 
-    public static final ConfigOption<String> KAFKA_DATABASE =
-            key("kafka.database")
-                    .stringType()
-                    .defaultValue("kafka")
-                    .withDescription(
-                            "The database for fluss kafka. The default database is `kafka`.");
-
     public static final ConfigOption<String> KAFKA_DEFAULT_KEY_FORMAT =
             key("kafka.default.key.format")
                     .stringType()

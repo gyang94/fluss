@@ -68,34 +68,25 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     private final KafkaProduceMetrics produceMetrics;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
-    public KafkaRequestHandler(
-            RpcGatewayService service, TabletServerGateway gateway, String kafkaDatabase) {
-        this(service, gateway, kafkaDatabase, KafkaProduceMetrics.noOp());
+    public KafkaRequestHandler(RpcGatewayService service, TabletServerGateway gateway) {
+        this(service, gateway, KafkaProduceMetrics.noOp());
     }
 
     KafkaRequestHandler(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String kafkaDatabase,
             KafkaProduceMetrics produceMetrics) {
-        this(
-                service,
-                gateway,
-                kafkaDatabase,
-                produceMetrics,
-                new ArrowKafkaRecordTranscoder(produceMetrics));
+        this(service, gateway, produceMetrics, new ArrowKafkaRecordTranscoder(produceMetrics));
     }
 
     KafkaRequestHandler(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String kafkaDatabase,
             KafkaProduceMetrics produceMetrics,
             KafkaRecordTranscoder transcoder) {
         this(
                 service,
                 gateway,
-                kafkaDatabase,
                 produceMetrics,
                 transcoder,
                 DIRECT_EXECUTOR,
@@ -106,7 +97,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     KafkaRequestHandler(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String kafkaDatabase,
             KafkaProduceMetrics produceMetrics,
             KafkaRecordTranscoder transcoder,
             Executor conversionExecutor,
@@ -115,7 +105,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         this(
                 service,
                 gateway,
-                kafkaDatabase,
                 produceMetrics,
                 transcoder,
                 conversionExecutor,
@@ -128,7 +117,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     KafkaRequestHandler(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String kafkaDatabase,
             KafkaProduceMetrics produceMetrics,
             KafkaRecordTranscoder transcoder,
             Executor conversionExecutor,
@@ -139,7 +127,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         this(
                 service,
                 gateway,
-                kafkaDatabase,
                 produceMetrics,
                 transcoder,
                 conversionExecutor,
@@ -153,7 +140,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     KafkaRequestHandler(
             RpcGatewayService service,
             TabletServerGateway gateway,
-            String kafkaDatabase,
             KafkaProduceMetrics produceMetrics,
             KafkaRecordTranscoder transcoder,
             Executor conversionExecutor,
@@ -164,21 +150,17 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             KafkaNativeProduceOperationTracker operationTracker) {
         checkNotNull(service);
         checkNotNull(gateway);
-        checkNotNull(kafkaDatabase);
         this.produceMetrics = checkNotNull(produceMetrics);
         KafkaApiRegistry registry = new KafkaApiRegistry();
         registry.register(new ApiVersionsHandler(registry));
         registry.register(new SaslHandshakeHandler());
         registry.register(new SaslAuthenticateHandler());
-        registry.register(
-                new MetadataHandler(
-                        new GatewayKafkaMetadataBackend(service, gateway, kafkaDatabase)));
+        registry.register(new MetadataHandler(new GatewayKafkaMetadataBackend(service, gateway)));
         registry.register(
                 new ProduceHandler(
                         new GatewayKafkaProduceBackend(
                                 service,
                                 gateway,
-                                kafkaDatabase,
                                 checkNotNull(transcoder),
                                 produceMetrics,
                                 checkNotNull(conversionExecutor),
@@ -194,11 +176,8 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
 
     /** Creates a Kafka request handler including topic lifecycle capabilities. */
     public KafkaRequestHandler(
-            RpcGatewayService service,
-            TabletServerGateway gateway,
-            AdminGateway adminGateway,
-            String kafkaDatabase) {
-        this(service, gateway, adminGateway, adminOperationAuthorizer(service), kafkaDatabase);
+            RpcGatewayService service, TabletServerGateway gateway, AdminGateway adminGateway) {
+        this(service, gateway, adminGateway, adminOperationAuthorizer(service));
     }
 
     /** Creates a Kafka request handler with explicit authorization for topic lifecycle requests. */
@@ -206,14 +185,12 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             RpcGatewayService service,
             TabletServerGateway gateway,
             AdminGateway adminGateway,
-            AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase) {
+            AdminOperationAuthorizer adminOperationAuthorizer) {
         this(
                 service,
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer,
-                kafkaDatabase,
                 KafkaDataFormat.RAW,
                 KafkaDataFormat.RAW);
     }
@@ -225,7 +202,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             RpcGatewayService service,
             TabletServerGateway gateway,
             AdminGateway adminGateway,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat) {
         this(
@@ -233,7 +209,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer(service),
-                kafkaDatabase,
                 defaultKeyFormat,
                 defaultValueFormat);
     }
@@ -246,7 +221,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat) {
         this(
@@ -254,7 +228,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer,
-                kafkaDatabase,
                 defaultKeyFormat,
                 defaultValueFormat,
                 KafkaProduceMetrics.noOp());
@@ -265,7 +238,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat,
             KafkaProduceMetrics produceMetrics) {
@@ -274,7 +246,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer,
-                kafkaDatabase,
                 defaultKeyFormat,
                 defaultValueFormat,
                 produceMetrics,
@@ -286,7 +257,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat,
             KafkaProduceMetrics produceMetrics,
@@ -296,7 +266,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer,
-                kafkaDatabase,
                 defaultKeyFormat,
                 defaultValueFormat,
                 produceMetrics,
@@ -311,7 +280,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat,
             KafkaProduceMetrics produceMetrics,
@@ -324,7 +292,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer,
-                kafkaDatabase,
                 defaultKeyFormat,
                 defaultValueFormat,
                 produceMetrics,
@@ -341,7 +308,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat,
             KafkaProduceMetrics produceMetrics,
@@ -356,7 +322,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                 gateway,
                 adminGateway,
                 adminOperationAuthorizer,
-                kafkaDatabase,
                 defaultKeyFormat,
                 defaultValueFormat,
                 produceMetrics,
@@ -374,7 +339,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             TabletServerGateway gateway,
             AdminGateway adminGateway,
             AdminOperationAuthorizer adminOperationAuthorizer,
-            String kafkaDatabase,
             KafkaDataFormat defaultKeyFormat,
             KafkaDataFormat defaultValueFormat,
             KafkaProduceMetrics produceMetrics,
@@ -389,7 +353,6 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         checkNotNull(gateway);
         checkNotNull(adminGateway);
         checkNotNull(adminOperationAuthorizer);
-        checkNotNull(kafkaDatabase);
         checkNotNull(defaultKeyFormat);
         checkNotNull(defaultValueFormat);
         this.produceMetrics = checkNotNull(produceMetrics);
@@ -398,14 +361,12 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         registry.register(new SaslHandshakeHandler());
         registry.register(new SaslAuthenticateHandler());
         registry.register(
-                new MetadataHandler(
-                        new GatewayKafkaMetadataBackend(service, gateway, kafkaDatabase), true));
+                new MetadataHandler(new GatewayKafkaMetadataBackend(service, gateway), true));
         registry.register(
                 new ProduceHandler(
                         new GatewayKafkaProduceBackend(
                                 service,
                                 gateway,
-                                kafkaDatabase,
                                 checkNotNull(transcoder),
                                 produceMetrics,
                                 checkNotNull(conversionExecutor),
@@ -416,8 +377,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                         maxCopiedBytesPerRequest,
                         maxCopiedBytesPerRecord));
         GatewayKafkaTopicAdminBackend topicAdminBackend =
-                new GatewayKafkaTopicAdminBackend(
-                        service, adminGateway, adminOperationAuthorizer, kafkaDatabase);
+                new GatewayKafkaTopicAdminBackend(service, adminGateway, adminOperationAuthorizer);
         registry.register(
                 new CreateTopicsHandler(topicAdminBackend, defaultKeyFormat, defaultValueFormat));
         registry.register(new DeleteTopicsHandler(topicAdminBackend));

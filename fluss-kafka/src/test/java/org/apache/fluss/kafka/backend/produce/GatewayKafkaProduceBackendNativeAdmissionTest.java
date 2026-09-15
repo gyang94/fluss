@@ -165,7 +165,6 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         gateway,
-                        "kafka",
                         new FixedSizeTranscoder(100),
                         KafkaProduceMetrics.noOp(),
                         Runnable::run,
@@ -393,7 +392,6 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         gateway,
-                        "kafka",
                         new FixedSizeTranscoder(100),
                         KafkaProduceMetrics.noOp(),
                         Runnable::run,
@@ -445,7 +443,6 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         gateway,
-                        "kafka",
                         transcoder,
                         KafkaProduceMetrics.noOp(),
                         conversionExecutor,
@@ -853,7 +850,6 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
         return new GatewayKafkaProduceBackend(
                 service,
                 gateway,
-                "kafka",
                 transcoder,
                 KafkaProduceMetrics.noOp(),
                 Runnable::run,
@@ -892,7 +888,7 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
     private static TopicWrite topic(String topicName, int valueBytes) {
         Record record = new Record(1L, null, new byte[valueBytes], Collections.emptyList());
         return new TopicWrite(
-                topicName,
+                "kafka." + topicName,
                 Collections.singletonList(
                         new PartitionWrite(0, Collections.singletonList(record))));
     }
@@ -901,7 +897,7 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
         Record first = new Record(1L, null, new byte[5], Collections.emptyList());
         Record second = new Record(2L, null, new byte[5], Collections.emptyList());
         return new TopicWrite(
-                topicName,
+                "kafka." + topicName,
                 java.util.Arrays.asList(
                         new PartitionWrite(0, Collections.singletonList(first)),
                         new PartitionWrite(1, Collections.singletonList(second))));

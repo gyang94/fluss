@@ -28,6 +28,7 @@ import org.apache.fluss.kafka.backend.metadata.KafkaMetadataQuery;
 import org.apache.fluss.kafka.backend.metadata.KafkaMetadataQuery.TopicReference;
 import org.apache.fluss.kafka.dispatcher.KafkaApiHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.internals.Topic;
@@ -87,7 +88,7 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
         List<KafkaClusterMetadata.Topic> invalidTopics = new ArrayList<>();
         if (!request.isAllTopics()) {
             for (MetadataRequestTopic topic : request.data().topics()) {
-                if (topic.name() != null && !Topic.isValid(topic.name())) {
+                if (topic.name() != null && !KafkaTopicMapper.isValidTopic(topic.name())) {
                     invalidTopics.add(
                             new KafkaClusterMetadata.Topic(
                                     topic.name(),

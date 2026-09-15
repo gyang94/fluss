@@ -81,8 +81,7 @@ class GatewayKafkaProduceBackendDelayedActionsTest {
                 .tryCompleteActions();
 
         GatewayKafkaProduceBackend backend =
-                new GatewayKafkaProduceBackend(
-                        service, gateway, "kafka", new ArrowKafkaRecordTranscoder());
+                new GatewayKafkaProduceBackend(service, gateway, new ArrowKafkaRecordTranscoder());
         CompletableFuture<KafkaProduceResult> resultFuture = backend.write(command());
 
         assertThat(resultFuture).isNotDone();
@@ -109,8 +108,7 @@ class GatewayKafkaProduceBackendDelayedActionsTest {
                 .thenThrow(new RuntimeException("synchronous submission failure"));
 
         KafkaProduceResult result =
-                new GatewayKafkaProduceBackend(
-                                service, gateway, "kafka", new ArrowKafkaRecordTranscoder())
+                new GatewayKafkaProduceBackend(service, gateway, new ArrowKafkaRecordTranscoder())
                         .write(command())
                         .join();
 
@@ -164,8 +162,7 @@ class GatewayKafkaProduceBackendDelayedActionsTest {
         when(gateway.getTableInfo(any(GetTableInfoRequest.class))).thenReturn(failedLookup);
 
         KafkaProduceResult result =
-                new GatewayKafkaProduceBackend(
-                                service, gateway, "kafka", new ArrowKafkaRecordTranscoder())
+                new GatewayKafkaProduceBackend(service, gateway, new ArrowKafkaRecordTranscoder())
                         .write(command(8))
                         .join();
 
@@ -194,8 +191,7 @@ class GatewayKafkaProduceBackendDelayedActionsTest {
                 command(Arrays.asList(topic("first", 8), topic("second", 1)), requestBytes);
 
         CompletableFuture<KafkaProduceResult> resultFuture =
-                new GatewayKafkaProduceBackend(
-                                service, gateway, "kafka", new ArrowKafkaRecordTranscoder())
+                new GatewayKafkaProduceBackend(service, gateway, new ArrowKafkaRecordTranscoder())
                         .write(command);
 
         assertThat(resultFuture).isNotDone();
@@ -219,9 +215,7 @@ class GatewayKafkaProduceBackendDelayedActionsTest {
         when(gateway.getTableInfo(any(GetTableInfoRequest.class)))
                 .thenReturn(CompletableFuture.completedFuture(tableInfoResponse()));
 
-        new GatewayKafkaProduceBackend(service, gateway, "kafka", transcoder)
-                .write(command())
-                .join();
+        new GatewayKafkaProduceBackend(service, gateway, transcoder).write(command()).join();
 
         verify(gateway, never()).produceLog(any(ProduceLogRequest.class));
         verify(service, never()).tryCompleteActions();
@@ -259,7 +253,7 @@ class GatewayKafkaProduceBackendDelayedActionsTest {
                             Collections.emptyList());
             partitions.add(new PartitionWrite(partitionId, Collections.singletonList(record)));
         }
-        return new TopicWrite(topicName, partitions);
+        return new TopicWrite("kafka." + topicName, partitions);
     }
 
     private static String repeat(String value, int repetitions) {
