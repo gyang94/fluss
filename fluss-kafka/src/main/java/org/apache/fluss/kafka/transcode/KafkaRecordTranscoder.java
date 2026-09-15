@@ -23,6 +23,7 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.bytesview.BytesView;
 
 import java.util.List;
+import java.util.Map;
 
 /** Converts copied Kafka records into the native Fluss log representation. */
 @Internal
@@ -58,6 +59,15 @@ public interface KafkaRecordTranscoder {
      */
     default BytesView transcode(List<Record> records, TableInfo tableInfo) throws Exception {
         return transcode(records, prepare(tableInfo));
+    }
+
+    /** Encodes primary-key rows, grouped by their native hash bucket. */
+    default Map<Integer, BytesView> transcodePrimaryKey(
+            List<Record> records,
+            KafkaTopicWritePlan writePlan,
+            KafkaOutputMemoryBudget outputMemoryBudget)
+            throws Exception {
+        throw new UnsupportedOperationException("Primary-key conversion is not available.");
     }
 
     /** Invalidates a compiled plan when an authoritative metadata notification is available. */

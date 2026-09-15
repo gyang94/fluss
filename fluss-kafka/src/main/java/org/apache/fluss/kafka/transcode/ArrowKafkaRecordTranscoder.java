@@ -33,6 +33,7 @@ import org.apache.fluss.row.GenericRow;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -203,6 +204,15 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     }
 
     @Override
+    public Map<Integer, BytesView> transcodePrimaryKey(
+            List<Record> records,
+            KafkaTopicWritePlan writePlan,
+            KafkaOutputMemoryBudget outputMemoryBudget)
+            throws Exception {
+        return new FlussKvRecordEncoder().encode(records, writePlan, outputMemoryBudget);
+    }
+
+    @Override
     public void invalidate(TableInfo tableInfo) {
         writePlanCache.invalidate(checkNotNull(tableInfo));
     }
@@ -266,7 +276,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         }
     }
 
-    private static long estimateDecodeTransientBytes(Record record, KafkaTopicWritePlan writePlan) {
+    static long estimateDecodeTransientBytes(Record record, KafkaTopicWritePlan writePlan) {
         long bytes =
                 saturatedAdd(
                         ROW_FIXED_TRANSIENT_BYTES,

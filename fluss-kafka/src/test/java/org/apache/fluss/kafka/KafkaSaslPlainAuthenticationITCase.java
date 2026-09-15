@@ -57,6 +57,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -125,16 +127,20 @@ public class KafkaSaslPlainAuthenticationITCase {
         }
     }
 
-    @Test
-    public void testCrossDatabaseMetadataWritesAndPermissions() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCrossDatabaseMetadataWritesAndPermissions(boolean primaryKey) throws Exception {
         flussAdmin.createDatabase(SECOND_DATABASE, DatabaseDescriptor.EMPTY, true).get();
+        Schema.Builder schema =
+                Schema.newBuilder()
+                        .column("record_key", DataTypes.BYTES())
+                        .column("payload", DataTypes.BYTES());
+        if (primaryKey) {
+            schema.primaryKey("record_key");
+        }
         TableDescriptor descriptor =
                 TableDescriptor.builder()
-                        .schema(
-                                Schema.newBuilder()
-                                        .column("record_key", DataTypes.BYTES())
-                                        .column("payload", DataTypes.BYTES())
-                                        .build())
+                        .schema(schema.build())
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
                         .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "raw")
@@ -176,7 +182,7 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 producer.send(new ProducerRecord<>(first.toString(), KEY, VALUE))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
-                        .isZero();
+                        .isEqualTo(primaryKey ? -1L : 0L);
                 assertThatThrownBy(
                                 () ->
                                         producer.send(
@@ -193,7 +199,7 @@ public class KafkaSaslPlainAuthenticationITCase {
                                                         second.toString(), KEY, secondValue))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
-                        .isZero();
+                        .isEqualTo(primaryKey ? -1L : 0L);
             }
             assertFlussRecord(first, VALUE);
             assertFlussRecord(second, secondValue);

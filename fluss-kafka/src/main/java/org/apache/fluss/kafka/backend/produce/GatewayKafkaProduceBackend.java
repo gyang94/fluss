@@ -41,12 +41,16 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.rpc.RpcGatewayService;
+import org.apache.fluss.rpc.gateway.RoutedKvGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
+import org.apache.fluss.rpc.messages.PbPutKvRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.rpc.messages.PutKvRequest;
+import org.apache.fluss.rpc.messages.PutKvResponse;
 import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
 
@@ -429,6 +433,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             TableInfo tableInfo,
             NativeLeaseScope leaseScope) {
         leaseScope.checkpoint();
+        if (tableInfo.hasPrimaryKey()) {
+            return producePrimaryKeyTopic(command, topic, tableInfo, leaseScope);
+        }
         ProduceLogRequest request =
                 new ProduceLogRequest()
                         .setTableId(tableInfo.getTableId())
@@ -504,6 +511,183 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 response -> {
                     return toTopicResult(command, topic, response, localFailures);
                 });
+    }
+
+    private CompletableFuture<TopicResult> producePrimaryKeyTopic(
+            KafkaProduceCommand command,
+            TopicWrite topic,
+            TableInfo tableInfo,
+            NativeLeaseScope leaseScope) {
+        if (!(gateway instanceof RoutedKvGateway)) {
+            throw new KafkaTopicSchemaException(
+                    "The tablet gateway cannot route primary-key writes.");
+        }
+        KafkaTopicWritePlan writePlan = transcoder.prepare(tableInfo);
+        Session session =
+                new Session(
+                        (short) 0,
+                        command.listenerName(),
+                        false,
+                        command.clientAddress(),
+                        command.principal());
+        RoutedKvGateway.Route route =
+                ((RoutedKvGateway) gateway)
+                        .prepareKvWrite(tableInfo.getTablePath(), tableInfo.getTableId(), session);
+
+        TopicOutputMemoryBudget budget =
+                new TopicOutputMemoryBudget(leaseScope, topic.estimatedConvertedBytes());
+        Map<Integer, PutKvRequest> requests = new java.util.LinkedHashMap<>();
+        Map<Integer, PartitionResult> results = new HashMap<>();
+        List<BytesView> retainedRecords = new ArrayList<>();
+        for (PartitionWrite partition : topic.partitions()) {
+            try {
+                Map<Integer, BytesView> buckets =
+                        transcoder.transcodePrimaryKey(
+                                topic.copiedRecords(partition), writePlan, budget);
+                PutKvRequest request =
+                        new PutKvRequest()
+                                .setTableId(tableInfo.getTableId())
+                                .setAcks(command.acks())
+                                .setTimeoutMs(command.timeoutMs());
+                for (Map.Entry<Integer, BytesView> bucket : buckets.entrySet()) {
+                    retainedRecords.add(bucket.getValue());
+                    request.addBucketsReq()
+                            .setBucketId(bucket.getKey())
+                            .setRecordsBytesView(bucket.getValue());
+                }
+                requests.put(partition.partitionId(), request);
+            } catch (RequestTooLargeException
+                    | AdmissionUnavailableException
+                    | CancellationException failure) {
+                throw failure;
+            } catch (Exception failure) {
+                results.put(
+                        partition.partitionId(),
+                        failedPartition(command, partition.partitionId(), failure));
+            } finally {
+                topic.releaseCopiedRecords(partition);
+                budget.releaseSource(partition.estimatedCopiedRecordBytes());
+            }
+        }
+        budget.completeConversion();
+        if (requests.isEmpty()) {
+            return CompletableFuture.completedFuture(primaryKeyTopicResult(topic, results));
+        }
+        if (!leaseScope.tryMarkSubmitted()) {
+            throw new CancellationException("Kafka connection closed before native KV submission.");
+        }
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(command.timeoutMs());
+        long submitStarted = produceMetrics.nowNanos();
+        CompletableFuture<Void> original = CompletableFuture.completedFuture(null);
+        for (Map.Entry<Integer, PutKvRequest> entry : requests.entrySet()) {
+            original =
+                    original.thenCompose(
+                            ignored -> {
+                                long remainingMillis =
+                                        TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime());
+                                if (remainingMillis <= 0) {
+                                    results.put(
+                                            entry.getKey(),
+                                            new PartitionResult(
+                                                    entry.getKey(),
+                                                    Errors.REQUEST_TIMED_OUT,
+                                                    -1L,
+                                                    "Primary-key write timed out before native submission."));
+                                    return CompletableFuture.completedFuture(null);
+                                }
+                                PutKvRequest request = entry.getValue();
+                                request.setTimeoutMs(
+                                        (int) Math.min(Integer.MAX_VALUE, remainingMillis));
+                                try {
+                                    return route.write(request)
+                                            .handle(
+                                                    (response, failure) -> {
+                                                        results.put(
+                                                                entry.getKey(),
+                                                                failure == null
+                                                                        ? primaryKeyPartitionResult(
+                                                                                command,
+                                                                                entry.getKey(),
+                                                                                request,
+                                                                                response)
+                                                                        : failedPartition(
+                                                                                command,
+                                                                                entry.getKey(),
+                                                                                failure));
+                                                        return (Void) null;
+                                                    });
+                                } catch (Throwable failure) {
+                                    results.put(
+                                            entry.getKey(),
+                                            failedPartition(command, entry.getKey(), failure));
+                                    return CompletableFuture.completedFuture(null);
+                                }
+                            });
+        }
+        leaseScope.handOffToOriginalFuture(
+                original,
+                retainedRecords,
+                () -> {
+                    for (PutKvRequest request : requests.values()) {
+                        for (int index = 0; index < request.getBucketsReqsCount(); index++) {
+                            request.getBucketsReqAt(index).clearRecords();
+                        }
+                    }
+                });
+        runPostSubmitMaintenance(submitStarted);
+        if (command.acks() == -1) {
+            long started = produceMetrics.nowNanos();
+            original.whenComplete(
+                    (ignored, failure) ->
+                            recordMetricsBestEffort(() -> produceMetrics.recordAcksWait(started)));
+        }
+        return original.thenApply(ignored -> primaryKeyTopicResult(topic, results));
+    }
+
+    private static TopicResult primaryKeyTopicResult(
+            TopicWrite topic, Map<Integer, PartitionResult> results) {
+        List<PartitionResult> ordered = new ArrayList<>();
+        for (PartitionWrite partition : topic.partitions()) {
+            ordered.add(results.get(partition.partitionId()));
+        }
+        return new TopicResult(topic.topicName(), ordered);
+    }
+
+    private static PartitionResult primaryKeyPartitionResult(
+            KafkaProduceCommand command,
+            int partition,
+            PutKvRequest request,
+            PutKvResponse response) {
+        Map<Integer, PbPutKvRespForBucket> buckets = new HashMap<>();
+        for (PbPutKvRespForBucket bucket : response.getBucketsRespsList()) {
+            buckets.put(bucket.getBucketId(), bucket);
+        }
+        for (int index = 0; index < request.getBucketsReqsCount(); index++) {
+            PbPutKvRespForBucket bucket = buckets.get(request.getBucketsReqAt(index).getBucketId());
+            if (bucket == null) {
+                return new PartitionResult(
+                        partition,
+                        Errors.UNKNOWN_SERVER_ERROR,
+                        -1L,
+                        "Native KV response omitted a requested bucket.");
+            }
+            if (bucket.hasErrorCode()) {
+                Errors error =
+                        toKafkaError(
+                                org.apache.fluss.rpc.protocol.Errors.forCode(
+                                        bucket.getErrorCode()));
+                if (error != Errors.NONE) {
+                    return new PartitionResult(
+                            partition,
+                            error,
+                            -1L,
+                            command.limitErrorMessage(
+                                    bucket.hasErrorMessage() ? bucket.getErrorMessage() : null));
+                }
+            }
+        }
+        // A Kafka partition may span native buckets; no single contiguous Kafka offset exists.
+        return new PartitionResult(partition, Errors.NONE, -1L, null);
     }
 
     private BytesView transcodePartition(
@@ -856,7 +1040,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         }
 
         private void handOffToOriginalFuture(
-                CompletableFuture<ProduceLogResponse> produceFuture,
+                CompletableFuture<?> produceFuture,
                 List<BytesView> retainedRecords,
                 Runnable releaseNativeRequestPayload) {
             if (!originalFutureOwnsLease.compareAndSet(false, true)) {
@@ -950,7 +1134,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         }
 
         private @Nullable ScheduledFuture<?> scheduleCompletionGrace(
-                CompletableFuture<ProduceLogResponse> produceFuture) {
+                CompletableFuture<?> produceFuture) {
             if (lease == null || scheduler == null) {
                 return null;
             }

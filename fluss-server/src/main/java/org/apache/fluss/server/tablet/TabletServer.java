@@ -325,7 +325,8 @@ public class TabletServer extends ServerBase {
                             replicaStateChangeExecutor,
                             scannerManager,
                             coordinatorGateway,
-                            interListenerName);
+                            interListenerName,
+                            rpcClient);
 
             RequestsMetrics requestsMetrics =
                     RequestsMetrics.createTabletServerRequestMetrics(tabletServerMetricGroup);

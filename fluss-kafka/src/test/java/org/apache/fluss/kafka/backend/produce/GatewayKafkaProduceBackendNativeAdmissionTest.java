@@ -34,21 +34,28 @@ import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.bytesview.ByteBufBytesView;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.rpc.RpcGatewayService;
+import org.apache.fluss.rpc.gateway.RoutedKvGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
+import org.apache.fluss.rpc.messages.PbPutKvRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.rpc.messages.PutKvRequest;
+import org.apache.fluss.rpc.messages.PutKvResponse;
+import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.common.protocol.Errors;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -68,15 +75,99 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /** Lifecycle tests for converted/native Kafka Produce admission. */
 class GatewayKafkaProduceBackendNativeAdmissionTest {
+
+    @Test
+    void testPrimaryKeySequenceRetainsAdmissionAndBuffersUntilAllWritesComplete() {
+        TopicWrite topic = twoPartitionTopic("orders");
+        KafkaNativeProduceAdmissionController controller = controller(1, 30_000);
+        ConnectionHandle connection = controller.registerConnection();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        RpcGatewayService service = mock(RpcGatewayService.class);
+        TabletServerGateway gateway =
+                mock(
+                        TabletServerGateway.class,
+                        withSettings().extraInterfaces(RoutedKvGateway.class));
+        RoutedKvGateway.Route route = mock(RoutedKvGateway.Route.class);
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("payload", DataTypes.BYTES())
+                                        .primaryKey("payload")
+                                        .build())
+                        .distributedBy(1)
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                        .build();
+        GetTableInfoResponse info = tableInfoResponse().setTableJson(descriptor.toJsonBytes());
+        when(gateway.getTableInfo(any(GetTableInfoRequest.class)))
+                .thenReturn(CompletableFuture.completedFuture(info));
+        when(((RoutedKvGateway) gateway)
+                        .prepareKvWrite(any(TablePath.class), eq(12L), any(Session.class)))
+                .thenReturn(route);
+        CompletableFuture<PutKvResponse> first = new CompletableFuture<>();
+        CompletableFuture<PutKvResponse> second = new CompletableFuture<>();
+        when(route.write(any(PutKvRequest.class))).thenReturn(first, second);
+        GatewayKafkaProduceBackend backend =
+                backend(
+                        service,
+                        gateway,
+                        new ArrowKafkaRecordTranscoder(),
+                        Duration.ofSeconds(1),
+                        Duration.ofMinutes(1));
+        try {
+            CompletableFuture<KafkaProduceResult> result =
+                    backend.write(command((short) -1, connection, scheduler, topic));
+            assertThat(result).isNotDone();
+            verify(route, times(1)).write(any(PutKvRequest.class));
+            connection.close();
+            assertThat(controller.inFlightRequests()).isOne();
+            assertThat(controller.convertedBytes()).isGreaterThan(0);
+            first.complete(
+                    new PutKvResponse()
+                            .addAllBucketsResps(
+                                    Collections.singletonList(
+                                            new PbPutKvRespForBucket().setBucketId(0))));
+            ArgumentCaptor<PutKvRequest> requests = ArgumentCaptor.forClass(PutKvRequest.class);
+            verify(route, times(2)).write(requests.capture());
+            assertThat(result).isNotDone();
+            assertThat(controller.inFlightRequests()).isOne();
+            assertThat(requests.getAllValues())
+                    .allSatisfy(
+                            request ->
+                                    assertThat(request.getBucketsReqAt(0).hasRecords()).isTrue());
+            PbPutKvRespForBucket failure = new PbPutKvRespForBucket().setBucketId(0);
+            failure.setError(
+                    org.apache.fluss.rpc.protocol.Errors.AUTHORIZATION_EXCEPTION.code(), "denied");
+            second.complete(
+                    new PutKvResponse().addAllBucketsResps(Collections.singletonList(failure)));
+            assertThat(result.join().topics().get(0).partitions())
+                    .extracting(KafkaProduceResult.PartitionResult::error)
+                    .containsExactly(Errors.NONE, Errors.TOPIC_AUTHORIZATION_FAILED);
+            assertThat(requests.getAllValues())
+                    .allSatisfy(
+                            request ->
+                                    assertThat(request.getBucketsReqAt(0).hasRecords()).isFalse());
+            assertThat(controller.inFlightRequests()).isZero();
+            assertThat(controller.totalReservedBytes()).isZero();
+            verify(gateway, never()).produceLog(any(ProduceLogRequest.class));
+        } finally {
+            connection.close();
+            controller.close();
+            scheduler.shutdownNow();
+        }
+    }
 
     @Test
     void testDisconnectAfterSubmitRetainsLeaseUntilOriginalFutureCompletes() {

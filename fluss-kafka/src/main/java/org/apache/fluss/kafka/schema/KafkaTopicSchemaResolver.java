@@ -132,13 +132,20 @@ public final class KafkaTopicSchemaResolver {
     }
 
     private static void validateTableKind(TableInfo tableInfo) {
-        if (tableInfo.hasPrimaryKey()) {
-            throw invalid("Kafka topic table must be a log table.");
+        if (tableInfo.hasPrimaryKey()
+                && tableInfo.getTableConfig().getMergeEngineType().isPresent()) {
+            throw invalid(
+                    "Kafka primary-key writes require overwrite semantics; merge tables are not supported.");
+        }
+        if (tableInfo.hasPrimaryKey()
+                && !tableInfo.getSchema().getAutoIncrementColumnNames().isEmpty()) {
+            throw invalid("Kafka primary-key writes do not support auto-increment columns.");
         }
         if (tableInfo.isPartitioned()) {
             throw invalid("Partitioned Fluss tables are not supported.");
         }
-        if (tableInfo.getTableConfig().getLogFormat() != LogFormat.ARROW) {
+        if (!tableInfo.hasPrimaryKey()
+                && tableInfo.getTableConfig().getLogFormat() != LogFormat.ARROW) {
             throw invalid("Kafka topic table must use the Arrow log format.");
         }
     }

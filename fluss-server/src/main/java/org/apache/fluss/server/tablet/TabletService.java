@@ -34,6 +34,7 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.DefaultValueRecordBatch;
 import org.apache.fluss.record.KvRecordBatch;
 import org.apache.fluss.record.MemoryLogRecords;
+import org.apache.fluss.rpc.RpcClient;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.entity.LookupResultForBucket;
 import org.apache.fluss.rpc.entity.PrefixLookupResultForBucket;
@@ -44,6 +45,7 @@ import org.apache.fluss.rpc.entity.TableStatsResultForBucket;
 import org.apache.fluss.rpc.gateway.AdminGatewayProvider;
 import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.gateway.CoordinatorGateway;
+import org.apache.fluss.rpc.gateway.RoutedKvGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.FetchLogRequest;
 import org.apache.fluss.rpc.messages.FetchLogResponse;
@@ -71,6 +73,7 @@ import org.apache.fluss.rpc.messages.NotifyRemoteLogOffsetsRequest;
 import org.apache.fluss.rpc.messages.NotifyRemoteLogOffsetsResponse;
 import org.apache.fluss.rpc.messages.PbFetchLogReqForTable;
 import org.apache.fluss.rpc.messages.PbScanReqForBucket;
+import org.apache.fluss.rpc.messages.PbTablePath;
 import org.apache.fluss.rpc.messages.PrefixLookupRequest;
 import org.apache.fluss.rpc.messages.PrefixLookupResponse;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
@@ -123,6 +126,7 @@ import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -174,9 +178,13 @@ import static org.apache.fluss.server.utils.ServerRpcMessageUtils.toPutKvDataFor
 
 /** An RPC Gateway service for tablet server. */
 public final class TabletService extends RpcServiceBase
-        implements TabletServerGateway, AdminGatewayProvider, AdminOperationAuthorizer {
+        implements TabletServerGateway,
+                AdminGatewayProvider,
+                AdminOperationAuthorizer,
+                RoutedKvGateway {
 
     private final String serviceName;
+    private final KvWriteRouter kvWriteRouter;
     private final ReplicaManager replicaManager;
     private final TabletServerMetadataCache metadataCache;
     private final TabletServerMetadataProvider metadataFunctionProvider;
@@ -198,7 +206,8 @@ public final class TabletService extends RpcServiceBase
             ExecutorService replicaStateChangeExecutor,
             ScannerManager scannerManager,
             CoordinatorGateway coordinatorGateway,
-            String interListenerName) {
+            String interListenerName,
+            RpcClient rpcClient) {
         super(
                 remoteFileSystem,
                 ServerType.TABLET_SERVER,
@@ -208,6 +217,7 @@ public final class TabletService extends RpcServiceBase
                 dynamicConfigManager,
                 ioExecutor);
         this.serviceName = "server-" + serverId;
+        this.kvWriteRouter = new KvWriteRouter(rpcClient);
         this.replicaManager = replicaManager;
         this.metadataCache = metadataCache;
         this.metadataFunctionProvider =
@@ -398,6 +408,31 @@ public final class TabletService extends RpcServiceBase
         }
 
         return fetchParams;
+    }
+
+    @Override
+    public RoutedKvGateway.Route prepareKvWrite(
+            TablePath tablePath, long tableId, Session session) {
+        // The forwarded RPC uses the server identity, so authorize the external principal here.
+        authorize(
+                session,
+                WRITE,
+                Resource.table(tablePath.getDatabaseName(), tablePath.getTableName()));
+        MetadataRequest metadataRequest = new MetadataRequest();
+        metadataRequest.addAllTablePaths(
+                Collections.singletonList(
+                        new PbTablePath()
+                                .setDatabaseName(tablePath.getDatabaseName())
+                                .setTableName(tablePath.getTableName())));
+        MetadataResponse metadata =
+                processMetadataRequest(
+                        metadataRequest,
+                        interListenerName,
+                        session,
+                        authorizer,
+                        metadataCache,
+                        metadataFunctionProvider);
+        return kvWriteRouter.prepare(tableId, metadata);
     }
 
     @Override
