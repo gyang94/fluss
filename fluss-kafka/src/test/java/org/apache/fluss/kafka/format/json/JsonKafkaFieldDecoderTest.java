@@ -310,7 +310,7 @@ public class JsonKafkaFieldDecoderTest {
     }
 
     @Test
-    public void testRejectsExplicitNonNullRescueColumnAndKeepsTypeChecksStrict() {
+    public void testRejectsExplicitNonNullRescueColumnAndRescuesNullableTypeMismatch() {
         RowType rowType =
                 DataTypes.ROW(
                         DataTypes.FIELD("id", DataTypes.BIGINT()),
@@ -320,9 +320,99 @@ public class JsonKafkaFieldDecoderTest {
         assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":1,\"kafka_rescue\":\"supplied\"}")))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("configured rescue column is reserved");
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":\"not-a-number\"}")))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining("expected a JSON integer");
+        Object[] values = decoder.decode(bytes("{\"id\":\"not-a-number\"}"));
+        assertThat(values[0]).isNull();
+        assertThat(values[1].toString()).isEqualTo("{\"id\":\"not-a-number\"}");
+    }
+
+    @Test
+    public void testRescuesNestedTypesAlongsideUnknownFields() {
+        RowType nested = DataTypes.ROW(DataTypes.FIELD("n", DataTypes.INT()));
+        RowType schema =
+                DataTypes.ROW(
+                        DataTypes.FIELD("rescue", DataTypes.STRING()),
+                        DataTypes.FIELD("row", nested),
+                        DataTypes.FIELD("items", DataTypes.ARRAY(nested)),
+                        DataTypes.FIELD("map", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())));
+        JsonKafkaFieldDecoder decoder = rescueDecoder(schema, "rescue");
+        Object[] values =
+                decoder.decode(
+                        bytes(
+                                "{\"row\":{\"n\":\"bad\",\"unknown\":1},"
+                                        + "\"items\":[{\"n\":2},{\"n\":false,\"extra\":3},\"bad-row\"],"
+                                        + "\"map\":{\"good\":3,\"bad\":true},\"extra\":4}"));
+        assertThat(((GenericRow) values[1]).isNullAt(0)).isTrue();
+        GenericArray items = (GenericArray) values[2];
+        assertThat(items.getRow(0, 1).getInt(0)).isEqualTo(2);
+        assertThat(items.getRow(1, 1).isNullAt(0)).isTrue();
+        assertThat(items.isNullAt(2)).isTrue();
+        assertThat(((GenericMap) values[3]).get(BinaryString.fromString("good"))).isEqualTo(3);
+        assertThat(((GenericMap) values[3]).get(BinaryString.fromString("bad"))).isNull();
+        assertThat(values[0].toString())
+                .isEqualTo(
+                        "{\"extra\":4,\"row\":{\"unknown\":1,\"n\":\"bad\"},"
+                                + "\"items\":[null,{\"extra\":3,\"n\":false},\"bad-row\"],"
+                                + "\"map\":{\"bad\":true}}");
+        assertThat(decoder.decode(bytes("{\"row\":{\"n\":1},\"items\":[],\"map\":{}}"))[0])
+                .isNull();
+    }
+
+    @Test
+    public void testNullableParentsCannotRescueNotNullDescendants() {
+        DataType required = DataTypes.INT().copy(false);
+        JsonKafkaFieldDecoder decoder =
+                rescueDecoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("rescue", DataTypes.STRING()),
+                                DataTypes.FIELD(
+                                        "row", DataTypes.ROW(DataTypes.FIELD("n", required))),
+                                DataTypes.FIELD("array", DataTypes.ARRAY(required)),
+                                DataTypes.FIELD(
+                                        "map", DataTypes.MAP(DataTypes.STRING(), required))),
+                        "rescue");
+        for (String json :
+                new String[] {
+                    "{\"row\":{\"n\":\"bad\"}}", "{\"row\":{}}",
+                    "{\"array\":[\"bad\"]}", "{\"array\":[null]}",
+                    "{\"map\":{\"n\":false}}", "{\"map\":{\"n\":null}}"
+                }) {
+            assertThatThrownBy(() -> decoder.decode(bytes(json)))
+                    .isInstanceOf(KafkaRecordEncodingException.class);
+        }
+    }
+
+    @Test
+    public void testRescuesOverflowAndInvalidScalarEncodings() {
+        JsonKafkaFieldDecoder decoder =
+                rescueDecoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("tiny", DataTypes.TINYINT()),
+                                DataTypes.FIELD("amount", DataTypes.DECIMAL(3, 2)),
+                                DataTypes.FIELD("day", DataTypes.DATE()),
+                                DataTypes.FIELD("binary", DataTypes.BYTES()),
+                                DataTypes.FIELD("rescue", DataTypes.STRING())),
+                        "rescue");
+        String json = "{\"tiny\":1000,\"amount\":100.25,\"day\":\"bad\",\"binary\":\"%%%\"}";
+        Object[] values = decoder.decode(bytes(json));
+        assertThat(values).containsExactly(null, null, null, null, BinaryString.fromString(json));
+    }
+
+    @Test
+    public void testRescueUsesFullMapKeysEvenWhenErrorPathsCollide() {
+        String prefix = new String(new char[200]).replace('\0', 'x');
+        String first = prefix + "a";
+        String second = prefix + "b";
+        JsonKafkaFieldDecoder decoder =
+                rescueDecoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "map", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())),
+                                DataTypes.FIELD("rescue", DataTypes.STRING())),
+                        "rescue");
+        Object[] values =
+                decoder.decode(bytes("{\"map\":{\"" + first + "\":\"bad\",\"" + second + "\":2}}"));
+        assertThat(values[1].toString()).isEqualTo("{\"map\":{\"" + first + "\":\"bad\"}}");
+        assertThat(((GenericMap) values[0]).get(BinaryString.fromString(second))).isEqualTo(2);
     }
 
     @Test
@@ -372,6 +462,15 @@ public class JsonKafkaFieldDecoderTest {
             oversizedArray.append('0');
         }
         oversizedArray.append("]}");
+        JsonKafkaFieldDecoder rescue =
+                rescueDecoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("values", DataTypes.ARRAY(DataTypes.INT())),
+                                DataTypes.FIELD("rescue", DataTypes.STRING())),
+                        "rescue");
+        assertThatThrownBy(() -> rescue.decode(bytes(oversizedArray.toString())))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("maximum element count");
         assertFailure(
                 DataTypes.ROW(DataTypes.FIELD("values", DataTypes.ARRAY(DataTypes.INT()))),
                 oversizedArray.toString(),

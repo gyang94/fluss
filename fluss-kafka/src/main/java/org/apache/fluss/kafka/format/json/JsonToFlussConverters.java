@@ -78,19 +78,32 @@ final class JsonToFlussConverters {
                             + ".");
         }
         final JsonToFlussConverter notNullConverter = createNotNull(dataType, nestingDepth);
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             if (node == null || node.isNull()) {
                 if (!dataType.isNullable()) {
-                    throw invalid(path, dataType, "field is missing or null");
+                    throw new KafkaRecordEncodingException(
+                            invalid(path, dataType, "field is missing or null").getMessage());
                 }
                 return null;
             }
             try {
-                return notNullConverter.convert(node, path);
+                return notNullConverter.convert(node, path, rescue);
+            } catch (ConversionException e) {
+                // A nullable parent must never hide a NOT NULL failure in a descendant.
+                if (rescue != null && dataType.isNullable()) {
+                    rescue.accept(node);
+                    return null;
+                }
+                throw new KafkaRecordEncodingException(e.getMessage(), e.getCause());
             } catch (KafkaRecordEncodingException e) {
                 throw e;
             } catch (RuntimeException e) {
-                throw invalid(path, dataType, "value cannot be converted", e);
+                if (rescue != null && dataType.isNullable()) {
+                    rescue.accept(node);
+                    return null;
+                }
+                throw new KafkaRecordEncodingException(
+                        invalid(path, dataType, "value cannot be converted").getMessage(), e);
             }
         };
     }
@@ -98,12 +111,12 @@ final class JsonToFlussConverters {
     private static JsonToFlussConverter createNotNull(DataType dataType, int nestingDepth) {
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     require(node.isBoolean(), path, dataType, "expected a JSON boolean");
                     return node.booleanValue();
                 };
             case TINYINT:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     long value = integralValue(node, path, dataType);
                     require(
                             value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE,
@@ -113,7 +126,7 @@ final class JsonToFlussConverters {
                     return (byte) value;
                 };
             case SMALLINT:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     long value = integralValue(node, path, dataType);
                     require(
                             value >= Short.MIN_VALUE && value <= Short.MAX_VALUE,
@@ -123,7 +136,7 @@ final class JsonToFlussConverters {
                     return (short) value;
                 };
             case INTEGER:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     long value = integralValue(node, path, dataType);
                     require(
                             value >= Integer.MIN_VALUE && value <= Integer.MAX_VALUE,
@@ -133,9 +146,9 @@ final class JsonToFlussConverters {
                     return (int) value;
                 };
             case BIGINT:
-                return (node, path) -> integralValue(node, path, dataType);
+                return (node, path, rescue) -> integralValue(node, path, dataType);
             case FLOAT:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     require(node.isNumber(), path, dataType, "expected a JSON number");
                     double doubleValue = node.doubleValue();
                     float value = (float) doubleValue;
@@ -147,7 +160,7 @@ final class JsonToFlussConverters {
                     return value;
                 };
             case DOUBLE:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     require(node.isNumber(), path, dataType, "expected a JSON number");
                     double value = node.doubleValue();
                     require(
@@ -162,16 +175,16 @@ final class JsonToFlussConverters {
             case CHAR:
                 return charConverter((CharType) dataType);
             case STRING:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     require(node.isTextual(), path, dataType, "expected a JSON string");
                     return BinaryString.fromString(node.textValue());
                 };
             case BINARY:
                 return binaryConverter((BinaryType) dataType);
             case BYTES:
-                return (node, path) -> decodeBase64(node, path, dataType);
+                return (node, path, rescue) -> decodeBase64(node, path, dataType);
             case DATE:
-                return (node, path) -> {
+                return (node, path, rescue) -> {
                     String value = textualValue(node, path, dataType);
                     try {
                         return Math.toIntExact(LocalDate.parse(value).toEpochDay());
@@ -200,7 +213,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter decimalConverter(DecimalType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             require(node.isNumber(), path, dataType, "expected a JSON number");
             BigDecimal value = node.decimalValue();
             final BigDecimal scaled;
@@ -219,7 +232,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter charConverter(CharType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType);
             int codePoints = value.codePointCount(0, value.length());
             require(
@@ -232,7 +245,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter binaryConverter(BinaryType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             byte[] value = decodeBase64(node, path, dataType);
             require(
                     value.length == dataType.getLength(),
@@ -244,7 +257,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter timeConverter(TimeType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType);
             final LocalTime time;
             try {
@@ -263,7 +276,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter timestampConverter(TimestampType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType);
             final LocalDateTime timestamp;
             try {
@@ -277,7 +290,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter timestampLtzConverter(LocalZonedTimestampType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType);
             final OffsetDateTime timestamp;
             try {
@@ -305,7 +318,7 @@ final class JsonToFlussConverters {
             declaredFieldNames.add(field.getName());
             fieldConverters[i] = create(field.getType(), nestingDepth + 1);
         }
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
             requireContainerSize(node.size(), path, dataType);
             Iterator<String> inputFieldNames = node.fieldNames();
@@ -320,7 +333,12 @@ final class JsonToFlussConverters {
             GenericRow row = new GenericRow(fieldNames.length);
             for (int i = 0; i < fieldNames.length; i++) {
                 String fieldPath = JsonPath.field(path, fieldNames[i]);
-                row.setField(i, fieldConverters[i].convert(node.get(fieldNames[i]), fieldPath));
+                row.setField(
+                        i,
+                        fieldConverters[i].convert(
+                                node.get(fieldNames[i]),
+                                fieldPath,
+                                JsonRescue.field(rescue, fieldNames[i])));
             }
             return row;
         };
@@ -328,12 +346,21 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter arrayConverter(ArrayType dataType, int nestingDepth) {
         JsonToFlussConverter elementConverter = create(dataType.getElementType(), nestingDepth + 1);
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             require(node.isArray(), path, dataType, "expected a JSON array");
             requireContainerSize(node.size(), path, dataType);
+            JsonRescue.ArrayCollector collector =
+                    rescue == null ? null : new JsonRescue.ArrayCollector(rescue, node.size());
             Object[] elements = new Object[node.size()];
             for (int i = 0; i < node.size(); i++) {
-                elements[i] = elementConverter.convert(node.get(i), JsonPath.index(path, i));
+                elements[i] =
+                        elementConverter.convert(
+                                node.get(i),
+                                JsonPath.index(path, i),
+                                collector == null ? null : collector.element(i));
+            }
+            if (collector != null) {
+                collector.finish();
             }
             return new GenericArray(elements);
         };
@@ -347,7 +374,7 @@ final class JsonToFlussConverters {
                             + ".");
         }
         JsonToFlussConverter valueConverter = create(dataType.getValueType(), nestingDepth + 1);
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
             requireContainerSize(node.size(), path, dataType);
             Map<BinaryString, Object> values = new LinkedHashMap<>();
@@ -357,18 +384,23 @@ final class JsonToFlussConverters {
                 values.put(
                         BinaryString.fromString(field.getKey()),
                         valueConverter.convert(
-                                field.getValue(), JsonPath.field(path, field.getKey())));
+                                field.getValue(),
+                                JsonPath.field(path, field.getKey()),
+                                JsonRescue.field(rescue, field.getKey())));
             }
             return new GenericMap(values);
         };
     }
 
     private static void requireContainerSize(int size, String path, DataType dataType) {
-        require(
-                size <= MAX_CONTAINER_ELEMENTS,
-                path,
-                dataType,
-                "container size exceeds " + MAX_CONTAINER_ELEMENTS);
+        if (size > MAX_CONTAINER_ELEMENTS) {
+            // Resource limits are hard failures, even for nullable fields with rescue enabled.
+            throw new KafkaRecordEncodingException(
+                    "Kafka JSON container at "
+                            + path
+                            + " container size exceeds "
+                            + MAX_CONTAINER_ELEMENTS);
+        }
     }
 
     private static long integralValue(JsonNode node, String path, DataType dataType) {
@@ -409,28 +441,29 @@ final class JsonToFlussConverters {
         }
     }
 
-    private static KafkaRecordEncodingException invalid(
-            String path, DataType dataType, String reason) {
-        return new KafkaRecordEncodingException(
-                "Invalid Kafka record value at "
-                        + path
-                        + " for "
-                        + dataType.asSummaryString()
-                        + ": "
-                        + reason
-                        + ".");
+    private static ConversionException invalid(String path, DataType dataType, String reason) {
+        return invalid(path, dataType, reason, null);
     }
 
-    private static KafkaRecordEncodingException invalid(
+    private static ConversionException invalid(
             String path, DataType dataType, String reason, @Nullable Throwable cause) {
-        return new KafkaRecordEncodingException(
-                "Invalid Kafka record value at "
-                        + path
-                        + " for "
-                        + dataType.asSummaryString()
-                        + ": "
-                        + reason
-                        + ".",
-                cause);
+        return new ConversionException(path, dataType, reason, cause);
+    }
+
+    /** A local conversion failure; wrappers turn unrecoverable failures into record errors. */
+    private static final class ConversionException extends RuntimeException {
+
+        private ConversionException(
+                String path, DataType dataType, String reason, @Nullable Throwable cause) {
+            super(
+                    "Invalid Kafka record value at "
+                            + path
+                            + " for "
+                            + dataType.asSummaryString()
+                            + ": "
+                            + reason
+                            + ".",
+                    cause);
+        }
     }
 }

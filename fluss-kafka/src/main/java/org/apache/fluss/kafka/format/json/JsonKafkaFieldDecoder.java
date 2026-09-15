@@ -111,20 +111,33 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             throw new KafkaRecordEncodingException(
                     "Kafka JSON record value must have an object root.");
         }
-        JsonNode rescuedFields = validateAndExtractUnknownFields(root);
-
+        JsonNode unknownFields = validateAndExtractUnknownFields(root);
+        ObjectNode rescuedFields =
+                rescueProjectionPosition < 0
+                        ? null
+                        : unknownFields == null
+                                ? OBJECT_MAPPER.createObjectNode()
+                                : (ObjectNode) unknownFields;
         Object[] values = new Object[projection.size()];
         for (int i = 0; i < projection.size(); i++) {
             if (i == rescueProjectionPosition) {
-                values[i] =
-                        rescuedFields == null
-                                ? null
-                                : BinaryString.fromString(rescuedFields.toString());
                 continue;
             }
             String fieldName = projection.nameAt(i);
-            JsonNode fieldNode = root.get(fieldName);
-            values[i] = converters[i].convert(fieldNode, JsonPath.field(JsonPath.ROOT, fieldName));
+            values[i] =
+                    converters[i].convert(
+                            root.get(fieldName),
+                            JsonPath.field(JsonPath.ROOT, fieldName),
+                            rescuedFields == null
+                                    ? null
+                                    : node ->
+                                            rescuedFields.set(
+                                                    fieldName,
+                                                    JsonRescue.merge(
+                                                            rescuedFields.get(fieldName), node)));
+        }
+        if (rescuedFields != null && !rescuedFields.isEmpty()) {
+            values[rescueProjectionPosition] = BinaryString.fromString(rescuedFields.toString());
         }
         return values;
     }

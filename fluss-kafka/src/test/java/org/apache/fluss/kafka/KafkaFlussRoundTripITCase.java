@@ -256,6 +256,46 @@ public class KafkaFlussRoundTripITCase {
                 "Kafka complex JSON record was not visible through the Fluss LogScanner.");
     }
 
+    @Test
+    public void testJsonTypeRescueIsVisibleThroughNativeScanner() throws Exception {
+        String topic = "json_type_rescue";
+        TablePath path = TablePath.of(DATABASE, topic);
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("rescue", DataTypes.STRING())
+                                        .column("id", DataTypes.INT())
+                                        .column("items", DataTypes.ARRAY(DataTypes.INT()))
+                                        .build())
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .customProperty(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG, "rescue")
+                        .build();
+        flussAdmin.createTable(path, descriptor, false).get();
+        writeKafkaRecord(topic, null, bytes("{\"id\":\"bad\",\"items\":[1,false],\"extra\":2}"));
+        try (Table table = connection.getTable(path);
+                LogScanner scanner = table.newScan().createLogScanner()) {
+            scanner.subscribeFromBeginning(0);
+            for (int attempt = 0; attempt < 30; attempt++) {
+                for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                    InternalRow row = record.getRow();
+                    assertThat(row.isNullAt(1)).isTrue();
+                    assertThat(row.getArray(2).getInt(0)).isEqualTo(1);
+                    assertThat(row.getArray(2).isNullAt(1)).isTrue();
+                    assertThat(row.getString(0).toString())
+                            .isEqualTo("{\"extra\":2,\"id\":\"bad\",\"items\":[null,false]}");
+                    return;
+                }
+            }
+        } finally {
+            flussAdmin.dropTable(path, false).get();
+        }
+        throw new AssertionError(
+                "Rescued Kafka JSON record was not visible through the native scanner.");
+    }
+
     private void testRoundTrip(String topic, Map<String, String> topicConfigs, boolean stringFormat)
             throws Exception {
         Map<String, Object> adminConfig = new HashMap<>();
