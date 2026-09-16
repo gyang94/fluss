@@ -384,6 +384,76 @@ public class KafkaFlussRoundTripITCase {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    public void testCompressedJsonBatchRoundTrip(String codec) throws Exception {
+        TablePath path = TablePath.of(DATABASE, "compressed_" + codec);
+        flussAdmin
+                .createTable(
+                        path,
+                        TableDescriptor.builder()
+                                .schema(
+                                        Schema.newBuilder()
+                                                .column("id", DataTypes.INT().copy(false))
+                                                .column("payload", DataTypes.STRING())
+                                                .build())
+                                .distributedBy(1)
+                                .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                                .build(),
+                        false)
+                .get();
+        Map<String, Object> config = new HashMap<>();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBootstrapServer);
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
+        config.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, codec);
+        config.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 1);
+        config.put(ProducerConfig.LINGER_MS_CONFIG, 100);
+        config.put(ProducerConfig.ACKS_CONFIG, "all");
+        String payload = new String(new char[512]).replace('\0', 'x');
+        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(config)) {
+            List<Future<RecordMetadata>> writes = new ArrayList<>();
+            for (int id = 0; id < 50; id++) {
+                writes.add(
+                        producer.send(
+                                new ProducerRecord<>(
+                                        path.toString(),
+                                        0,
+                                        null,
+                                        bytes(
+                                                "{\"id\":"
+                                                        + id
+                                                        + ",\"payload\":\""
+                                                        + payload
+                                                        + "\"}"))));
+            }
+            producer.flush();
+            for (int id = 0; id < writes.size(); id++) {
+                assertThat(writes.get(id).get(30, TimeUnit.SECONDS).offset()).isEqualTo(id);
+            }
+        }
+        List<Integer> ids = new ArrayList<>();
+        try (Table table = connection.getTable(path);
+                LogScanner scanner = table.newScan().createLogScanner()) {
+            scanner.subscribeFromBeginning(0);
+            for (int attempt = 0; attempt < 30 && ids.size() < 50; attempt++) {
+                for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                    ids.add(record.getRow().getInt(0));
+                    assertThat(record.getRow().getString(1).toString()).isEqualTo(payload);
+                }
+            }
+            assertThat(ids)
+                    .containsExactlyElementsOf(
+                            java.util.stream.IntStream.range(0, 50)
+                                    .boxed()
+                                    .collect(java.util.stream.Collectors.toList()));
+        } finally {
+            flussAdmin.dropTable(path, false).get();
+        }
+    }
+
     private void testRoundTrip(String topic, Map<String, String> topicConfigs, boolean stringFormat)
             throws Exception {
         Map<String, Object> adminConfig = new HashMap<>();

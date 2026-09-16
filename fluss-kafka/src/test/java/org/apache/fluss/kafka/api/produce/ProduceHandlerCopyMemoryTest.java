@@ -32,11 +32,16 @@ import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.DefaultRecordBatch;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.SimpleRecord;
+import org.apache.kafka.common.utils.Crc32C;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.List;
 
@@ -49,10 +54,11 @@ class ProduceHandlerCopyMemoryTest {
 
     private static final short PRODUCE_VERSION = ApiKeys.PRODUCE.latestVersion();
 
-    @Test
-    void testCopiesGzipBatchWithStreamingIterator() {
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    void testCopiesCompressedBatchWithStreamingIterator(String codec) {
         byte[] value = repeatedBytes(32 * 1024);
-        MemoryRecords records = records(Compression.gzip().build(), record(value));
+        MemoryRecords records = records(Compression.of(codec).build(), record(value));
 
         List<Record> copied =
                 ProduceHandler.copyRecordsForTesting(
@@ -63,10 +69,11 @@ class ProduceHandlerCopyMemoryTest {
         assertThat(copied.get(0).borrowedValue()).containsExactly(value);
     }
 
-    @Test
-    void testCompressedTransientReservationIsReleasedAfterCopy() {
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    void testCompressedTransientReservationIsReleasedAfterCopy(String codec) {
         byte[] value = repeatedBytes(32 * 1024);
-        MemoryRecords records = records(Compression.gzip().build(), record(value));
+        MemoryRecords records = records(Compression.of(codec).build(), record(value));
         TrackingLease lease = new TrackingLease();
 
         List<Record> copied =
@@ -94,10 +101,11 @@ class ProduceHandlerCopyMemoryTest {
                 .satisfies(record -> assertThat(record.borrowedValue()).containsExactly(value));
     }
 
-    @Test
-    void testRejectsHighlyCompressedSingleRecordBeforePayloadCopy() {
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    void testRejectsHighlyCompressedSingleRecordBeforePayloadCopy(String codec) {
         MemoryRecords records =
-                records(Compression.gzip().build(), record(repeatedBytes(128 * 1024)));
+                records(Compression.of(codec).build(), record(repeatedBytes(128 * 1024)));
 
         assertThatThrownBy(
                         () ->
@@ -197,21 +205,22 @@ class ProduceHandlerCopyMemoryTest {
         assertThat(controller.liveBytes()).isZero();
     }
 
-    @Test
-    void testRejectsAggregateDecompressedRequestAcrossRecords() {
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    void testRejectsAggregateDecompressedRequestAcrossRecords(String codec) {
         MemoryRecords records =
                 records(
-                        Compression.gzip().build(),
-                        record(repeatedBytes(12 * 1024)),
-                        record(repeatedBytes(12 * 1024)));
+                        Compression.of(codec).build(),
+                        record(repeatedBytes(192 * 1024)),
+                        record(repeatedBytes(192 * 1024)));
 
         assertThatThrownBy(
                         () ->
                                 ProduceHandler.copyRecordsForTesting(
-                                        PRODUCE_VERSION, records, 20 * 1024, 16 * 1024))
+                                        PRODUCE_VERSION, records, 300 * 1024, 256 * 1024))
                 .isInstanceOf(RecordTooLargeException.class)
                 .hasMessageContaining("decompressed request")
-                .hasMessageContaining("20480 bytes");
+                .hasMessageContaining("307200 bytes");
     }
 
     @Test
@@ -249,6 +258,31 @@ class ProduceHandlerCopyMemoryTest {
         assertThat(copied)
                 .singleElement()
                 .satisfies(record -> assertThat(record.headers()).hasSize(16));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    void testCorruptCompressedPayloadFailsAndReleasesScratch(String codec) {
+        MemoryRecords records = records(Compression.of(codec).build(), record(repeatedBytes(1024)));
+        ByteBuffer buffer = records.buffer();
+        // Corrupt the codec stream, then restore the outer CRC so decompression is exercised.
+        for (int i = DefaultRecordBatch.RECORD_BATCH_OVERHEAD; i < buffer.limit(); i++) {
+            buffer.put(i, (byte) 0);
+        }
+        int attributesOffset = DefaultRecordBatch.CRC_OFFSET + Integer.BYTES;
+        buffer.putInt(
+                DefaultRecordBatch.CRC_OFFSET,
+                (int) Crc32C.compute(buffer, attributesOffset, buffer.limit() - attributesOffset));
+        TrackingLease lease = new TrackingLease();
+        Throwable failure =
+                catchThrowable(
+                        () ->
+                                ProduceHandler.copyRecordsForTesting(
+                                        PRODUCE_VERSION, records, 256 * 1024, 64 * 1024, lease));
+        assertThat(failure).isNotNull();
+        assertThat(Errors.forException(failure))
+                .isIn(Errors.CORRUPT_MESSAGE, Errors.INVALID_RECORD);
+        assertThat(lease.grownBytes).isZero();
     }
 
     private static MemoryRecords records(Compression compression, SimpleRecord... records) {

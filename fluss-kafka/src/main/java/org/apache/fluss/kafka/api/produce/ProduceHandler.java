@@ -33,6 +33,7 @@ import org.apache.fluss.kafka.network.KafkaFrameAdmissionLease;
 
 import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.InvalidRequiredAcksException;
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -321,13 +322,18 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
 
     private static RuntimeException unwrapCopyLimit(KafkaException failure) {
         Throwable cause = failure;
+        boolean invalidStream = false;
         while (cause != null && cause != cause.getCause()) {
-            if (cause instanceof RecordTooLargeException) {
-                return (RecordTooLargeException) cause;
+            // Kafka codecs may wrap admission and copy-limit exceptions. Preserve their codes.
+            if (cause instanceof ApiException) {
+                return (ApiException) cause;
             }
+            invalidStream |= cause instanceof IOException;
             cause = cause.getCause();
         }
-        return failure;
+        return invalidStream
+                ? new InvalidRecordException("Failed to decompress Kafka record batch.", failure)
+                : failure;
     }
 
     private static long preflightRecord(CountingInputStream input, CopyBudget copyBudget)
