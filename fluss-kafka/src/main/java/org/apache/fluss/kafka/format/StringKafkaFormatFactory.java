@@ -22,14 +22,10 @@ import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.row.BinaryString;
+import org.apache.fluss.shaded.guava32.com.google.common.base.Utf8;
 import org.apache.fluss.types.StringType;
 
 import javax.annotation.Nullable;
-
-import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 
 /** Factory for strict UTF-8 Kafka string decoding. */
 @Internal
@@ -59,17 +55,12 @@ public final class StringKafkaFormatFactory implements KafkaFormatFactory {
         if (bytes == null) {
             return null;
         }
-        try {
-            return BinaryString.fromString(
-                    StandardCharsets.UTF_8
-                            .newDecoder()
-                            .onMalformedInput(CodingErrorAction.REPORT)
-                            .onUnmappableCharacter(CodingErrorAction.REPORT)
-                            .decode(ByteBuffer.wrap(bytes))
-                            .toString());
-        } catch (CharacterCodingException e) {
+        if (!Utf8.isWellFormed(bytes)) {
             throw new KafkaRecordEncodingException(
-                    "Kafka field '" + fieldName + "' is not valid UTF-8.", e);
+                    "Kafka field '" + fieldName + "' is not valid UTF-8.");
         }
+        // The command owns these bytes until the synchronous Arrow/KV encoder has copied them.
+        // Retain UTF-8 directly instead of allocating and re-encoding a UTF-16 String.
+        return BinaryString.fromBytes(bytes);
     }
 }

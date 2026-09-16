@@ -810,6 +810,11 @@ public class ReplicaManager implements ServerReconfigurable {
                 "Put records to local kv storage and wait generate cdc log in {} ms",
                 System.currentTimeMillis() - startTime);
 
+        // KV writes append a changelog too. Wake pending fetches after delayed writes have been
+        // registered, just as for ordinary log appends. Otherwise acks=all can wait for the fetch
+        // timeout even though the leader already has new records.
+        enqueueDelayedFetchCompletions(kvPutResult);
+
         // maybe do delay write operation to write cdc log to be replicated to other follower
         // replicas.
         maybeAddDelayedWrite(
@@ -2230,7 +2235,7 @@ public class ReplicaManager implements ServerReconfigurable {
     }
 
     private void enqueueDelayedFetchCompletions(
-            Map<TableBucket, ProduceLogResultForBucket> appendResults) {
+            Map<TableBucket, ? extends WriteResultForBucket> appendResults) {
         appendResults.forEach(
                 (tableBucket, appendResult) -> {
                     if (appendResult.succeeded()) {

@@ -34,8 +34,10 @@ import org.apache.fluss.rpc.protocol.ApiKeys;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -50,18 +52,19 @@ import static org.mockito.Mockito.when;
 
 class KvWriteRouterTest {
     @Test
-    void testSubrequestsAreSequentialAndRetainNativeFailures() {
+    void testConcurrentSubrequestsWaitForAllAndRetainNativeFailures() {
         RpcClient client = mock(RpcClient.class);
         CompletableFuture<ApiMessage> first = new CompletableFuture<>();
+        CompletableFuture<ApiMessage> second = new CompletableFuture<>();
         when(client.sendRequest(any(ServerNode.class), eq(ApiKeys.PUT_KV), any(PutKvRequest.class)))
-                .thenReturn(first, CompletableFuture.completedFuture(response(1)));
+                .thenReturn(first, second);
         RoutedKvGateway.Route route = new KvWriteRouter(client).prepare(10L, metadata());
         PutKvRequest request = new PutKvRequest().setTableId(10L).setAcks(-1).setTimeoutMs(10000);
         request.addBucketsReq().setBucketId(0).setRecords(new byte[] {1});
         request.addBucketsReq().setBucketId(1).setRecords(new byte[] {2});
         CompletableFuture<PutKvResponse> result = route.write(request);
         assertThat(result).isNotDone();
-        verify(client, times(1))
+        verify(client, times(2))
                 .sendRequest(any(ServerNode.class), eq(ApiKeys.PUT_KV), any(PutKvRequest.class));
         PutKvResponse failure = response(0);
         failure.getBucketsRespsList()
@@ -70,12 +73,57 @@ class KvWriteRouterTest {
                         org.apache.fluss.rpc.protocol.Errors.NOT_ENOUGH_REPLICAS_EXCEPTION.code(),
                         "not replicated");
         first.complete(failure);
+        assertThat(result).isNotDone();
+        second.complete(response(1));
         assertThat(result.join().getBucketsRespsList()).hasSize(2);
         assertThat(result.join().getBucketsRespsList().get(0).getErrorCode())
                 .isEqualTo(
                         org.apache.fluss.rpc.protocol.Errors.NOT_ENOUGH_REPLICAS_EXCEPTION.code());
         verify(client, times(2))
                 .sendRequest(any(ServerNode.class), eq(ApiKeys.PUT_KV), any(PutKvRequest.class));
+    }
+
+    @Test
+    void testBucketFanOutIsBoundedUntilTheWholeWindowCompletes() {
+        RpcClient client = mock(RpcClient.class);
+        int limit = KvWriteRouter.MAX_CONCURRENT_BUCKET_WRITES;
+        List<CompletableFuture<ApiMessage>> pending = new ArrayList<>();
+        when(client.sendRequest(any(ServerNode.class), eq(ApiKeys.PUT_KV), any(PutKvRequest.class)))
+                .thenAnswer(
+                        invocation -> {
+                            CompletableFuture<ApiMessage> result = new CompletableFuture<>();
+                            pending.add(result);
+                            return result;
+                        });
+        MetadataResponse metadata = metadata();
+        for (int bucket = 2; bucket <= limit; bucket++) {
+            metadata.getTableMetadatasList()
+                    .get(0)
+                    .addAllBucketMetadatas(
+                            Collections.singletonList(
+                                    new PbBucketMetadata().setBucketId(bucket).setLeaderId(0)));
+        }
+        PutKvRequest request = new PutKvRequest().setTableId(10L).setAcks(-1).setTimeoutMs(10000);
+        for (int bucket = 0; bucket <= limit; bucket++) {
+            request.addBucketsReq().setBucketId(bucket).setRecords(new byte[] {1});
+        }
+        CompletableFuture<PutKvResponse> result =
+                new KvWriteRouter(client).prepare(10L, metadata).write(request);
+        assertThat(pending).hasSize(limit);
+        for (int bucket = limit - 1; bucket > 0; bucket--) {
+            pending.get(bucket).complete(response(bucket));
+        }
+        assertThat(pending).hasSize(limit);
+        assertThat(result).isNotDone();
+        pending.get(0).complete(response(0));
+        assertThat(pending).hasSize(limit + 1);
+        assertThat(result).isNotDone();
+        pending.get(limit).complete(response(limit));
+        assertThat(result.join().getBucketsRespsList()).hasSize(limit + 1);
+        for (int bucket = 0; bucket <= limit; bucket++) {
+            assertThat(result.join().getBucketsRespsList().get(bucket).getBucketId())
+                    .isEqualTo(bucket);
+        }
     }
 
     @Test

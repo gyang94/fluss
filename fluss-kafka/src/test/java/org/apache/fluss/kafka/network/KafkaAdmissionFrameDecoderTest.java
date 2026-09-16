@@ -489,6 +489,8 @@ class KafkaAdmissionFrameDecoderTest {
                     reservation.cancelled::get,
                     Duration.ofSeconds(10),
                     "reservation was not cancelled on local disconnect");
+            // cancel() becomes visible before channelInactive finishes updating its metrics.
+            server.awaitEventLoopBarrier();
 
             assertThat(metrics.reservationCancellations).hasValue(1);
             assertThat(metrics.preFrameWaitTimeouts).hasValue(0);

@@ -27,6 +27,7 @@ import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
+import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -41,6 +42,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -378,6 +380,71 @@ public class JsonKafkaFieldDecoderTest {
                 }) {
             assertThatThrownBy(() -> decoder.decode(bytes(json)))
                     .isInstanceOf(KafkaRecordEncodingException.class);
+        }
+    }
+
+    @Test
+    public void testUtf8EncodingPreservesUnicodeAndSurrogateReplacement() {
+        for (String value :
+                new String[] {"", "ascii", "中文", "\u0000", "\uD83D\uDE00", "\uD800x", "\uDC00"}) {
+            assertThat(JsonToFlussConverters.encodeString(value).toBytes())
+                    .containsExactly(BinaryString.fromString(value).toBytes());
+        }
+        Random random = new Random(20260916L);
+        for (int sample = 0; sample < 10000; sample++) {
+            char[] chars = new char[random.nextInt(64)];
+            for (int i = 0; i < chars.length; i++) {
+                chars[i] = (char) random.nextInt(65536);
+            }
+            String value = new String(chars);
+            assertThat(JsonToFlussConverters.encodeString(value).toBytes())
+                    .containsExactly(BinaryString.fromString(value).toBytes());
+        }
+    }
+
+    @Test
+    public void testRescuesWrongJsonShapesButRetainsStrictAndNotNullErrors() {
+        DataType[] types = {
+            DataTypes.BOOLEAN(),
+            DataTypes.TINYINT(),
+            DataTypes.SMALLINT(),
+            DataTypes.INT(),
+            DataTypes.BIGINT(),
+            DataTypes.FLOAT(),
+            DataTypes.DOUBLE(),
+            DataTypes.DECIMAL(10, 2),
+            DataTypes.STRING(),
+            DataTypes.CHAR(3),
+            DataTypes.BINARY(3),
+            DataTypes.BYTES(),
+            DataTypes.DATE(),
+            DataTypes.TIME(3),
+            DataTypes.TIMESTAMP(3),
+            DataTypes.TIMESTAMP_LTZ(3),
+            DataTypes.ROW(DataTypes.FIELD("required", DataTypes.INT().copy(false))),
+            DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+            DataTypes.ARRAY(DataTypes.INT())
+        };
+        for (DataType type : types) {
+            String wrongValue = type instanceof ArrayType ? "{}" : "[]";
+            String json = "{\"value\":" + wrongValue + "}";
+            RowType rowType =
+                    DataTypes.ROW(
+                            DataTypes.FIELD("value", type),
+                            DataTypes.FIELD("rescue", DataTypes.STRING()));
+            Object[] values = rescueDecoder(rowType, "rescue").decode(bytes(json));
+            assertThat(values[0]).isNull();
+            assertThat(values[1].toString()).isEqualTo(json);
+            assertThatThrownBy(() -> decoder(rowType).decode(bytes(json)))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("$[\"value\"]");
+            RowType required =
+                    DataTypes.ROW(
+                            DataTypes.FIELD("value", type.copy(false)),
+                            DataTypes.FIELD("rescue", DataTypes.STRING()));
+            assertThatThrownBy(() -> rescueDecoder(required, "rescue").decode(bytes(json)))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("$[\"value\"]");
         }
     }
 

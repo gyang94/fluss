@@ -18,9 +18,13 @@
 package org.apache.fluss.server.replica.delay;
 
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.record.KvRecordBatch;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.entity.ProduceLogResultForBucket;
+import org.apache.fluss.rpc.entity.PutKvResultForBucket;
+import org.apache.fluss.rpc.protocol.ApiKeys;
+import org.apache.fluss.rpc.protocol.MergeMode;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.log.FetchParams;
 import org.apache.fluss.server.log.LogOffsetMetadata;
@@ -41,7 +45,11 @@ import java.util.function.Consumer;
 import static org.apache.fluss.record.TestData.DATA1;
 import static org.apache.fluss.record.TestData.DATA1_ROW_TYPE;
 import static org.apache.fluss.record.TestData.DATA1_TABLE_ID;
+import static org.apache.fluss.record.TestData.DATA1_TABLE_ID_PK;
+import static org.apache.fluss.record.TestData.DATA1_TABLE_PATH_PK;
+import static org.apache.fluss.record.TestData.DATA_1_WITH_KEY_AND_VALUE;
 import static org.apache.fluss.testutils.DataTestUtils.assertLogRecordsEquals;
+import static org.apache.fluss.testutils.DataTestUtils.genKvRecordBatch;
 import static org.apache.fluss.testutils.DataTestUtils.genMemoryLogRecordsByObject;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -139,6 +147,45 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
         replicaManager.tryCompleteActions();
 
         assertThat(delayedResponse).isDone();
+        assertThat(replicaManager.getDelayedFetchLogManager().numDelayed()).isZero();
+    }
+
+    @Test
+    void testKvChangelogWakesDelayedFetchAfterPartialFailure() throws Exception {
+        TableBucket successfulBucket = new TableBucket(DATA1_TABLE_ID_PK, 1);
+        TableBucket failedBucket = new TableBucket(DATA1_TABLE_ID_PK, 2);
+        makeKvTableAsLeader(DATA1_TABLE_ID_PK, DATA1_TABLE_PATH_PK, successfulBucket.getBucket());
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> delayedResponse =
+                watchDelayedFetch(successfulBucket);
+        assertThat(delayedResponse).isNotDone();
+
+        Map<TableBucket, KvRecordBatch> entries = new HashMap<>();
+        entries.put(successfulBucket, genKvRecordBatch(DATA_1_WITH_KEY_AND_VALUE));
+        entries.put(failedBucket, genKvRecordBatch(DATA_1_WITH_KEY_AND_VALUE));
+        CompletableFuture<List<PutKvResultForBucket>> putResponse = new CompletableFuture<>();
+        replicaManager.putRecordsToKv(
+                20000,
+                -1,
+                entries,
+                null,
+                MergeMode.DEFAULT,
+                ApiKeys.PUT_KV.highestSupportedVersion,
+                putResponse::complete);
+        assertThat(putResponse.get())
+                .filteredOn(result -> result.getTableBucket().equals(successfulBucket))
+                .hasSize(1)
+                .allSatisfy(result -> assertThat(result.succeeded()).isTrue());
+        assertThat(putResponse.get())
+                .filteredOn(result -> result.getTableBucket().equals(failedBucket))
+                .hasSize(1)
+                .allSatisfy(result -> assertThat(result.failed()).isTrue());
+        assertThat(delayedResponse).isNotDone();
+
+        // Drain after PutKv has installed its delayed write. A successful changelog append must
+        // wake the fetch now, without waiting for the three-minute fetch timeout.
+        replicaManager.tryCompleteActions();
+        assertThat(delayedResponse).isDone();
+        assertThat(delayedResponse.get().get(successfulBucket).getHighWatermark()).isEqualTo(8L);
         assertThat(replicaManager.getDelayedFetchLogManager().numDelayed()).isZero();
     }
 

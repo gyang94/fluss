@@ -48,8 +48,21 @@ final class JsonPath {
     }
 
     private static String escapeAndTruncate(String value) {
-        StringBuilder escaped = new StringBuilder(MAX_SEGMENT_LENGTH);
         int contentLimit = MAX_SEGMENT_LENGTH - TRUNCATED.length();
+        if (value.length() <= contentLimit) {
+            boolean requiresEscaping = false;
+            for (int i = 0; i < value.length(); i++) {
+                char character = value.charAt(i);
+                if (character < 0x20 || character == '\\' || character == '"') {
+                    requiresEscaping = true;
+                    break;
+                }
+            }
+            if (!requiresEscaping) {
+                return value;
+            }
+        }
+        StringBuilder escaped = new StringBuilder(Math.min(value.length(), MAX_SEGMENT_LENGTH));
         int index = 0;
         while (index < value.length()) {
             String encodedCharacter;

@@ -34,8 +34,10 @@ import org.apache.fluss.rpc.messages.PutKvRequest;
 import org.apache.fluss.rpc.messages.PutKvResponse;
 import org.apache.fluss.rpc.protocol.Errors;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -44,8 +46,12 @@ import java.util.concurrent.TimeUnit;
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Routes one authorized KV write with at most one native subrequest in flight. */
+/** Routes an authorized KV write concurrently to its independent native buckets. */
 final class KvWriteRouter {
+    // The caller submits one Kafka partition at a time under its topic admission lease.
+    // Bound extra native RPC buffers and callbacks independently of the table's bucket count.
+    static final int MAX_CONCURRENT_BUCKET_WRITES = 8;
+
     private final RpcClient rpcClient;
 
     KvWriteRouter(RpcClient rpcClient) {
@@ -87,16 +93,16 @@ final class KvWriteRouter {
                     System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(request.getTimeoutMs());
             CompletableFuture<PutKvResponse> result =
                     CompletableFuture.completedFuture(new PutKvResponse());
-            for (PbPutKvReqForBucket bucket : request.getBucketsReqsList()) {
+            List<PbPutKvReqForBucket> buckets = request.getBucketsReqsList();
+            for (int offset = 0; offset < buckets.size(); offset += MAX_CONCURRENT_BUCKET_WRITES) {
+                List<PbPutKvReqForBucket> window =
+                        buckets.subList(
+                                offset,
+                                Math.min(buckets.size(), offset + MAX_CONCURRENT_BUCKET_WRITES));
                 result =
                         result.thenCompose(
                                 response ->
-                                        send(
-                                                        request,
-                                                        bucket,
-                                                        servers.get(
-                                                                leaders.get(bucket.getBucketId())),
-                                                        deadline)
+                                        sendWindow(request, window, servers, leaders, deadline)
                                                 .thenApply(
                                                         current -> {
                                                             response.addAllBucketsResps(
@@ -106,6 +112,34 @@ final class KvWriteRouter {
             }
             return result;
         };
+    }
+
+    private CompletableFuture<PutKvResponse> sendWindow(
+            PutKvRequest request,
+            List<PbPutKvReqForBucket> buckets,
+            Map<Integer, ServerNode> servers,
+            Map<Integer, Integer> leaders,
+            long deadline) {
+        List<CompletableFuture<PutKvResponse>> writes = new ArrayList<>();
+        for (PbPutKvReqForBucket bucket : buckets) {
+            writes.add(
+                    send(
+                            request,
+                            bucket,
+                            servers.get(leaders.get(bucket.getBucketId())),
+                            deadline));
+        }
+        // Wait for the whole window, including after failures, before submitting more work.
+        // The aggregate future retains all record buffers and preserves response order.
+        return CompletableFuture.allOf(writes.toArray(new CompletableFuture<?>[0]))
+                .thenApply(
+                        ignored -> {
+                            PutKvResponse result = new PutKvResponse();
+                            for (CompletableFuture<PutKvResponse> write : writes) {
+                                result.addAllBucketsResps(write.join().getBucketsRespsList());
+                            }
+                            return result;
+                        });
     }
 
     private CompletableFuture<PutKvResponse> send(

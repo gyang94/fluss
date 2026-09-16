@@ -28,6 +28,7 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.JsonNodeType;
 import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BinaryType;
 import org.apache.fluss.types.CharType;
@@ -45,6 +46,7 @@ import javax.annotation.Nullable;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.nio.charset.StandardCharsets;
 import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -71,6 +73,12 @@ final class JsonToFlussConverters {
         return create(dataType, 0);
     }
 
+    static BinaryString encodeString(String value) {
+        // Let the JVM use its optimized UTF-8 encoder instead of walking String.charAt and
+        // copying BinaryString's temporary encoding buffer. Replacement semantics are identical.
+        return BinaryString.fromBytes(value.getBytes(StandardCharsets.UTF_8));
+    }
+
     private static JsonToFlussConverter create(DataType dataType, int nestingDepth) {
         if (nestingDepth > MAX_SCHEMA_NESTING_DEPTH) {
             throw new KafkaTopicSchemaException(
@@ -79,6 +87,7 @@ final class JsonToFlussConverters {
                             + ".");
         }
         final JsonToFlussConverter notNullConverter = createNotNull(dataType, nestingDepth);
+        final JsonNodeType expectedNodeType = jsonNodeType(dataType.getTypeRoot());
         return (node, path, rescue) -> {
             if (node == null || node.isNull()) {
                 if (!dataType.isNullable()) {
@@ -86,6 +95,13 @@ final class JsonToFlussConverters {
                             Reason.NOT_NULL_MISSING,
                             invalid(path, dataType, "field is missing or null").getMessage());
                 }
+                return null;
+            }
+            // A mismatched JSON shape is expected input when nullable rescue is enabled.
+            // Handle it without throwing on the hot path. Matching shapes still use the full
+            // converter, including numeric precision, resource and descendant NOT NULL checks.
+            if (rescue != null && dataType.isNullable() && node.getNodeType() != expectedNodeType) {
+                rescue.accept(node);
                 return null;
             }
             try {
@@ -111,6 +127,30 @@ final class JsonToFlussConverters {
                         e);
             }
         };
+    }
+
+    private static JsonNodeType jsonNodeType(DataTypeRoot typeRoot) {
+        switch (typeRoot) {
+            case BOOLEAN:
+                return JsonNodeType.BOOLEAN;
+            case TINYINT:
+            case SMALLINT:
+            case INTEGER:
+            case BIGINT:
+            case FLOAT:
+            case DOUBLE:
+            case DECIMAL:
+                return JsonNodeType.NUMBER;
+            case ROW:
+            case MAP:
+                return JsonNodeType.OBJECT;
+            case ARRAY:
+                return JsonNodeType.ARRAY;
+            default:
+                // All remaining supported types use textual JSON input. Unsupported Fluss
+                // types have already been rejected by createNotNull.
+                return JsonNodeType.STRING;
+        }
     }
 
     private static JsonToFlussConverter createNotNull(DataType dataType, int nestingDepth) {
@@ -182,7 +222,7 @@ final class JsonToFlussConverters {
             case STRING:
                 return (node, path, rescue) -> {
                     require(node.isTextual(), path, dataType, "expected a JSON string");
-                    return BinaryString.fromString(node.textValue());
+                    return encodeString(node.textValue());
                 };
             case BINARY:
                 return binaryConverter((BinaryType) dataType);
@@ -245,7 +285,7 @@ final class JsonToFlussConverters {
                     path,
                     dataType,
                     "character length exceeds target");
-            return BinaryString.fromString(value);
+            return encodeString(value);
         };
     }
 
@@ -388,7 +428,7 @@ final class JsonToFlussConverters {
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();
                 values.put(
-                        BinaryString.fromString(field.getKey()),
+                        encodeString(field.getKey()),
                         valueConverter.convert(
                                 field.getValue(),
                                 JsonPath.field(path, field.getKey()),
@@ -464,17 +504,30 @@ final class JsonToFlussConverters {
     /** A local conversion failure; wrappers turn unrecoverable failures into record errors. */
     private static final class ConversionException extends RuntimeException {
 
+        private final String path;
+        private final DataType dataType;
+        private final String reason;
+
         private ConversionException(
                 String path, DataType dataType, String reason, @Nullable Throwable cause) {
-            super(
-                    "Invalid Kafka record value at "
-                            + path
-                            + " for "
-                            + dataType.asSummaryString()
-                            + ": "
-                            + reason
-                            + ".",
-                    cause);
+            // Nullable type errors are ordinary control flow when rescue is enabled. Do not
+            // collect a stack or render a diagnostic that the successful conversion discards.
+            // Unrecoverable errors still get the public record exception's stack and message.
+            super(null, cause, false, false);
+            this.path = path;
+            this.dataType = dataType;
+            this.reason = reason;
+        }
+
+        @Override
+        public String getMessage() {
+            return "Invalid Kafka record value at "
+                    + path
+                    + " for "
+                    + dataType.asSummaryString()
+                    + ": "
+                    + reason
+                    + ".";
         }
     }
 }
