@@ -44,6 +44,7 @@ import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -51,13 +52,19 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -294,6 +301,87 @@ public class KafkaFlussRoundTripITCase {
         }
         throw new AssertionError(
                 "Rescued Kafka JSON record was not visible through the native scanner.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"raw", "string", "json"})
+    public void testNullValuesAreDroppedWithoutOffsetHoles(String format) throws Exception {
+        String topic = "null_values_" + format;
+        TablePath path = TablePath.of(DATABASE, topic);
+        flussAdmin
+                .createTable(
+                        path,
+                        TableDescriptor.builder()
+                                .schema(
+                                        Schema.newBuilder()
+                                                .column(
+                                                        "payload",
+                                                        "raw".equals(format)
+                                                                ? DataTypes.BYTES()
+                                                                : DataTypes.STRING())
+                                                .build())
+                                .distributedBy(1)
+                                .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
+                                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, format)
+                                .build(),
+                        false)
+                .get();
+        Map<String, Object> config = new HashMap<>();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaBootstrapServer);
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
+        config.put(ProducerConfig.LINGER_MS_CONFIG, 1000);
+        config.put(ProducerConfig.ACKS_CONFIG, "all");
+        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(config)) {
+            producer.partitionsFor(path.toString());
+            List<Future<RecordMetadata>> mixed = new ArrayList<>();
+            for (String value : new String[] {"A", null, "", "C"}) {
+                byte[] encoded =
+                        value == null
+                                ? null
+                                : bytes(
+                                        "json".equals(format)
+                                                ? "{\"payload\":\"" + value + "\"}"
+                                                : value);
+                mixed.add(producer.send(new ProducerRecord<>(path.toString(), 0, null, encoded)));
+            }
+            producer.flush();
+            for (Future<RecordMetadata> result : mixed) {
+                assertThat(result.get(30, TimeUnit.SECONDS).hasOffset()).isFalse();
+            }
+            assertThat(
+                            producer.send(
+                                            new ProducerRecord<byte[], byte[]>(
+                                                    path.toString(), 0, KEY, null))
+                                    .get(30, TimeUnit.SECONDS)
+                                    .hasOffset())
+                    .isFalse();
+            byte[] last = bytes("json".equals(format) ? "{\"payload\":\"D\"}" : "D");
+            assertThat(
+                            producer.send(new ProducerRecord<>(path.toString(), 0, null, last))
+                                    .get(30, TimeUnit.SECONDS)
+                                    .offset())
+                    .isEqualTo(3L);
+        }
+        List<String> observed = new ArrayList<>();
+        try (Table table = connection.getTable(path);
+                LogScanner scanner = table.newScan().createLogScanner()) {
+            scanner.subscribeFromBeginning(0);
+            for (int attempt = 0; attempt < 30 && observed.size() < 4; attempt++) {
+                for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                    InternalRow row = record.getRow();
+                    assertThat(row.isNullAt(0)).isFalse();
+                    observed.add(
+                            "raw".equals(format)
+                                    ? new String(row.getBytes(0), StandardCharsets.UTF_8)
+                                    : row.getString(0).toString());
+                }
+            }
+            assertThat(observed).containsExactly("A", "", "C", "D");
+        } finally {
+            flussAdmin.dropTable(path, false).get();
+        }
     }
 
     private void testRoundTrip(String topic, Map<String, String> topicConfigs, boolean stringFormat)

@@ -41,6 +41,7 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.rpc.RpcGatewayService;
+import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.gateway.RoutedKvGateway;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
@@ -52,6 +53,8 @@ import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.messages.PutKvRequest;
 import org.apache.fluss.rpc.messages.PutKvResponse;
 import org.apache.fluss.rpc.netty.server.Session;
+import org.apache.fluss.security.acl.OperationType;
+import org.apache.fluss.security.acl.Resource;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
 
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -460,6 +463,26 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         }
         for (PartitionWrite partition : topic.partitions()) {
             try {
+                if (partition.nullValueCount() > 0
+                        && partition.nullValueCount() == partition.recordCount()) {
+                    leaseScope.checkpoint();
+                    if (partition.partitionId() < 0
+                            || partition.partitionId() >= tableInfo.getNumBuckets()) {
+                        localFailures.put(
+                                partition.partitionId(),
+                                new PartitionResult(
+                                        partition.partitionId(),
+                                        Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                                        -1L,
+                                        null));
+                        continue;
+                    }
+                    authorizeDroppedWrite(command, tableInfo);
+                    localFailures.put(
+                            partition.partitionId(),
+                            new PartitionResult(partition.partitionId(), Errors.NONE, -1L, null));
+                    continue;
+                }
                 BytesView records =
                         transcodePartition(topic, partition, writePlan, outputMemoryBudget);
                 retainedRecords.add(records);
@@ -541,9 +564,27 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         List<BytesView> retainedRecords = new ArrayList<>();
         for (PartitionWrite partition : topic.partitions()) {
             try {
+                leaseScope.checkpoint();
+                if (partition.partitionId() < 0
+                        || partition.partitionId() >= tableInfo.getNumBuckets()) {
+                    results.put(
+                            partition.partitionId(),
+                            new PartitionResult(
+                                    partition.partitionId(),
+                                    Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                                    -1L,
+                                    null));
+                    continue;
+                }
                 Map<Integer, BytesView> buckets =
                         transcoder.transcodePrimaryKey(
-                                topic.copiedRecords(partition), writePlan, budget);
+                                nonNullRecords(topic, partition), writePlan, budget);
+                if (buckets.isEmpty()) {
+                    results.put(
+                            partition.partitionId(),
+                            new PartitionResult(partition.partitionId(), Errors.NONE, -1L, null));
+                    continue;
+                }
                 PutKvRequest request =
                         new PutKvRequest()
                                 .setTableId(tableInfo.getTableId())
@@ -696,8 +737,41 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             KafkaTopicWritePlan writePlan,
             KafkaOutputMemoryBudget outputMemoryBudget)
             throws Exception {
-        List<KafkaProduceCommand.Record> copiedRecords = topic.copiedRecords(partition);
+        List<KafkaProduceCommand.Record> copiedRecords = nonNullRecords(topic, partition);
         return transcoder.transcode(copiedRecords, writePlan, outputMemoryBudget);
+    }
+
+    private void authorizeDroppedWrite(KafkaProduceCommand command, TableInfo tableInfo) {
+        if (!(gateway instanceof AdminOperationAuthorizer)) {
+            throw new IllegalStateException("The tablet gateway cannot authorize a dropped write.");
+        }
+        TablePath path = tableInfo.getTablePath();
+        ((AdminOperationAuthorizer) gateway)
+                .authorize(
+                        new Session(
+                                (short) 0,
+                                command.listenerName(),
+                                false,
+                                command.clientAddress(),
+                                command.principal()),
+                        OperationType.WRITE,
+                        Resource.table(path.getDatabaseName(), path.getTableName()));
+    }
+
+    private static List<KafkaProduceCommand.Record> nonNullRecords(
+            TopicWrite topic, PartitionWrite partition) {
+        List<KafkaProduceCommand.Record> records = topic.copiedRecords(partition);
+        if (partition.nullValueCount() == 0) {
+            return records;
+        }
+        List<KafkaProduceCommand.Record> retained =
+                new ArrayList<>(partition.recordCount() - partition.nullValueCount());
+        for (KafkaProduceCommand.Record record : records) {
+            if (record.borrowedValue() != null) {
+                retained.add(record);
+            }
+        }
+        return retained;
     }
 
     private static void clearNativeRequestPayload(ProduceLogRequest request) {
@@ -772,7 +846,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         new PartitionResult(
                                 partition.partitionId(),
                                 Errors.NONE,
-                                bucket.hasBaseOffset() ? bucket.getBaseOffset() : -1L,
+                                partition.nullValueCount() == 0 && bucket.hasBaseOffset()
+                                        ? bucket.getBaseOffset()
+                                        : -1L,
                                 null));
             }
         }

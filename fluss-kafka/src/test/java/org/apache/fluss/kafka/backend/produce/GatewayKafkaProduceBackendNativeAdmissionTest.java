@@ -107,7 +107,7 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                                         .column("payload", DataTypes.BYTES())
                                         .primaryKey("payload")
                                         .build())
-                        .distributedBy(1)
+                        .distributedBy(2)
                         .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
                         .build();
         GetTableInfoResponse info = tableInfoResponse().setTableJson(descriptor.toJsonBytes());
@@ -118,7 +118,13 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                 .thenReturn(route);
         CompletableFuture<PutKvResponse> first = new CompletableFuture<>();
         CompletableFuture<PutKvResponse> second = new CompletableFuture<>();
-        when(route.write(any(PutKvRequest.class))).thenReturn(first, second);
+        List<PutKvRequest> sent = new ArrayList<>();
+        when(route.write(any(PutKvRequest.class)))
+                .thenAnswer(
+                        invocation -> {
+                            sent.add(invocation.getArgument(0));
+                            return sent.size() == 1 ? first : second;
+                        });
         GatewayKafkaProduceBackend backend =
                 backend(
                         service,
@@ -138,7 +144,11 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                     new PutKvResponse()
                             .addAllBucketsResps(
                                     Collections.singletonList(
-                                            new PbPutKvRespForBucket().setBucketId(0))));
+                                            new PbPutKvRespForBucket()
+                                                    .setBucketId(
+                                                            sent.get(0)
+                                                                    .getBucketsReqAt(0)
+                                                                    .getBucketId()))));
             ArgumentCaptor<PutKvRequest> requests = ArgumentCaptor.forClass(PutKvRequest.class);
             verify(route, times(2)).write(requests.capture());
             assertThat(result).isNotDone();
@@ -147,7 +157,9 @@ class GatewayKafkaProduceBackendNativeAdmissionTest {
                     .allSatisfy(
                             request ->
                                     assertThat(request.getBucketsReqAt(0).hasRecords()).isTrue());
-            PbPutKvRespForBucket failure = new PbPutKvRespForBucket().setBucketId(0);
+            PbPutKvRespForBucket failure =
+                    new PbPutKvRespForBucket()
+                            .setBucketId(sent.get(1).getBucketsReqAt(0).getBucketId());
             failure.setError(
                     org.apache.fluss.rpc.protocol.Errors.AUTHORIZATION_EXCEPTION.code(), "denied");
             second.complete(

@@ -35,6 +35,7 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.rpc.RpcGatewayService;
+import org.apache.fluss.rpc.gateway.AdminOperationAuthorizer;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
@@ -56,8 +57,11 @@ import java.util.concurrent.CompletableFuture;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class GatewayKafkaProduceBackendCacheTest {
 
@@ -165,6 +169,103 @@ class GatewayKafkaProduceBackendCacheTest {
                 new TimeoutException("writer acquire timeout"), Errors.REQUEST_TIMED_OUT);
         assertPrepareFailureMapsTo(
                 new RecordTooLargeException("batch too large"), Errors.MESSAGE_TOO_LARGE);
+    }
+
+    @Test
+    void testMixedAndAllNullPartitionsDoNotWriteNullRows() {
+        RpcGatewayService service = mock(RpcGatewayService.class);
+        TabletServerGateway gateway =
+                mock(
+                        TabletServerGateway.class,
+                        withSettings().extraInterfaces(AdminOperationAuthorizer.class));
+        when(gateway.getTableInfo(any(GetTableInfoRequest.class)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                new GetTableInfoResponse()
+                                        .setTableId(12L)
+                                        .setSchemaId(3)
+                                        .setTableJson(descriptor().toJsonBytes())
+                                        .setCreatedTime(1L)
+                                        .setModifiedTime(2L)));
+        List<Integer> written = new ArrayList<>();
+        when(gateway.produceLog(any(ProduceLogRequest.class)))
+                .thenAnswer(
+                        invocation -> {
+                            ProduceLogRequest request = invocation.getArgument(0);
+                            for (int i = 0; i < request.getBucketsReqsCount(); i++) {
+                                written.add(request.getBucketsReqAt(i).getBucketId());
+                            }
+                            return CompletableFuture.completedFuture(produceResponse());
+                        });
+        CountingTranscoder transcoder = new CountingTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, gateway, transcoder);
+        Record tombstone = new Record(1L, new byte[] {1}, null, Collections.emptyList());
+        Record value = new Record(1L, null, new byte[0], Collections.emptyList());
+        TopicWrite topic =
+                new TopicWrite(
+                        "kafka.orders",
+                        Arrays.asList(
+                                new PartitionWrite(0, Arrays.asList(value, tombstone, value)),
+                                new PartitionWrite(1, Collections.singletonList(tombstone))));
+        KafkaProduceResult result =
+                backend.write(
+                                new KafkaProduceCommand(
+                                        (short) 1,
+                                        1000,
+                                        Collections.singletonList(topic),
+                                        "KAFKA",
+                                        null))
+                        .join();
+        assertThat(result.topics().get(0).partitions())
+                .allSatisfy(
+                        partition -> {
+                            assertThat(partition.error()).isEqualTo(Errors.NONE);
+                            assertThat(partition.baseOffset()).isEqualTo(-1L);
+                        });
+        assertThat(written).containsExactly(0);
+        assertThat(transcoder.transcodedPlans).hasSize(1);
+        assertThat(topic.copiedRecords(topic.partitions().get(0))).isEmpty();
+        assertThat(topic.copiedRecords(topic.partitions().get(1))).isEmpty();
+    }
+
+    @Test
+    void testAllNullCannotBypassLocalAuthorizationCapability() {
+        TabletServerGateway gateway = mock(TabletServerGateway.class);
+        when(gateway.getTableInfo(any(GetTableInfoRequest.class)))
+                .thenReturn(
+                        CompletableFuture.completedFuture(
+                                new GetTableInfoResponse()
+                                        .setTableId(12L)
+                                        .setSchemaId(3)
+                                        .setTableJson(descriptor().toJsonBytes())
+                                        .setCreatedTime(1L)
+                                        .setModifiedTime(2L)));
+        TopicWrite topic =
+                new TopicWrite(
+                        "kafka.orders",
+                        Collections.singletonList(
+                                new PartitionWrite(
+                                        0,
+                                        Collections.singletonList(
+                                                new Record(
+                                                        1L,
+                                                        null,
+                                                        null,
+                                                        Collections.emptyList())))));
+        KafkaProduceResult result =
+                new GatewayKafkaProduceBackend(
+                                mock(RpcGatewayService.class), gateway, new CountingTranscoder())
+                        .write(
+                                new KafkaProduceCommand(
+                                        (short) 1,
+                                        1000,
+                                        Collections.singletonList(topic),
+                                        "KAFKA",
+                                        null))
+                        .join();
+        assertThat(result.topics().get(0).partitions().get(0).error()).isNotEqualTo(Errors.NONE);
+        verify(gateway, never()).produceLog(any(ProduceLogRequest.class));
     }
 
     private static void assertPrepareFailureMapsTo(RuntimeException failure, Errors expectedError) {

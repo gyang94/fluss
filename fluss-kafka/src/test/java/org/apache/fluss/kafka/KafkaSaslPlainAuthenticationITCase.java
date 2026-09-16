@@ -190,6 +190,20 @@ public class KafkaSaslPlainAuthenticationITCase {
                                                                 second.toString(), KEY, VALUE))
                                                 .get(30, TimeUnit.SECONDS))
                         .hasRootCauseInstanceOf(TopicAuthorizationException.class);
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(
+                                                        new ProducerRecord<byte[], byte[]>(
+                                                                second.toString(), KEY, null))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasRootCauseInstanceOf(TopicAuthorizationException.class);
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<byte[], byte[]>(
+                                                        first.toString(), KEY, null))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .hasOffset())
+                        .isFalse();
             }
             grantWriterAccess(Resource.table(SECOND_DATABASE, TOPIC), OperationType.WRITE);
             try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(producerConfig)) {

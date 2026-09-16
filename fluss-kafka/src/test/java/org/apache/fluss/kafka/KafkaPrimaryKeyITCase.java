@@ -100,6 +100,13 @@ class KafkaPrimaryKeyITCase {
                                             path.toString(), 5, "different-key", json(id, 2)))
                             .get(30, TimeUnit.SECONDS);
                 }
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<String, String>(
+                                                        path.toString(), 5, "different-key", null))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .hasOffset())
+                        .isFalse();
             }
             try (Table table = connection.getTable(path)) {
                 Lookuper lookuper = table.newLookup().createLookuper();

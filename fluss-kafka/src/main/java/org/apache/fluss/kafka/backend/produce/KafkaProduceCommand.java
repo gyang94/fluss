@@ -340,6 +340,8 @@ public final class KafkaProduceCommand {
         private static final long PARTITION_FIXED_ESTIMATE_BYTES = 512;
 
         private final int partitionId;
+        private final int recordCount;
+        private final int nullValueCount;
         private final AtomicReference<List<Record>> records;
         private final long estimatedCopiedRecordBytes;
         private final long estimatedConvertedBytes;
@@ -349,11 +351,17 @@ public final class KafkaProduceCommand {
             this.partitionId = partitionId;
             List<Record> copiedRecords = immutableCopy(records);
             this.records = new AtomicReference<>(copiedRecords);
+            this.recordCount = copiedRecords.size();
+            int nullValues = 0;
             long copiedRecordBytes = 0;
             for (Record record : copiedRecords) {
+                if (record.borrowedValue() == null) {
+                    nullValues++;
+                }
                 copiedRecordBytes =
                         saturatedAdd(copiedRecordBytes, record.estimatedConvertedBytes());
             }
+            this.nullValueCount = nullValues;
             this.estimatedCopiedRecordBytes = copiedRecordBytes;
             this.estimatedConvertedBytes = saturatedAdd(estimateMetadataBytes(), copiedRecordBytes);
         }
@@ -361,6 +369,16 @@ public final class KafkaProduceCommand {
         /** Returns the Kafka partition ID. */
         public int partitionId() {
             return partitionId;
+        }
+
+        /** Returns the number of copied records, also after payload release. */
+        public int recordCount() {
+            return recordCount;
+        }
+
+        /** Returns how many Kafka records have a null value, independently of their keys. */
+        public int nullValueCount() {
+            return nullValueCount;
         }
 
         /** Returns the estimated bytes occupied by this partition's copied payload. */
