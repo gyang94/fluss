@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.admission.KafkaNativeProduceAdmissionController;
 import org.apache.fluss.kafka.admission.KafkaProduceAdmissionController;
 import org.apache.fluss.kafka.network.KafkaFrameAdmissionMetrics;
+import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException.Reason;
 import org.apache.fluss.metrics.Counter;
 import org.apache.fluss.metrics.DescriptiveStatisticsHistogram;
 import org.apache.fluss.metrics.Histogram;
@@ -30,6 +31,9 @@ import org.apache.fluss.metrics.groups.MetricGroup;
 import org.apache.fluss.utils.clock.Clock;
 import org.apache.fluss.utils.clock.SystemClock;
 
+import java.util.EnumMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
@@ -55,6 +59,16 @@ public final class KafkaProduceMetrics implements KafkaFrameAdmissionMetrics {
     private final AtomicLong pendingResponseWrites = new AtomicLong();
     private final AtomicLong pendingResponseWriteBytes = new AtomicLong();
     private final ConcurrentMap<Long, Long> pendingResponseWriteStarts = new ConcurrentHashMap<>();
+
+    private final Map<Reason, Counter> recordErrorsByType = new EnumMap<>(Reason.class);
+    private final Counter recordErrors = new ThreadSafeSimpleCounter();
+    private final Counter invalidRecords = new ThreadSafeSimpleCounter();
+    private final Counter rescuedRecords = new ThreadSafeSimpleCounter();
+    private final Counter droppedRecords = new ThreadSafeSimpleCounter();
+    private final Counter failedRecords = new ThreadSafeSimpleCounter();
+    private final Counter successfulRecords = new ThreadSafeSimpleCounter();
+    private final Counter producerConnections = new ThreadSafeSimpleCounter();
+    private final AtomicLong lastSuccessfulWriteTimeMillis = new AtomicLong();
 
     private final Counter requests;
     private final Counter errors;
@@ -119,6 +133,24 @@ public final class KafkaProduceMetrics implements KafkaFrameAdmissionMetrics {
         MetricGroup metricGroup =
                 checkNotNull(serverMetricGroup).addGroup("kafka").addGroup("request", "produce");
         this.metricGroup = metricGroup;
+        metricGroup.counter(KafkaMetricNames.RECORD_ERRORS, recordErrors);
+        metricGroup.counter(KafkaMetricNames.INVALID_RECORDS, invalidRecords);
+        metricGroup.counter(KafkaMetricNames.RESCUED_RECORDS, rescuedRecords);
+        metricGroup.counter(KafkaMetricNames.DROPPED_RECORDS, droppedRecords);
+        metricGroup.counter(KafkaMetricNames.FAILED_RECORDS, failedRecords);
+        metricGroup.counter(KafkaMetricNames.SUCCESSFUL_RECORDS, successfulRecords);
+        metricGroup.gauge(KafkaMetricNames.PRODUCER_CONNECTIONS, producerConnections::getCount);
+        metricGroup.gauge(
+                KafkaMetricNames.LAST_SUCCESSFUL_WRITE_TIME_MILLIS,
+                lastSuccessfulWriteTimeMillis::get);
+        for (Reason reason : Reason.values()) {
+            recordErrorsByType.put(
+                    reason,
+                    metricGroup
+                            .addGroup("errorType", reason.name().toLowerCase(Locale.ROOT))
+                            .counter(
+                                    KafkaMetricNames.RECORD_ERRORS, new ThreadSafeSimpleCounter()));
+        }
 
         requests = registerMeter(metricGroup, KafkaMetricNames.REQUESTS_RATE);
         errors = registerMeter(metricGroup, KafkaMetricNames.ERRORS_RATE);
@@ -277,6 +309,62 @@ public final class KafkaProduceMetrics implements KafkaFrameAdmissionMetrics {
         this.responseHeadOfLineTimeMicros = null;
         this.responseWriteCompletionTimeMicros = null;
         this.totalTimeMicros = null;
+    }
+
+    /** Records observed conversion errors once per message and once per matching category. */
+    public void recordConversion(int errorMask, boolean rescued, boolean invalid) {
+        if (!enabled) {
+            return;
+        }
+        if (errorMask != 0) {
+            recordErrors.inc();
+            for (Reason reason : Reason.values()) {
+                if ((errorMask & reason.mask()) != 0) {
+                    recordErrorsByType.get(reason).inc();
+                }
+            }
+        }
+        if (rescued) {
+            rescuedRecords.inc();
+        }
+        if (invalid) {
+            invalidRecords.inc();
+        }
+    }
+
+    /** Records a terminal partition result; failed requests are never counted as active drops. */
+    public void recordPartitionResult(boolean success, int recordCount, int nullValues) {
+        if (!enabled) {
+            return;
+        }
+        if (!success) {
+            failedRecords.inc(recordCount);
+            return;
+        }
+        droppedRecords.inc(nullValues);
+        int written = recordCount - nullValues;
+        successfulRecords.inc(written);
+        if (written > 0) {
+            lastSuccessfulWriteTimeMillis.accumulateAndGet(clock.milliseconds(), Math::max);
+        }
+    }
+
+    /** Counts a connected, authenticated channel after its first decoded Produce request. */
+    public void producerConnectionOpened() {
+        if (enabled) {
+            producerConnections.inc();
+        }
+    }
+
+    /** Removes a previously counted producer channel when it disconnects. */
+    public void producerConnectionClosed() {
+        if (enabled) {
+            producerConnections.dec();
+        }
+    }
+
+    Counter recordErrors(Reason reason) {
+        return recordErrorsByType.get(reason);
     }
 
     /** Returns the shared disabled metrics instance used by compatibility constructors. */

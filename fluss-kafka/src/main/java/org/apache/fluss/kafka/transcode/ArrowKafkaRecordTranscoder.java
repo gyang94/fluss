@@ -209,7 +209,8 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
             KafkaTopicWritePlan writePlan,
             KafkaOutputMemoryBudget outputMemoryBudget)
             throws Exception {
-        return new FlussKvRecordEncoder().encode(records, writePlan, outputMemoryBudget);
+        return new FlussKvRecordEncoder(produceMetrics)
+                .encode(records, writePlan, outputMemoryBudget);
     }
 
     @Override
@@ -252,12 +253,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         long recordStartedNanos = produceMetrics.nowNanos();
         GenericRow row;
         try {
-            Object[] keyValues = writePlan.keyDecoder().decode(record.borrowedKey());
-            Object[] valueValues = writePlan.valueDecoder().decode(record.borrowedValue());
-            row =
-                    writePlan
-                            .rowAssembler()
-                            .assemble(keyValues, valueValues, record.timestamp(), record.headers());
+            row = KafkaRowDecoder.decode(record, writePlan, produceMetrics);
         } finally {
             decodeAssembleNanos[0] += elapsedNanos(recordStartedNanos, produceMetrics.nowNanos());
         }

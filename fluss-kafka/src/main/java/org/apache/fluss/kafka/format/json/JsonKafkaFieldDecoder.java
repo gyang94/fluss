@@ -22,6 +22,7 @@ import org.apache.fluss.kafka.format.KafkaFieldDecoder;
 import org.apache.fluss.kafka.schema.KafkaFieldProjection;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
+import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException.Reason;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.StreamReadConstraints;
@@ -45,6 +46,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /** Decodes a plain JSON object according to the projected Fluss fields. */
 @Internal
@@ -97,6 +99,11 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
 
     @Override
     public Object[] decode(@Nullable byte[] bytes) {
+        return decode(bytes, ignored -> {});
+    }
+
+    @Override
+    public Object[] decode(@Nullable byte[] bytes, Consumer<Reason> rescuedErrorObserver) {
         if (bytes == null) {
             return nullValues();
         }
@@ -105,13 +112,16 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             root = OBJECT_MAPPER.readTree(bytes);
         } catch (IOException | RuntimeException e) {
             throw new KafkaRecordEncodingException(
-                    "Kafka record value is not valid strict UTF-8 JSON.", e);
+                    Reason.JSON_SYNTAX, "Kafka record value is not valid strict UTF-8 JSON.", e);
         }
         if (root == null || !root.isObject()) {
             throw new KafkaRecordEncodingException(
-                    "Kafka JSON record value must have an object root.");
+                    Reason.JSON_SYNTAX, "Kafka JSON record value must have an object root.");
         }
         JsonNode unknownFields = validateAndExtractUnknownFields(root);
+        if (unknownFields != null) {
+            rescuedErrorObserver.accept(Reason.UNKNOWN_FIELD);
+        }
         ObjectNode rescuedFields =
                 rescueProjectionPosition < 0
                         ? null
@@ -130,11 +140,13 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                             JsonPath.field(JsonPath.ROOT, fieldName),
                             rescuedFields == null
                                     ? null
-                                    : node ->
-                                            rescuedFields.set(
-                                                    fieldName,
-                                                    JsonRescue.merge(
-                                                            rescuedFields.get(fieldName), node)));
+                                    : node -> {
+                                        rescuedErrorObserver.accept(Reason.NULLABLE_TYPE);
+                                        rescuedFields.set(
+                                                fieldName,
+                                                JsonRescue.merge(
+                                                        rescuedFields.get(fieldName), node));
+                                    });
         }
         if (rescuedFields != null && !rescuedFields.isEmpty()) {
             values[rescueProjectionPosition] = BinaryString.fromString(rescuedFields.toString());
@@ -145,6 +157,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
     private JsonNode validateAndExtractUnknownFields(JsonNode root) {
         if (root.size() > JsonToFlussConverters.MAX_CONTAINER_ELEMENTS) {
             throw new KafkaRecordEncodingException(
+                    Reason.RESOURCE_LIMIT,
                     "Kafka JSON object at "
                             + JsonPath.ROOT
                             + " exceeds the maximum field count of "
@@ -204,6 +217,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             String fieldName = fieldNames.next();
             if (!projectedFieldNames.contains(fieldName)) {
                 throw new KafkaRecordEncodingException(
+                        Reason.UNKNOWN_FIELD,
                         "Invalid Kafka record value at "
                                 + JsonPath.field(JsonPath.ROOT, fieldName)
                                 + ": unknown field.");
@@ -301,6 +315,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
     private static void validateContainerSize(int size, String path) {
         if (size > JsonToFlussConverters.MAX_CONTAINER_ELEMENTS) {
             throw new KafkaRecordEncodingException(
+                    Reason.RESOURCE_LIMIT,
                     "Kafka JSON container at "
                             + path
                             + " exceeds the maximum element count of "
@@ -315,6 +330,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             DataType dataType = projection.dataTypeAt(i);
             if (!dataType.isNullable()) {
                 throw new KafkaRecordEncodingException(
+                        Reason.NOT_NULL_MISSING,
                         "Kafka null value cannot populate NOT NULL field '"
                                 + projection.nameAt(i)
                                 + "'.");

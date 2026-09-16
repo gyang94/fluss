@@ -29,6 +29,7 @@ import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metrics.Gauge;
 import org.apache.fluss.metrics.Histogram;
 import org.apache.fluss.metrics.util.TestMetricGroup;
 import org.apache.fluss.record.bytesview.ByteBufBytesView;
@@ -96,6 +97,49 @@ import static org.mockito.Mockito.mock;
 public class KafkaCommandDecoderTest {
 
     private static final long RECORD_TIMESTAMP = 123456L;
+
+    @Test
+    public void testProducerConnectionGaugeCountsOnlyProduceAndClosesOnce() {
+        java.util.Map<String, Gauge<?>> gauges = new java.util.HashMap<>();
+        TestMetricGroup group =
+                new TestMetricGroup(
+                        new String[0],
+                        Collections.emptyMap(),
+                        (name, filter) -> name,
+                        (filter, delimiter) -> "kafka") {
+                    @Override
+                    public <T, G extends Gauge<T>> G gauge(String name, G gauge) {
+                        gauges.put(name, gauge);
+                        return gauge;
+                    }
+                };
+        RecordingRequestChannel requests = new RecordingRequestChannel(100);
+        EmbeddedChannel channel =
+                new EmbeddedChannel(
+                        new KafkaCommandDecoder(
+                                new RequestChannel[] {requests},
+                                "KAFKA",
+                                null,
+                                new KafkaProduceMetrics(group)));
+        try {
+            channel.writeInbound(createApiVersionsRequest(1));
+            releaseNextRequest(requests);
+            assertThat(gauges.get("producerConnections").getValue()).isEqualTo(0L);
+            channel.writeInbound(createProduceRequest(2));
+            channel.writeInbound(createProduceRequest(3));
+            releaseNextRequest(requests);
+            releaseNextRequest(requests);
+            assertThat(gauges.get("producerConnections").getValue()).isEqualTo(1L);
+            channel.close();
+            channel.close();
+            channel.runPendingTasks();
+            assertThat(gauges.get("producerConnections").getValue()).isEqualTo(0L);
+        } finally {
+            channel.close();
+            releaseQueuedRequests(requests);
+            channel.finishAndReleaseAll();
+        }
+    }
 
     @Test
     public void testConnectionRegistersAndUsesSingleRequestChannel() {

@@ -75,6 +75,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<Object> {
     private final String listenerName;
     private final KafkaSaslConnection saslConnection;
     private final KafkaProduceMetrics produceMetrics;
+    private boolean producerConnectionCounted;
     @Nullable private final KafkaProduceAdmissionController admissionController;
     @Nullable private final KafkaNativeProduceAdmissionController nativeAdmissionController;
     private final AtomicBoolean requestChannelRegistered = new AtomicBoolean(false);
@@ -222,6 +223,10 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<Object> {
                 }
             }
             if (header.apiKey() == PRODUCE) {
+                if (!producerConnectionCounted) {
+                    producerConnectionCounted = true;
+                    recordMetric(produceMetrics::producerConnectionOpened);
+                }
                 recordMetric(() -> produceMetrics.recordRequestDecode(receivedTimeNanos));
             }
             inflightResponses.addLast(request);
@@ -317,6 +322,10 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<Object> {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        if (producerConnectionCounted) {
+            producerConnectionCounted = false;
+            recordMetric(produceMetrics::producerConnectionClosed);
+        }
         LOG.info("Connection closed from {}", ctx.channel().remoteAddress());
         try {
             deactivate();

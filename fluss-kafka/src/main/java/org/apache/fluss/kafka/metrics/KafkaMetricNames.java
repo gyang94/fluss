@@ -135,5 +135,14 @@ final class KafkaMetricNames {
     static final String RESPONSE_WRITE_COMPLETION_TIME_MICROS = "responseWriteCompletionTimeMicros";
     static final String TOTAL_TIME_MICROS = "totalTimeMicros";
 
+    static final String RECORD_ERRORS = "recordErrors";
+    static final String INVALID_RECORDS = "invalidRecords";
+    static final String RESCUED_RECORDS = "rescuedRecords";
+    static final String DROPPED_RECORDS = "droppedRecords";
+    static final String FAILED_RECORDS = "failedRecords";
+    static final String SUCCESSFUL_RECORDS = "successfulRecords";
+    static final String LAST_SUCCESSFUL_WRITE_TIME_MILLIS = "lastSuccessfulWriteTimeMillis";
+    static final String PRODUCER_CONNECTIONS = "producerConnections";
+
     private KafkaMetricNames() {}
 }

@@ -23,13 +23,47 @@ import org.apache.fluss.annotation.Internal;
 @Internal
 public final class KafkaRecordEncodingException extends IllegalArgumentException {
 
-    /** Creates a record encoding exception. */
-    public KafkaRecordEncodingException(String message) {
-        super(message);
+    /** Bounded message-level conversion categories, independent of exception text. */
+    public enum Reason {
+        JSON_SYNTAX,
+        NOT_NULL_MISSING,
+        NOT_NULL_TYPE,
+        NULLABLE_TYPE,
+        UNKNOWN_FIELD,
+        RESOURCE_LIMIT,
+        INVALID_ENCODING;
+
+        /** Returns the bit used when one message encounters several categories. */
+        public int mask() {
+            return 1 << ordinal();
+        }
     }
 
-    /** Creates a record encoding exception. */
+    private final Reason reason;
+
+    /** Creates an uncategorized record encoding exception. */
+    public KafkaRecordEncodingException(String message) {
+        this(Reason.INVALID_ENCODING, message, null);
+    }
+
+    /** Creates an uncategorized record encoding exception with a cause. */
     public KafkaRecordEncodingException(String message, Throwable cause) {
+        this(Reason.INVALID_ENCODING, message, cause);
+    }
+
+    /** Creates a categorized record encoding exception. */
+    public KafkaRecordEncodingException(Reason reason, String message) {
+        this(reason, message, null);
+    }
+
+    /** Creates a categorized record encoding exception with a cause. */
+    public KafkaRecordEncodingException(Reason reason, String message, Throwable cause) {
         super(message, cause);
+        this.reason = reason;
+    }
+
+    /** Returns the stable message error category. */
+    public Reason reason() {
+        return reason;
     }
 }

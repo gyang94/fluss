@@ -18,9 +18,12 @@
 package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException.Reason;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
+
+import java.util.function.Consumer;
 
 /**
  * Decodes one nullable Kafka record component into its ordered Fluss field projection.
@@ -33,4 +36,9 @@ public interface KafkaFieldDecoder {
 
     /** Decodes Kafka key or value bytes into internal Fluss field values. */
     Object[] decode(@Nullable byte[] bytes);
+
+    /** Decodes fields and reports recoverable message errors to a request-local observer. */
+    default Object[] decode(@Nullable byte[] bytes, Consumer<Reason> rescuedErrorObserver) {
+        return decode(bytes);
+    }
 }

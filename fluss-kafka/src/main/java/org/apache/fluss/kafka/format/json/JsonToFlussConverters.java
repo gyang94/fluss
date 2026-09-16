@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
+import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException.Reason;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.Decimal;
 import org.apache.fluss.row.GenericArray;
@@ -82,6 +83,7 @@ final class JsonToFlussConverters {
             if (node == null || node.isNull()) {
                 if (!dataType.isNullable()) {
                     throw new KafkaRecordEncodingException(
+                            Reason.NOT_NULL_MISSING,
                             invalid(path, dataType, "field is missing or null").getMessage());
                 }
                 return null;
@@ -94,7 +96,8 @@ final class JsonToFlussConverters {
                     rescue.accept(node);
                     return null;
                 }
-                throw new KafkaRecordEncodingException(e.getMessage(), e.getCause());
+                throw new KafkaRecordEncodingException(
+                        typeReason(dataType), e.getMessage(), e.getCause());
             } catch (KafkaRecordEncodingException e) {
                 throw e;
             } catch (RuntimeException e) {
@@ -103,7 +106,9 @@ final class JsonToFlussConverters {
                     return null;
                 }
                 throw new KafkaRecordEncodingException(
-                        invalid(path, dataType, "value cannot be converted").getMessage(), e);
+                        typeReason(dataType),
+                        invalid(path, dataType, "value cannot be converted").getMessage(),
+                        e);
             }
         };
     }
@@ -324,11 +329,12 @@ final class JsonToFlussConverters {
             Iterator<String> inputFieldNames = node.fieldNames();
             while (inputFieldNames.hasNext()) {
                 String inputFieldName = inputFieldNames.next();
-                require(
-                        declaredFieldNames.contains(inputFieldName),
-                        JsonPath.field(path, inputFieldName),
-                        dataType,
-                        "unknown field");
+                if (!declaredFieldNames.contains(inputFieldName)) {
+                    throw new KafkaRecordEncodingException(
+                            Reason.UNKNOWN_FIELD,
+                            invalid(JsonPath.field(path, inputFieldName), dataType, "unknown field")
+                                    .getMessage());
+                }
             }
             GenericRow row = new GenericRow(fieldNames.length);
             for (int i = 0; i < fieldNames.length; i++) {
@@ -396,6 +402,7 @@ final class JsonToFlussConverters {
         if (size > MAX_CONTAINER_ELEMENTS) {
             // Resource limits are hard failures, even for nullable fields with rescue enabled.
             throw new KafkaRecordEncodingException(
+                    Reason.RESOURCE_LIMIT,
                     "Kafka JSON container at "
                             + path
                             + " container size exceeds "
@@ -439,6 +446,10 @@ final class JsonToFlussConverters {
         if (!condition) {
             throw invalid(path, dataType, reason);
         }
+    }
+
+    private static Reason typeReason(DataType type) {
+        return type.isNullable() ? Reason.NULLABLE_TYPE : Reason.NOT_NULL_TYPE;
     }
 
     private static ConversionException invalid(String path, DataType dataType, String reason) {

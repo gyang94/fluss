@@ -280,7 +280,22 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private CompletableFuture<TopicResult> completeTopicOwnershipOnTerminal(
             KafkaProduceCommand command, TopicWrite topic, CompletableFuture<TopicResult> result) {
         return result.whenComplete(
-                (ignored, failure) -> {
+                (response, failure) -> {
+                    recordMetricsBestEffort(
+                            () -> {
+                                for (int i = 0; i < topic.partitions().size(); i++) {
+                                    PartitionWrite partition = topic.partitions().get(i);
+                                    boolean success =
+                                            failure == null
+                                                    && response != null
+                                                    && response.partitions().get(i).error()
+                                                            == Errors.NONE;
+                                    produceMetrics.recordPartitionResult(
+                                            success,
+                                            partition.recordCount(),
+                                            partition.nullValueCount());
+                                }
+                            });
                     topic.releaseCopiedRecords();
                     command.completeNativeAdmissionTransfer(topic);
                 });

@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.bucketing.BucketingFunction;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
+import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.KvRecordBatchBuilder;
 import org.apache.fluss.record.bytesview.BytesView;
@@ -34,6 +35,15 @@ import java.util.Map;
 
 /** Encodes a Kafka partition into bounded native KV batches using the table's key format. */
 final class FlussKvRecordEncoder {
+    private final KafkaProduceMetrics metrics;
+
+    FlussKvRecordEncoder() {
+        this(KafkaProduceMetrics.noOp());
+    }
+
+    FlussKvRecordEncoder(KafkaProduceMetrics metrics) {
+        this.metrics = metrics;
+    }
 
     Map<Integer, BytesView> encode(
             List<Record> records, KafkaTopicWritePlan plan, KafkaOutputMemoryBudget budget)
@@ -54,13 +64,7 @@ final class FlussKvRecordEncoder {
                 try (RowEncoder rowEncoder =
                         RowEncoder.create(
                                 table.getTableConfig().getKvFormat(), table.getRowType())) {
-                    GenericRow row =
-                            plan.rowAssembler()
-                                    .assemble(
-                                            plan.keyDecoder().decode(record.borrowedKey()),
-                                            plan.valueDecoder().decode(record.borrowedValue()),
-                                            record.timestamp(),
-                                            record.headers());
+                    GenericRow row = KafkaRowDecoder.decode(record, plan, metrics);
                     KeyEncoder primaryKey =
                             KeyEncoder.ofPrimaryKeyEncoder(
                                     table.getRowType(),
