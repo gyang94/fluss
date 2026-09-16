@@ -32,12 +32,14 @@ import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.security.acl.AccessControlEntry;
+import org.apache.fluss.security.acl.AccessControlEntryFilter;
 import org.apache.fluss.security.acl.AclBinding;
 import org.apache.fluss.security.acl.AclBindingFilter;
 import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.security.acl.OperationType;
 import org.apache.fluss.security.acl.PermissionType;
 import org.apache.fluss.security.acl.Resource;
+import org.apache.fluss.security.acl.ResourceFilter;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
 import org.apache.fluss.types.DataTypes;
 
@@ -214,6 +216,35 @@ public class KafkaSaslPlainAuthenticationITCase {
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
                         .isEqualTo(primaryKey ? -1L : 0L);
+                // Reuse the same connection and warm TableInfo/decoder caches after revocation.
+                revokeWriterAccess(Resource.table(SECOND_DATABASE, TOPIC), OperationType.WRITE);
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(
+                                                        new ProducerRecord<>(
+                                                                second.toString(), KEY, VALUE))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasRootCauseInstanceOf(TopicAuthorizationException.class);
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(
+                                                        new ProducerRecord<byte[], byte[]>(
+                                                                second.toString(), KEY, null))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasRootCauseInstanceOf(TopicAuthorizationException.class);
+                assertThat(
+                                admin.describeTopics(Collections.singleton(second.toString()))
+                                        .allTopicNames()
+                                        .get(30, TimeUnit.SECONDS))
+                        .hasSize(1);
+                grantWriterAccess(Resource.table(SECOND_DATABASE, TOPIC), OperationType.WRITE);
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<>(
+                                                        second.toString(), KEY, secondValue))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isEqualTo(primaryKey ? -1L : 1L);
             }
             assertFlussRecord(first, VALUE);
             assertFlussRecord(second, secondValue);
@@ -316,6 +347,29 @@ public class KafkaSaslPlainAuthenticationITCase {
         flussAdmin.createAcls(Collections.singletonList(aclBinding)).all().get();
         FLUSS_CLUSTER_EXTENSION.waitUntilAuthenticationSync(
                 Collections.singletonList(aclBinding), true);
+    }
+
+    private void revokeWriterAccess(Resource resource, OperationType operation) throws Exception {
+        FlussPrincipal principal = new FlussPrincipal(USERNAME, "User");
+        AclBinding binding =
+                new AclBinding(
+                        resource,
+                        new AccessControlEntry(
+                                principal,
+                                AccessControlEntry.WILD_CARD_HOST,
+                                operation,
+                                PermissionType.ALLOW));
+        AclBindingFilter filter =
+                new AclBindingFilter(
+                        new ResourceFilter(resource.getType(), resource.getName()),
+                        new AccessControlEntryFilter(
+                                principal,
+                                AccessControlEntry.WILD_CARD_HOST,
+                                operation,
+                                PermissionType.ALLOW));
+        flussAdmin.dropAcls(Collections.singletonList(filter)).all().get();
+        FLUSS_CLUSTER_EXTENSION.waitUntilAuthenticationSync(
+                Collections.singletonList(binding), false);
     }
 
     private Map<String, Object> kafkaClientConfig(String username, String password) {
