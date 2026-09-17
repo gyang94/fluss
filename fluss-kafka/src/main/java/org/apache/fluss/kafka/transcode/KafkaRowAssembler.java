@@ -41,7 +41,12 @@ public final class KafkaRowAssembler {
         this.topicSchema = checkNotNull(topicSchema);
     }
 
-    /** Assembles one Fluss row. */
+    /**
+     * Assembles one Fluss row for immediate synchronous encoding.
+     *
+     * <p>The row borrows decoded values and header payloads; it must not modify them or retain them
+     * after conversion.
+     */
     public GenericRow assemble(
             Object[] keyValues, Object[] valueValues, long timestamp, List<RecordHeader> headers) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
@@ -82,7 +87,7 @@ public final class KafkaRowAssembler {
         Object[] rows = new Object[headers.size()];
         for (int i = 0; i < headers.size(); i++) {
             RecordHeader header = headers.get(i);
-            rows[i] = GenericRow.of(BinaryString.fromString(header.name()), header.value());
+            rows[i] = GenericRow.of(BinaryString.fromString(header.name()), header.borrowedValue());
         }
         return new GenericArray(rows);
     }
