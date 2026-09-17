@@ -41,19 +41,35 @@ import static org.apache.fluss.utils.Preconditions.checkArgument;
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
     private final FlussArrowRecordEncoder arrowRecordEncoder = new FlussArrowRecordEncoder();
+    private final KafkaCompiledWritePlanCache writePlanCache = new KafkaCompiledWritePlanCache();
+
+    @Override
+    public KafkaTopicWritePlan prepare(TableInfo tableInfo) {
+        return writePlanCache.getOrCompile(
+                tableInfo,
+                () ->
+                        new KafkaTopicWritePlan(
+                                tableInfo, schemaResolver.resolve(tableInfo.toTableDescriptor())));
+    }
 
     @Override
     public BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
             throws Exception {
+        return transcode(partitionId, records, prepare(tableInfo));
+    }
+
+    @Override
+    public BytesView transcode(
+            int partitionId, List<Record> records, KafkaTopicWritePlan plan) throws Exception {
         checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
-        KafkaTableSchema schema = schemaResolver.resolve(tableInfo.toTableDescriptor());
+        KafkaTableSchema schema = plan.topicSchema();
         if (schema.valueConversionType() != KafkaValueConversionType.BINARY
                 && schema.valueConversionType() != KafkaValueConversionType.STRING) {
             throw new KafkaRecordEncodingException(
                     "Unsupported Kafka value conversion type: " + schema.valueConversionType());
         }
-        KafkaRowAssembler assembler = new KafkaRowAssembler(schema);
+        KafkaRowAssembler assembler = plan.rowAssembler();
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {
                     for (Record record : records) {
@@ -68,7 +84,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                                         partitionId));
                     }
                 },
-                tableInfo);
+                plan.tableInfo());
     }
 
     private static @Nullable Object decode(

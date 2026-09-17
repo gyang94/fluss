@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.bytesview.BytesView;
 
@@ -27,10 +28,17 @@ import java.util.List;
 /** Converts copied Kafka records into the native Fluss log representation. */
 @Internal
 public interface KafkaRecordTranscoder {
-    /**
-     * Transcodes records from the requested Kafka partition according to the target Fluss table
-     * schema and log format.
-     */
-    BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
-            throws Exception;
+    /** Validates the table contract and prepares a shareable plan once per topic write. */
+    default KafkaTopicWritePlan prepare(TableInfo tableInfo) {
+        return new KafkaTopicWritePlan(
+                tableInfo, new KafkaTopicSchemaResolver().resolve(tableInfo.toTableDescriptor()));
+    }
+
+    /** Transcodes one requested partition using an already prepared plan. */
+    default BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan) throws Exception {
+        return transcode(partitionId, records, plan.tableInfo());
+    }
+
+    /** Transcodes records from the requested Kafka partition using the target table schema. */
+    BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo) throws Exception;
 }
