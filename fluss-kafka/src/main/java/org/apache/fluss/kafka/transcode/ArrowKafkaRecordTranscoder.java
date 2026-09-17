@@ -25,7 +25,6 @@ import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.row.BinaryString;
-import org.apache.fluss.row.GenericRow;
 
 import javax.annotation.Nullable;
 
@@ -33,7 +32,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -49,20 +47,26 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTopicSchema schema = schemaResolver.resolve(tableInfo.toTableDescriptor());
         KafkaRowAssembler assembler = new KafkaRowAssembler(schema);
-        List<GenericRow> rows = new ArrayList<>(records.size());
-        for (Record record : records) {
-            Object[] key =
-                    schema.keyFormat() == null
-                            ? new Object[0]
-                            : new Object[] {decode(schema.keyFormat(), record.key())};
-            rows.add(
-                    assembler.assemble(
-                            key,
-                            new Object[] {decode(schema.valueFormat(), record.value())},
-                            record.timestamp(),
-                            record.headers()));
-        }
-        return arrowRecordEncoder.encode(rows, tableInfo);
+        return arrowRecordEncoder.encodeStreaming(
+                consumer -> {
+                    for (Record record : records) {
+                        Object[] key =
+                                schema.keyFormat() == null
+                                        ? new Object[0]
+                                        : new Object[] {
+                                            decode(schema.keyFormat(), record.borrowedKey())
+                                        };
+                        consumer.append(
+                                assembler.assemble(
+                                        key,
+                                        new Object[] {
+                                            decode(schema.valueFormat(), record.borrowedValue())
+                                        },
+                                        record.timestamp(),
+                                        record.headers()));
+                    }
+                },
+                tableInfo);
     }
 
     private static @Nullable Object decode(KafkaDataFormat format, @Nullable byte[] bytes) {

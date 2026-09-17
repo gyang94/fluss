@@ -39,6 +39,16 @@ public final class FlussArrowRecordEncoder {
 
     /** Encodes all rows using the table's current schema ID and Arrow compression settings. */
     public BytesView encode(List<GenericRow> rows, TableInfo tableInfo) throws Exception {
+        return encodeStreaming(
+                consumer -> {
+                    for (GenericRow row : rows) {
+                        consumer.append(row);
+                    }
+                },
+                tableInfo);
+    }
+
+    BytesView encodeStreaming(RowSource rowSource, TableInfo tableInfo) throws Exception {
         try (BufferAllocator allocator = new RootAllocator(Integer.MAX_VALUE);
                 ArrowWriterPool provider = new ArrowWriterPool(allocator)) {
             ArrowWriter writer =
@@ -57,9 +67,7 @@ public final class FlussArrowRecordEncoder {
                                 new UnmanagedPagedOutputView(INITIAL_PAGE_SIZE),
                                 true,
                                 null);
-                for (GenericRow row : rows) {
-                    builder.append(ChangeType.APPEND_ONLY, row);
-                }
+                rowSource.produce(row -> builder.append(ChangeType.APPEND_ONLY, row));
                 // The output view owns heap pages. The result remains valid after the Arrow
                 // writer and allocator close, including across asynchronous append completion.
                 return builder.build();
@@ -67,5 +75,17 @@ public final class FlussArrowRecordEncoder {
                 writer.recycle(epoch);
             }
         }
+    }
+
+    @FunctionalInterface
+    interface RowSource {
+        /** Produces rows synchronously and never retains the supplied consumer. */
+        void produce(RowConsumer consumer) throws Exception;
+    }
+
+    @FunctionalInterface
+    interface RowConsumer {
+        /** Serializes one row before returning and never retains the row. */
+        void append(GenericRow row) throws Exception;
     }
 }
