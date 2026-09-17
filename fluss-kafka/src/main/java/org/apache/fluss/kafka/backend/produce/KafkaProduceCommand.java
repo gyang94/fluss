@@ -157,9 +157,29 @@ public final class KafkaProduceCommand {
             return copyNullable(key);
         }
 
+        /**
+         * Borrows the nullable key owned by this record for synchronous conversion.
+         *
+         * <p>The returned array must not be modified or retained after conversion. Use {@link
+         * #key()} when an independently owned copy is needed.
+         */
+        public @Nullable byte[] borrowedKey() {
+            return key;
+        }
+
         /** Returns a copy of the nullable Kafka record value. */
         public @Nullable byte[] value() {
             return copyNullable(value);
+        }
+
+        /**
+         * Borrows the nullable value owned by this record for synchronous conversion.
+         *
+         * <p>The returned array must not be modified or retained after conversion. Use {@link
+         * #value()} when an independently owned copy is needed.
+         */
+        public @Nullable byte[] borrowedValue() {
+            return value;
         }
 
         /** Returns the copied Kafka headers in record order. */
@@ -192,6 +212,16 @@ public final class KafkaProduceCommand {
         /** Returns a copy of the nullable header value. */
         public @Nullable byte[] value() {
             return value == null ? null : value.clone();
+        }
+
+        /**
+         * Borrows the nullable header value for synchronous conversion.
+         *
+         * <p>The returned array is owned by this header and must not be modified or retained after
+         * conversion. Use {@link #value()} when an independently owned copy is needed.
+         */
+        public @Nullable byte[] borrowedValue() {
+            return value;
         }
     }
 }
