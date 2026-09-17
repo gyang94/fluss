@@ -49,10 +49,13 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -156,6 +159,51 @@ class KafkaProduceAppendITCase {
         }
     }
 
+    @Test
+    void testPipelinedProducePreservesAppendOrder() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "produce_pipelined");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor("raw"), false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            try (KafkaProducer<byte[], byte[]> producer = producer("all", 0)) {
+                assertThat(producer.partitionsFor(path.toString())).hasSize(1);
+                List<byte[]> values = new ArrayList<>();
+                List<Future<RecordMetadata>> writes = new ArrayList<>();
+                for (int i = 0; i < 30; i++) {
+                    byte[] value = new byte[i % 2 == 0 ? 16384 : 1];
+                    Arrays.fill(value, (byte) i);
+                    values.add(value);
+                    writes.add(
+                            producer.send(
+                                    new ProducerRecord<>(
+                                            path.toString(), 0, (long) i, KEY, value)));
+                }
+                for (int i = 0; i < writes.size(); i++) {
+                    assertThat(writes.get(i).get(30, TimeUnit.SECONDS).offset()).isEqualTo(i);
+                }
+                try (Table table = connection.getTable(path);
+                        LogScanner scanner = table.newScan().createLogScanner()) {
+                    scanner.subscribeFromBeginning(0);
+                    int count = 0;
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                    while (count < values.size() && System.nanoTime() < deadline) {
+                        for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                            assertThat(record.getRow().getBytes(0)).isEqualTo(values.get(count));
+                            assertThat(record.getRow().getTimestampLtz(1, 3).getEpochMillisecond())
+                                    .isEqualTo(count);
+                            count++;
+                        }
+                    }
+                    assertThat(count).isEqualTo(values.size());
+                }
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
     private static void assertReadback(
             Connection connection, TablePath path, String format, byte[] expectedValue)
             throws Exception {
@@ -216,6 +264,10 @@ class KafkaProduceAppendITCase {
     }
 
     private static KafkaProducer<byte[], byte[]> producer(String acks) {
+        return producer(acks, 16384);
+    }
+
+    private static KafkaProducer<byte[], byte[]> producer(String acks, int batchSize) {
         ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
         Map<String, Object> config = new HashMap<>();
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, node.host() + ":" + node.port());
@@ -223,6 +275,7 @@ class KafkaProduceAppendITCase {
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
         config.put(ProducerConfig.ACKS_CONFIG, acks);
+        config.put(ProducerConfig.BATCH_SIZE_CONFIG, batchSize);
         config.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "gzip");
         config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 30000);
         config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 10000);
