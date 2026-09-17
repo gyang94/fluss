@@ -30,6 +30,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.dispatcher.KafkaApiHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
 
+import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.InvalidRequiredAcksException;
@@ -47,6 +48,8 @@ import org.apache.kafka.common.record.Records;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
+import org.apache.kafka.common.utils.BufferSupplier;
+import org.apache.kafka.common.utils.CloseableIterator;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -219,14 +222,37 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                 throw new InvalidRequestException(
                         "Idempotent, transactional, and control record batches are not supported.");
             }
-            for (org.apache.kafka.common.record.Record record : batch) {
-                record.ensureValid();
-                copied.add(
-                        new KafkaProduceCommand.Record(
-                                record.timestamp(),
-                                copyBuffer(record.hasKey() ? record.key() : null),
-                                copyBuffer(record.hasValue() ? record.value() : null),
-                                copyHeaders(record.headers())));
+            // Validate the incoming Kafka batch before copying away its offset metadata. Fluss
+            // assigns its own storage offsets later, independently of this input validation.
+            long countFromOffsets = batch.lastOffset() - batch.baseOffset() + 1;
+            Integer recordCount = batch.countOrNull();
+            if (countFromOffsets <= 0
+                    || recordCount == null
+                    || recordCount <= 0
+                    || countFromOffsets != recordCount) {
+                throw new InvalidRecordException(
+                        "Invalid Kafka record batch offset range ["
+                                + batch.baseOffset()
+                                + ", "
+                                + batch.lastOffset()
+                                + "] for record count "
+                                + recordCount
+                                + ".");
+            }
+            // The ordinary compressed iterator preallocates a list using the untrusted record
+            // count. Stream records instead and close the decompressor on success and failure.
+            try (CloseableIterator<org.apache.kafka.common.record.Record> iterator =
+                    batch.streamingIterator(BufferSupplier.NO_CACHING)) {
+                while (iterator.hasNext()) {
+                    org.apache.kafka.common.record.Record record = iterator.next();
+                    record.ensureValid();
+                    copied.add(
+                            new KafkaProduceCommand.Record(
+                                    record.timestamp(),
+                                    copyBuffer(record.hasKey() ? record.key() : null),
+                                    copyBuffer(record.hasValue() ? record.value() : null),
+                                    copyHeaders(record.headers())));
+                }
             }
         }
         if (copied.isEmpty() || validBytes != records.sizeInBytes()) {
