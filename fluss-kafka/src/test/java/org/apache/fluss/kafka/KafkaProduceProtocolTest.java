@@ -41,6 +41,8 @@ import org.apache.kafka.common.message.ProduceRequestData.TopicProduceData;
 import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceResponse;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.CompressionType;
+import org.apache.kafka.common.record.DefaultRecordBatch;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.SimpleRecord;
@@ -50,7 +52,10 @@ import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.RequestUtils;
 import org.apache.kafka.common.requests.ResponseHeader;
+import org.apache.kafka.common.utils.Crc32C;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -100,6 +105,161 @@ class KafkaProduceProtocolTest {
             key[0] = 9;
             assertThat(record.key()).containsExactly((byte) 1);
         }
+    }
+
+    @ParameterizedTest
+    @EnumSource(CompressionType.class)
+    void testStreamedRecordsRemainIndependentOfInput(CompressionType compressionType) {
+        byte[] value = new byte[32 * 1024];
+        Arrays.fill(value, (byte) 7);
+        MemoryRecords records =
+                MemoryRecords.withRecords(
+                        RecordBatch.MAGIC_VALUE_V2,
+                        0L,
+                        Compression.of(compressionType).build(),
+                        new SimpleRecord(
+                                123L,
+                                new byte[] {1},
+                                value,
+                                new Header[] {
+                                    new RecordHeader("header", new byte[] {2, 3}),
+                                    new RecordHeader("header", null)
+                                }),
+                        new SimpleRecord(456L, null, new byte[0]));
+        AtomicReference<KafkaProduceCommand> copied = new AtomicReference<>();
+
+        ProduceResponse response =
+                dispatch(
+                        request((short) 11, (short) 1, partition(0, records)),
+                        command -> {
+                            copied.set(command);
+                            return successful(command);
+                        });
+        assertErrors(response, Errors.NONE);
+        ByteBuffer input = records.buffer().duplicate();
+        while (input.hasRemaining()) {
+            input.put((byte) 0);
+        }
+
+        List<KafkaProduceCommand.Record> result =
+                copied.get().topics().get(0).partitions().get(0).records();
+        assertThat(result).hasSize(2);
+        assertThat(result.get(0).timestamp()).isEqualTo(123L);
+        assertThat(result.get(0).key()).containsExactly((byte) 1);
+        assertThat(result.get(0).value()).containsExactly(value);
+        assertThat(result.get(0).headers())
+                .extracting(KafkaProduceCommand.RecordHeader::name)
+                .containsExactly("header", "header");
+        assertThat(result.get(0).headers().get(0).value()).containsExactly((byte) 2, (byte) 3);
+        assertThat(result.get(0).headers().get(1).value()).isNull();
+        assertThat(result.get(1).timestamp()).isEqualTo(456L);
+        assertThat(result.get(1).key()).isNull();
+        assertThat(result.get(1).value()).isEmpty();
+    }
+
+    @ParameterizedTest
+    @EnumSource(CompressionType.class)
+    void testIncorrectRecordCountDoesNotSuppressValidPartition(CompressionType compressionType) {
+        MemoryRecords malformed =
+                MemoryRecords.withRecords(
+                        RecordBatch.MAGIC_VALUE_V2,
+                        0L,
+                        Compression.of(compressionType).build(),
+                        new SimpleRecord(new byte[] {1}));
+        ByteBuffer bytes = malformed.buffer();
+        bytes.putInt(DefaultRecordBatch.RECORDS_COUNT_OFFSET, 32);
+        bytes.putInt(DefaultRecordBatch.LAST_OFFSET_DELTA_OFFSET, 31);
+        updateBatchChecksum(malformed);
+
+        ProduceResponse response =
+                dispatch(
+                        request(
+                                (short) 11,
+                                (short) 1,
+                                partition(0, malformed),
+                                partition(1, records())),
+                        command -> {
+                            assertThat(command.topics().get(0).partitions())
+                                    .extracting(KafkaProduceCommand.PartitionWrite::partitionId)
+                                    .containsExactly(1);
+                            return successful(command);
+                        });
+        assertErrors(response, Errors.INVALID_RECORD, Errors.NONE);
+    }
+
+    @ParameterizedTest
+    @EnumSource(CompressionType.class)
+    void testInvalidBatchOffsetRangeDoesNotSuppressValidPartition(CompressionType compressionType) {
+        for (int[] invalidHeader :
+                new int[][] {{1, -1}, {1, 9}, {1, Integer.MAX_VALUE}, {0, 0}, {-1, 0}}) {
+            MemoryRecords malformed =
+                    MemoryRecords.withRecords(
+                            RecordBatch.MAGIC_VALUE_V2,
+                            0L,
+                            Compression.of(compressionType).build(),
+                            new SimpleRecord(new byte[] {1}));
+            int recordCount = invalidHeader[0];
+            int lastOffsetDelta = invalidHeader[1];
+            malformed.buffer().putInt(DefaultRecordBatch.RECORDS_COUNT_OFFSET, recordCount);
+            malformed.buffer().putInt(DefaultRecordBatch.LAST_OFFSET_DELTA_OFFSET, lastOffsetDelta);
+            updateBatchChecksum(malformed);
+
+            ProduceResponse response =
+                    dispatch(
+                            request(
+                                    (short) 11,
+                                    (short) 1,
+                                    partition(0, malformed),
+                                    partition(1, records())),
+                            command -> {
+                                assertThat(command.topics().get(0).partitions())
+                                        .extracting(KafkaProduceCommand.PartitionWrite::partitionId)
+                                        .containsExactly(1);
+                                return successful(command);
+                            });
+            assertErrors(response, Errors.INVALID_RECORD, Errors.NONE);
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(CompressionType.class)
+    void testValidBatchUsesOffsetAssignedByBackend(CompressionType compressionType) {
+        MemoryRecords records =
+                MemoryRecords.withRecords(
+                        RecordBatch.MAGIC_VALUE_V2,
+                        0L,
+                        Compression.of(compressionType).build(),
+                        new SimpleRecord(new byte[] {1}),
+                        new SimpleRecord(new byte[] {2}),
+                        new SimpleRecord(new byte[] {3}));
+        long backendBaseOffset = 1L << 40;
+        ProduceResponse response =
+                dispatch(
+                        request((short) 11, (short) 1, partition(0, records)),
+                        command -> {
+                            assertThat(command.topics().get(0).partitions().get(0).records())
+                                    .hasSize(3);
+                            return CompletableFuture.completedFuture(
+                                    new KafkaProduceResult(
+                                            Collections.singletonList(
+                                                    new TopicResult(
+                                                            "topic",
+                                                            Collections.singletonList(
+                                                                    new PartitionResult(
+                                                                            0,
+                                                                            Errors.NONE,
+                                                                            backendBaseOffset,
+                                                                            null))))));
+                        });
+        assertErrors(response, Errors.NONE);
+        assertThat(
+                        response.data()
+                                .responses()
+                                .find("topic")
+                                .partitionResponses()
+                                .get(0)
+                                .baseOffset())
+                .isEqualTo(backendBaseOffset);
     }
 
     @Test
@@ -362,5 +522,13 @@ class KafkaProduceProtocolTest {
         assertThat(response.data().responses().find("topic").partitionResponses())
                 .extracting(PartitionProduceResponse::errorCode)
                 .containsExactly(Arrays.stream(errors).map(Errors::code).toArray(Short[]::new));
+    }
+
+    private static void updateBatchChecksum(MemoryRecords records) {
+        ByteBuffer bytes = records.buffer();
+        int checksumStart = DefaultRecordBatch.CRC_OFFSET + Integer.BYTES;
+        bytes.putInt(
+                DefaultRecordBatch.CRC_OFFSET,
+                (int) Crc32C.compute(bytes, checksumStart, bytes.limit() - checksumStart));
     }
 }
