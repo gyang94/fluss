@@ -23,6 +23,7 @@ import org.apache.fluss.kafka.api.produce.ProduceHandler;
 import org.apache.fluss.kafka.api.versions.ApiVersionsHandler;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
 import org.apache.fluss.kafka.backend.produce.GatewayKafkaProduceBackend;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceConversionExecutor;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
@@ -32,6 +33,8 @@ import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
+
+import javax.annotation.Nullable;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -43,6 +46,15 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
     public KafkaRequestHandler(
             Configuration conf, RpcGatewayService service, TabletServerGateway gateway) {
+        this(conf, service, gateway, null);
+    }
+
+    /** Creates a handler with a plugin-owned executor for blocking Produce work. */
+    public KafkaRequestHandler(
+            Configuration conf,
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            @Nullable KafkaProduceConversionExecutor conversionExecutor) {
         checkNotNull(service);
         checkNotNull(gateway);
         KafkaTopicMapper topicMapper = new KafkaTopicMapper(checkNotNull(conf));
@@ -55,7 +67,10 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
         registry.register(
                 new ProduceHandler(
                         new GatewayKafkaProduceBackend(
-                                service, gateway, new ArrowKafkaRecordTranscoder())));
+                                service,
+                                gateway,
+                                new ArrowKafkaRecordTranscoder(),
+                                conversionExecutor)));
         registry.freeze();
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }

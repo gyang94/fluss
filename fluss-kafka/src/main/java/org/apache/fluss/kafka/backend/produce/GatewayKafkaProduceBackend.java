@@ -24,9 +24,9 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
+import org.apache.fluss.kafka.transcode.KafkaTopicWritePlan;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
@@ -44,12 +44,19 @@ import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.protocol.Errors;
 
+import javax.annotation.Nullable;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -60,21 +67,48 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private final RpcGatewayService service;
     private final TabletServerGateway gateway;
     private final KafkaTopicMapper topicMapper = new KafkaTopicMapper();
-    private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
     private final KafkaRecordTranscoder transcoder;
+    private final KafkaTableInfoCache tableInfoCache = new KafkaTableInfoCache();
+    private final @Nullable KafkaProduceConversionExecutor conversionExecutor;
 
     /** Creates a Produce backend backed by the local TabletServer gateway. */
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
             KafkaRecordTranscoder transcoder) {
+        this(service, gateway, transcoder, null);
+    }
+
+    /** Creates a backend that submits work to a caller-owned bounded conversion executor. */
+    public GatewayKafkaProduceBackend(
+            RpcGatewayService service,
+            TabletServerGateway gateway,
+            KafkaRecordTranscoder transcoder,
+            @Nullable KafkaProduceConversionExecutor conversionExecutor) {
         this.service = checkNotNull(service);
         this.gateway = checkNotNull(gateway);
         this.transcoder = checkNotNull(transcoder);
+        this.conversionExecutor = conversionExecutor;
     }
 
     @Override
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
+        if (conversionExecutor != null) {
+            return conversionExecutor
+                    .submit(Thread.currentThread().getId(), () -> writeTopics(command))
+                    .exceptionally(
+                            failure -> {
+                                List<TopicResult> results = new ArrayList<>();
+                                for (TopicWrite topic : command.topics()) {
+                                    results.add(failedTopic(topic, failure));
+                                }
+                                return new KafkaProduceResult(results);
+                            });
+        }
+        return writeTopics(command);
+    }
+
+    private CompletableFuture<KafkaProduceResult> writeTopics(KafkaProduceCommand command) {
         List<CompletableFuture<TopicResult>> futures = new ArrayList<>();
         for (TopicWrite topic : command.topics()) {
             futures.add(writeTopic(command, topic));
@@ -94,16 +128,27 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private CompletableFuture<TopicResult> writeTopic(
             KafkaProduceCommand command, TopicWrite topic) {
         try {
+            checkInterrupted();
             TablePath path = topicMapper.toTablePath(topic.topicName());
             setCurrentSession(command);
             GetTableInfoRequest request = new GetTableInfoRequest();
             request.setTablePath()
                     .setDatabaseName(path.getDatabaseName())
                     .setTableName(path.getTableName());
-            return gateway.getTableInfo(request)
-                    .thenCompose(
+            CompletableFuture<GetTableInfoResponse> metadata = gateway.getTableInfo(request);
+            if (conversionExecutor != null) {
+                // The local gateway is synchronous. Waiting here also preserves FIFO append
+                // order if an alternative gateway returns asynchronously; only this worker waits.
+                GetTableInfoResponse response =
+                        metadata.get(Math.max(0, command.timeoutMs()), TimeUnit.MILLISECONDS);
+                return produceTopic(command, topic, toTableInfo(path, response));
+            }
+            return metadata.thenCompose(
                             response -> produceTopic(command, topic, toTableInfo(path, response)))
                     .exceptionally(failure -> failedTopic(topic, failure));
+        } catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            return CompletableFuture.completedFuture(failedTopic(topic, failure));
         } catch (Exception failure) {
             return CompletableFuture.completedFuture(failedTopic(topic, failure));
         }
@@ -112,7 +157,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private CompletableFuture<TopicResult> produceTopic(
             KafkaProduceCommand command, TopicWrite topic, TableInfo tableInfo) {
         // Admission must match Metadata, including when the schema changes between requests.
-        schemaResolver.resolve(tableInfo.toTableDescriptor());
+        KafkaTopicWritePlan writePlan = transcoder.prepare(tableInfo);
         ProduceLogRequest request =
                 new ProduceLogRequest()
                         .setTableId(tableInfo.getTableId())
@@ -132,7 +177,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 continue;
             }
             try {
-                BytesView records = transcoder.transcode(partition.records(), tableInfo);
+                BytesView records = transcoder.transcode(partition.records(), writePlan);
                 request.addBucketsReq()
                         .setBucketId(partition.partitionId())
                         .setRecordsBytesView(records);
@@ -146,6 +191,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                     toTopicResult(topic, new ProduceLogResponse(), failures));
         }
         try {
+            checkInterrupted();
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended;
             try {
@@ -175,7 +221,11 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         return new TopicResult(topic.topicName(), results);
     }
 
-    private static TableInfo toTableInfo(TablePath path, GetTableInfoResponse response) {
+    private TableInfo toTableInfo(TablePath path, GetTableInfoResponse response) {
+        return tableInfoCache.getOrLoad(path, response, () -> parseTableInfo(path, response));
+    }
+
+    private static TableInfo parseTableInfo(TablePath path, GetTableInfoResponse response) {
         return TableInfo.of(
                 path,
                 response.getTableId(),
@@ -183,7 +233,8 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 TableDescriptor.fromJsonBytes(response.getTableJson()),
                 response.hasRemoteDataDir() ? response.getRemoteDataDir() : null,
                 response.getCreatedTime(),
-                response.getModifiedTime());
+                response.getModifiedTime(),
+                response.hasBucketCountEpoch() ? response.getBucketCountEpoch() : 0L);
     }
 
     private static TopicResult toTopicResult(
@@ -239,15 +290,21 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private static PartitionResult failedPartition(int partitionId, Throwable failure) {
         Throwable cause = unwrap(failure);
         Errors kafkaError =
-                cause instanceof KafkaTopicSchemaException || cause instanceof InvalidTopicException
-                        ? Errors.INVALID_TOPIC_EXCEPTION
-                        : cause instanceof KafkaRecordEncodingException
-                                ? Errors.CORRUPT_MESSAGE
-                                : cause instanceof IllegalArgumentException
-                                        ? Errors.INVALID_REQUEST
-                                        : toKafkaError(
-                                                org.apache.fluss.rpc.protocol.Errors.forException(
-                                                        cause));
+                cause instanceof RejectedExecutionException
+                                || cause instanceof TimeoutException
+                                || cause instanceof InterruptedException
+                                || cause instanceof CancellationException
+                        ? Errors.REQUEST_TIMED_OUT
+                        : cause instanceof KafkaTopicSchemaException
+                                        || cause instanceof InvalidTopicException
+                                ? Errors.INVALID_TOPIC_EXCEPTION
+                                : cause instanceof KafkaRecordEncodingException
+                                        ? Errors.CORRUPT_MESSAGE
+                                        : cause instanceof IllegalArgumentException
+                                                ? Errors.INVALID_REQUEST
+                                                : toKafkaError(
+                                                        org.apache.fluss.rpc.protocol.Errors
+                                                                .forException(cause));
         return new PartitionResult(partitionId, kafkaError, -1L, cause.getMessage());
     }
 
@@ -298,9 +355,16 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     private static Throwable unwrap(Throwable failure) {
         Throwable current = failure;
-        while (current instanceof CompletionException && current.getCause() != null) {
+        while ((current instanceof CompletionException || current instanceof ExecutionException)
+                && current.getCause() != null) {
             current = current.getCause();
         }
         return current;
+    }
+
+    private void checkInterrupted() {
+        if (conversionExecutor != null && Thread.currentThread().isInterrupted()) {
+            throw new CancellationException("Kafka conversion worker was interrupted.");
+        }
     }
 }
