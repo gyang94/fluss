@@ -179,10 +179,9 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
                 .filteredOn(result -> result.getTableBucket().equals(failedBucket))
                 .hasSize(1)
                 .allSatisfy(result -> assertThat(result.failed()).isTrue());
-        assertThat(delayedResponse).isNotDone();
-
-        // Drain after PutKv has installed its delayed write. A successful changelog append must
-        // wake the fetch now, without waiting for the three-minute fetch timeout.
+        // The asynchronous KV flush may already have advanced the high watermark and completed
+        // the fetch. Draining must also complete any remaining notification, without waiting for
+        // the three-minute fetch timeout.
         replicaManager.tryCompleteActions();
         assertThat(delayedResponse).isDone();
         assertThat(delayedResponse.get().get(successfulBucket).getHighWatermark()).isEqualTo(8L);
@@ -283,7 +282,7 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
     private CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> watchDelayedFetch(
             TableBucket tableBucket) {
         FetchLogResultForBucket previousResult =
-                new FetchLogResultForBucket(tableBucket, MemoryLogRecords.EMPTY, 0L);
+                FetchLogResultForBucket.records(tableBucket, MemoryLogRecords.EMPTY, 0L, -1L, -1L);
         CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> response =
                 new CompletableFuture<>();
         DelayedFetchLog delayedFetchLog =

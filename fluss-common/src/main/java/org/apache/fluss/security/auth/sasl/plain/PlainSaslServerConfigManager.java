@@ -29,10 +29,10 @@ import javax.annotation.Nullable;
 
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -86,7 +86,8 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
         checkNotNull(configuration, "configuration must not be null");
         this.configuration = new Configuration(configuration);
         this.superUsers = parseSuperUsers(configuration);
-        this.principalIgnoreCase = configuration.get(ConfigOptions.SECURITY_ACL_PRINCIPAL_IGNORE_CASE);
+        this.principalIgnoreCase =
+                configuration.get(ConfigOptions.SECURITY_ACL_PRINCIPAL_IGNORE_CASE);
         this.initialPlainCredentialsFromJaasConfig = parseCredentialsFromJaasConfig(configuration);
         validate(configuration);
         reconfigure(configuration);
@@ -221,6 +222,7 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
         }
         return credentials;
     }
+
     private Map<String, String> mergePlainCredentials(Map<String, String> plainCredentials) {
         Map<String, String> mergedCredentials =
                 new LinkedHashMap<>(initialPlainCredentialsFromJaasConfig);
@@ -284,5 +286,4 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
                 .map(FlussPrincipal::parsePrincipals)
                 .orElse(Collections.emptySet());
     }
-
 }

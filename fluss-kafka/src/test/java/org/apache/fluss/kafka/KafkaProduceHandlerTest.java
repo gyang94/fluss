@@ -44,6 +44,7 @@ import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.server.entity.ProduceLogDataForBucket;
 import org.apache.fluss.server.utils.ServerRpcMessageUtils;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
@@ -73,6 +74,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -840,7 +842,12 @@ public class KafkaProduceHandlerTest {
         public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
             producePrincipal = currentSession().getPrincipal();
             lastProduceRequest = request;
-            lastProduceData = ServerRpcMessageUtils.getProduceLogData(request);
+            lastProduceData =
+                    ServerRpcMessageUtils.toProduceLogDataForBuckets(request).stream()
+                            .collect(
+                                    Collectors.toMap(
+                                            ProduceLogDataForBucket::tableBucket,
+                                            ProduceLogDataForBucket::records));
             if (produceResponse != null) {
                 return CompletableFuture.completedFuture(produceResponse);
             }

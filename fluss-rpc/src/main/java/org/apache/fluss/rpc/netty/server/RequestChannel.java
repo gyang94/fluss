@@ -325,6 +325,10 @@ public class RequestChannel {
                         queuePauseLease.close();
                     }
                     queuePauseLeases.clear();
+                    LOG.info(
+                            "Queue size ({}) dropped to resume threshold ({}), released queue pause leases.",
+                            queueSize,
+                            resumeThreshold);
                 } else {
                     if (queueSize < backpressureThreshold) {
                         return;
@@ -333,8 +337,14 @@ public class RequestChannel {
                     for (ChannelPauseController pauseController : associatedChannels.values()) {
                         queuePauseLeases.put(
                                 pauseController.channel,
-                                acquirePauseLeaseLocked(pauseController, BuiltInPauseReason.QUEUE_COUNT));
+                                acquirePauseLeaseLocked(
+                                        pauseController, BuiltInPauseReason.QUEUE_COUNT));
                     }
+                    LOG.warn(
+                            "Queue size ({}) reached backpressure threshold ({}), activated queue pause for {} channels.",
+                            queueSize,
+                            backpressureThreshold,
+                            associatedChannels.size());
                 }
             }
         } finally {

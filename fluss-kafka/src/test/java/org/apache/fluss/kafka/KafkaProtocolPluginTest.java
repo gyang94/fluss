@@ -20,6 +20,8 @@ package org.apache.fluss.kafka;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.MemorySize;
+import org.apache.fluss.exception.AuthorizationException;
+import org.apache.fluss.exception.ConfigException;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.kafka.admission.KafkaNativeProduceAdmissionController;
 import org.apache.fluss.kafka.admission.KafkaProduceAdmissionController;
@@ -80,11 +82,45 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
 /** Tests for Kafka protocol plugin resource lifecycle. */
 class KafkaProtocolPluginTest {
+
+    @Test
+    void testRequesterValidationPreservesSuperUserProtectionAndKafkaLimits() {
+        Configuration configuration = new Configuration();
+        configuration.set(ConfigOptions.SUPER_USERS, "User:root");
+        configuration.setString(ConfigOptions.SERVER_SASL_CREDENTIALS.key(), "root:initial");
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin();
+        plugin.setup(configuration);
+        FlussPrincipal root = new FlussPrincipal("root", "User");
+        FlussPrincipal operator = new FlussPrincipal("operator", "User");
+        try {
+            Configuration updated = new Configuration(configuration);
+            updated.setString(ConfigOptions.SERVER_SASL_CREDENTIALS.key(), "root:changed");
+            assertThatThrownBy(() -> plugin.validate(updated, operator))
+                    .isInstanceOf(AuthorizationException.class);
+            assertThatCode(() -> plugin.validate(updated, root)).doesNotThrowAnyException();
+            plugin.reconfigure(updated);
+
+            // Validation must use the credentials installed by the last reconfiguration.
+            assertThatCode(() -> plugin.validate(updated, operator)).doesNotThrowAnyException();
+            assertThatThrownBy(() -> plugin.validate(configuration, operator))
+                    .isInstanceOf(AuthorizationException.class);
+
+            Configuration invalidLimits = new Configuration(updated);
+            invalidLimits.set(ConfigOptions.KAFKA_PRODUCE_ADMISSION_MAX_LIVE_REQUESTS, 0);
+            assertThatThrownBy(() -> plugin.validate(invalidLimits, root))
+                    .isInstanceOf(ConfigException.class)
+                    .hasMessageContaining(
+                            ConfigOptions.KAFKA_PRODUCE_ADMISSION_MAX_LIVE_REQUESTS.key());
+        } finally {
+            plugin.closeAsync().join();
+        }
+    }
 
     @Test
     void testCloseClosesAdmissionAndWaitsForArrowWriters() {

@@ -309,7 +309,7 @@ public class RequestChannelTest {
         RequestChannel.PauseLease nativeInflightLease =
                 channel.pauseChannel(testChannel, TestingPauseReason.NATIVE_INFLIGHT);
 
-        testChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(testChannel.isAutoRead()).isFalse();
         assertThat(channel.activePauseReasons(testChannel))
                 .containsExactlyInAnyOrder(
                         TestingPauseReason.LIVE_REQUEST_COUNT, TestingPauseReason.NATIVE_INFLIGHT);
@@ -323,7 +323,7 @@ public class RequestChannelTest {
 
         secondLiveRequestLease.close();
         secondLiveRequestLease.close();
-        testChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(testChannel.isAutoRead()).isTrue();
         assertThat(channel.activePauseReasons(testChannel)).isEmpty();
 
         channel.unregisterChannel(testChannel);
@@ -339,7 +339,7 @@ public class RequestChannelTest {
 
         channel.putRequest(createTestRequest(1));
         channel.putRequest(createTestRequest(2));
-        testChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(testChannel.isAutoRead()).isFalse();
         assertThat(channel.activePauseReasons(testChannel))
                 .containsExactlyInAnyOrder(
                         RequestChannel.BuiltInPauseReason.QUEUE_COUNT,
@@ -351,7 +351,7 @@ public class RequestChannelTest {
         assertThat(testChannel.isAutoRead()).isFalse();
 
         nativeInflightLease.close();
-        testChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(testChannel.isAutoRead()).isTrue();
         assertThat(channel.pollRequest(10)).isNotNull();
         channel.unregisterChannel(testChannel);
     }
@@ -364,7 +364,7 @@ public class RequestChannelTest {
 
         TestChannel testChannel = new TestChannel();
         channel.registerChannel(testChannel);
-        testChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(testChannel.isAutoRead()).isFalse();
         assertThat(channel.activePauseReasons(testChannel))
                 .containsExactly(RequestChannel.BuiltInPauseReason.QUEUE_COUNT);
 
@@ -374,7 +374,7 @@ public class RequestChannelTest {
         assertThat(testChannel.isAutoRead()).isFalse();
 
         channel.registerChannel(testChannel);
-        testChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(testChannel.isAutoRead()).isTrue();
         assertThat(channel.activePauseReasons(testChannel)).isEmpty();
 
         assertThat(channel.pollRequest(10)).isNotNull();
@@ -391,13 +391,13 @@ public class RequestChannelTest {
 
         RequestChannel.PauseLease pauseLease =
                 channel.pauseChannel(firstChannel, TestingPauseReason.LIVE_REQUEST_BYTES);
-        firstChannel.waitForAutoReadChange(false, 2, TimeUnit.SECONDS);
+        assertThat(firstChannel.isAutoRead()).isFalse();
         assertThat(secondChannel.isAutoRead()).isTrue();
         assertThat(channel.isChannelPaused(firstChannel)).isTrue();
         assertThat(channel.isChannelPaused(secondChannel)).isFalse();
 
         pauseLease.close();
-        firstChannel.waitForAutoReadChange(true, 2, TimeUnit.SECONDS);
+        assertThat(firstChannel.isAutoRead()).isTrue();
         assertThat(secondChannel.isAutoRead()).isTrue();
 
         channel.unregisterChannel(firstChannel);
@@ -539,7 +539,7 @@ public class RequestChannelTest {
     private static class TestChannel implements Channel {
         private final AtomicBoolean autoRead = new AtomicBoolean(true);
         private final TestChannelConfig config = new TestChannelConfig(this);
-        private final EventLoop eventLoop;
+        private final TestEventLoop eventLoop;
         private final ChannelId channelId = new TestChannelId();
         private final SocketAddress remoteAddress = new InetSocketAddress("localhost", 8080);
 
@@ -547,7 +547,7 @@ public class RequestChannelTest {
             this(new TestEventLoop());
         }
 
-        private TestChannel(EventLoop eventLoop) {
+        private TestChannel(TestEventLoop eventLoop) {
             this.eventLoop = eventLoop;
         }
 

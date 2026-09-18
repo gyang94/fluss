@@ -28,7 +28,6 @@ import org.apache.fluss.kafka.admission.KafkaRequestAdmissionController;
 import org.apache.fluss.kafka.backend.produce.KafkaNativeProduceOperationTracker;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceConversionExecutor;
 import org.apache.fluss.kafka.format.KafkaDataFormat;
-import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.kafka.metrics.KafkaProduceMetrics;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaArrowWriterManager;
@@ -41,6 +40,7 @@ import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.NetworkProtocolPlugin;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.security.auth.AuthenticationFactory;
 import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.security.auth.sasl.plain.PlainSaslServerConfigManager;
@@ -223,7 +223,7 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public void validate(Configuration newConfig, @Nullable FlussPrincipal requester)
             throws ConfigException {
-        validateKafkaAuthenticationConfiguration(newConfig);
+        validate(newConfig);
         plainSaslServerConfigManager.validate(newConfig, requester);
     }
 
