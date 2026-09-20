@@ -136,6 +136,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 }
                 String fieldName = parser.currentName();
                 String path = JsonPath.field(JsonPath.ROOT, fieldName);
+                validateUnicode(fieldName, path);
                 Integer position = projectedFields.get(fieldName);
                 if (position == null) {
                     if (rescuedFields == null) {
@@ -243,12 +244,34 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
                     checkContainerSize(object.size() + 1, path);
                     String fieldName = parser.currentName();
+                    String fieldPath = JsonPath.field(path, fieldName);
+                    validateUnicode(fieldName, fieldPath);
                     parser.nextToken();
-                    object.set(fieldName, readBoundedTree(parser, JsonPath.field(path, fieldName)));
+                    object.set(fieldName, readBoundedTree(parser, fieldPath));
                 }
                 return object;
             default:
-                return OBJECT_MAPPER.readTree(parser);
+                JsonNode value = OBJECT_MAPPER.readTree(parser);
+                if (value.isTextual()) {
+                    validateUnicode(value.textValue(), path);
+                }
+                // Jackson may turn an overflowing numeric token into a non-finite DoubleNode
+                // even with USE_BIG_DECIMAL_FOR_FLOATS. Rescue must not serialize it as a string.
+                if ((value.isDouble() || value.isFloat())
+                        && !Double.isFinite(value.doubleValue())) {
+                    throw new KafkaRecordEncodingException(
+                            "Invalid Kafka record value at "
+                                    + path
+                                    + ": non-finite or overflowing number.");
+                }
+                return value;
+        }
+    }
+
+    private static void validateUnicode(String value, String path) {
+        if (JsonToFlussConverters.hasUnpairedSurrogate(value)) {
+            throw new KafkaRecordEncodingException(
+                    "Invalid Kafka record value at " + path + ": unpaired UTF-16 surrogate.");
         }
     }
 

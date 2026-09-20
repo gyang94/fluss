@@ -426,26 +426,25 @@ final class JsonToFlussConverters {
     private static String textualValue(JsonNode node, String path, DataType dataType) {
         require(node.isTextual(), path, dataType, "expected a JSON string");
         String value = node.textValue();
+        require(!hasUnpairedSurrogate(value), path, dataType, "unpaired UTF-16 surrogate");
+        return value;
+    }
+
+    static boolean hasUnpairedSurrogate(String value) {
         // Jackson can retain unpaired JSON escapes in Java strings. Reject them before
         // BinaryString's UTF-8 encoding silently replaces them with a question mark.
         for (int i = 0; i < value.length(); i++) {
             char character = value.charAt(i);
             if (Character.isHighSurrogate(character)) {
-                require(
-                        i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1)),
-                        path,
-                        dataType,
-                        "unpaired UTF-16 surrogate");
+                if (i + 1 >= value.length() || !Character.isLowSurrogate(value.charAt(i + 1))) {
+                    return true;
+                }
                 i++;
-            } else {
-                require(
-                        !Character.isLowSurrogate(character),
-                        path,
-                        dataType,
-                        "unpaired UTF-16 surrogate");
+            } else if (Character.isLowSurrogate(character)) {
+                return true;
             }
         }
-        return value;
+        return false;
     }
 
     private static byte[] decodeBase64(JsonNode node, String path, DataType dataType) {
