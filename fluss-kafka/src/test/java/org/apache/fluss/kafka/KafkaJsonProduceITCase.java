@@ -213,16 +213,27 @@ class KafkaJsonProduceITCase {
             create(admin, path, descriptor);
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
                 assertThat(producer.partitionsFor(path.toString())).hasSize(1);
-                assertThatThrownBy(
-                                () ->
-                                        producer.send(record(path, "{\"rescue\":\"forged\"}"))
-                                                .get(30, TimeUnit.SECONDS))
-                        .hasCauseInstanceOf(InvalidRecordException.class);
+                for (String invalidJson :
+                        new String[] {
+                            "{\"rescue\":\"forged\"}",
+                            "{\"\\uD800\":1,\"?\":2}",
+                            "{\"details\":{\"\\uD800\":1,\"?\":2}}",
+                            "{\"extra\":\"\\uDC00\"}",
+                            "{\"extra\":1e400}",
+                            "{\"details\":{\"extra\":[-1e400]}}"
+                        }) {
+                    assertThatThrownBy(
+                                    () ->
+                                            producer.send(record(path, invalidJson))
+                                                    .get(30, TimeUnit.SECONDS))
+                            .as(invalidJson)
+                            .hasCauseInstanceOf(InvalidRecordException.class);
+                }
                 assertThat(
                                 producer.send(
                                                 record(
                                                         path,
-                                                        "{\"id\":1,\"extra\":2,\"details\":{\"name\":\"Alice\",\"other\":3}}"))
+                                                        "{\"id\":1,\"extra\":9007199254740993,\"details\":{\"name\":\"Alice\",\"other\":\"\\uD83D\\uDE00\"}}"))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
                         .isZero();
@@ -233,7 +244,8 @@ class KafkaJsonProduceITCase {
                             assertThat(row.getInt(0)).isEqualTo(1);
                             assertThat(row.getRow(1, 1).getString(0).toString()).isEqualTo("Alice");
                             assertThat(row.getString(2).toString())
-                                    .isEqualTo("{\"extra\":2,\"details\":{\"other\":3}}");
+                                    .isEqualTo(
+                                            "{\"extra\":9007199254740993,\"details\":{\"other\":\"😀\"}}");
                         });
             } finally {
                 admin.dropTable(path, true).get();

@@ -23,6 +23,9 @@ import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericArray;
 import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
@@ -32,6 +35,8 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -242,6 +247,101 @@ class JsonKafkaRescueTest {
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("$[\"value\"]")
                 .hasMessageContaining("expected a JSON scalar");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\\uD800", "\\uDC00", "a\\uD800b", "\\uD800\\uD800", "\\uDC00\\uD800"})
+    void testRejectsUnpairedSurrogatesBeforeRescueEncoding(String escaped) {
+        JsonKafkaFieldDecoder decoder = fidelityDecoder();
+        for (String json :
+                new String[] {
+                    "{\"" + escaped + "\":1,\"?\":2}",
+                    "{\"extra\":\"" + escaped + "\"}",
+                    "{\"extra\":{\"" + escaped + "\":1,\"?\":2}}",
+                    "{\"extra\":[{\"key\":\"" + escaped + "\"}]}",
+                    "{\"details\":{\"" + escaped + "\":1,\"?\":2}}",
+                    "{\"items\":[{\"extra\":\"" + escaped + "\"}]}",
+                    "{\"attributes\":{\"" + escaped + "\":{\"known\":1},\"?\":{\"known\":2}}}",
+                    "{\"attributes\":{\"dynamic\":{\"extra\":\"" + escaped + "\"}}}"
+                }) {
+            assertThatThrownBy(() -> decoder.decode(bytes(json)))
+                    .as(json)
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("unpaired UTF-16 surrogate");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1e400", "-1e400", "1e10000", "-1e10000", "1.7976931348623159e308"})
+    void testRejectsOverflowingNumbersBeforeRescueEncoding(String number) {
+        JsonKafkaFieldDecoder decoder = fidelityDecoder();
+        for (String json :
+                new String[] {
+                    "{\"extra\":" + number + "}",
+                    "{\"extra\":{\"nested\":" + number + "}}",
+                    "{\"extra\":[" + number + "]}",
+                    "{\"details\":{\"extra\":" + number + "}}",
+                    "{\"items\":[{\"extra\":" + number + "}]}",
+                    "{\"attributes\":{\"dynamic\":{\"extra\":" + number + "}}}"
+                }) {
+            assertThatThrownBy(() -> decoder.decode(bytes(json)))
+                    .as(json)
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("non-finite or overflowing number");
+        }
+    }
+
+    @Test
+    void testRescuePreservesValidUnicodeAndExactNumbers() throws Exception {
+        String largeInteger = BigInteger.TEN.pow(400).subtract(BigInteger.ONE).toString();
+        String decimal = "12345678901234567890.1234567890123456789";
+        Object[] values =
+                fidelityDecoder()
+                        .decode(
+                                bytes(
+                                        "{\"\\uD83D\\uDE00\":\"\\uD83D\\uDE00\","
+                                                + "\"extra\":{\"integer\":"
+                                                + largeInteger
+                                                + ",\"decimal\":"
+                                                + decimal
+                                                + ",\"small\":1e-400,\"large\":1e308,"
+                                                + "\"text\":\"Infinity\",\"literal\":\"\\\\uD800\"},"
+                                                + "\"details\":{\"known\":7,\"\\uD83D\\uDE00\":\"ok\"},"
+                                                + "\"items\":[{\"known\":8,\"extra\":\"\\uD83D\\uDE00\"}],"
+                                                + "\"attributes\":{\"\\uD83D\\uDE00\":{\"known\":9,\"extra\":1}}}"));
+        ObjectMapper mapper =
+                new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+        JsonNode rescued = mapper.readTree(((BinaryString) values[3]).toString());
+        assertThat(rescued.get("😀").textValue()).isEqualTo("😀");
+        JsonNode extra = rescued.get("extra");
+        assertThat(extra.get("integer").bigIntegerValue()).isEqualTo(new BigInteger(largeInteger));
+        assertThat(extra.get("decimal").decimalValue())
+                .isEqualByComparingTo(new BigDecimal(decimal));
+        assertThat(extra.get("small").decimalValue())
+                .isEqualByComparingTo(new BigDecimal("1e-400"));
+        assertThat(extra.get("large").decimalValue()).isEqualByComparingTo(new BigDecimal("1e308"));
+        assertThat(extra.get("text").textValue()).isEqualTo("Infinity");
+        assertThat(extra.get("literal").textValue()).isEqualTo("\\uD800");
+        assertThat(rescued.get("details").get("😀").textValue()).isEqualTo("ok");
+        assertThat(rescued.get("items").get(0).get("extra").textValue()).isEqualTo("😀");
+        assertThat(rescued.get("attributes").get("😀").get("extra").intValue()).isEqualTo(1);
+        assertThat(((GenericRow) values[0]).getInt(0)).isEqualTo(7);
+        assertThat(((GenericArray) values[1]).getRow(0, 1).getInt(0)).isEqualTo(8);
+        assertThat(
+                        ((GenericRow) ((GenericMap) values[2]).get(BinaryString.fromString("😀")))
+                                .getInt(0))
+                .isEqualTo(9);
+    }
+
+    private static JsonKafkaFieldDecoder fidelityDecoder() {
+        RowType nestedRow = DataTypes.ROW(DataTypes.FIELD("known", DataTypes.INT()));
+        return rescueDecoder(
+                DataTypes.ROW(
+                        DataTypes.FIELD("details", nestedRow),
+                        DataTypes.FIELD("items", DataTypes.ARRAY(nestedRow)),
+                        DataTypes.FIELD("attributes", DataTypes.MAP(DataTypes.STRING(), nestedRow)),
+                        DataTypes.FIELD("rescue", DataTypes.STRING())),
+                "rescue");
     }
 
     private static String containerAtLimit(boolean object) {
