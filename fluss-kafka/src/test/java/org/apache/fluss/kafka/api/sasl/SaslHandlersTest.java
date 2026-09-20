@@ -30,6 +30,8 @@ import org.apache.kafka.common.requests.SaslAuthenticateResponse;
 import org.apache.kafka.common.requests.SaslHandshakeRequest;
 import org.apache.kafka.common.requests.SaslHandshakeResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -40,10 +42,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Protocol response tests for the Kafka SASL handlers. */
 public class SaslHandlersTest {
 
-    @Test
-    public void testHandshakeSupportsOnlyV1AndPlain() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testHandshakeSupportsV0AndV1WithPlain(short version) {
         SaslHandshakeHandler handler = new SaslHandshakeHandler();
-        assertThat(handler.apiSpec().minVersion()).isEqualTo((short) 1);
+        assertThat(handler.apiSpec().minVersion()).isZero();
         assertThat(handler.apiSpec().maxVersion()).isEqualTo((short) 1);
 
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
@@ -52,12 +55,14 @@ public class SaslHandlersTest {
                                 connection,
                                 "KAFKA",
                                 new InetSocketAddress("127.0.0.1", 9092),
-                                handshake("PLAIN"))
+                                handshake("PLAIN", version))
                         .join();
 
         assertThat(Errors.forCode(response.data().errorCode())).isEqualTo(Errors.NONE);
         assertThat(response.data().mechanisms()).containsExactly("PLAIN");
         assertThat(connection.isAuthenticating()).isTrue();
+        assertThat(connection.isAuthenticatingWithRawTokens()).isEqualTo(version == 0);
+        connection.close();
     }
 
     @Test
@@ -126,15 +131,16 @@ public class SaslHandlersTest {
         assertThat(closeAfterResponse).isTrue();
     }
 
-    @Test
-    public void testAuthenticateSupportsV0ThroughV2AndReturnsPrincipal() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    public void testAuthenticateSupportsV0ThroughV2AndReturnsPrincipal(short version) {
         SaslAuthenticateHandler handler = new SaslAuthenticateHandler();
         assertThat(handler.apiSpec().minVersion()).isZero();
         assertThat(handler.apiSpec().maxVersion()).isEqualTo((short) 2);
 
         KafkaSaslConnection connection = authenticatedHandshakeConnection();
         SaslAuthenticateResponse response =
-                handler.handle(connection, authenticate("valid-token", (short) 2)).join();
+                handler.handle(connection, authenticate("valid-token", version)).join();
 
         assertThat(Errors.forCode(response.data().errorCode())).isEqualTo(Errors.NONE);
         assertThat(response.data().errorMessage()).isNull();
@@ -142,6 +148,29 @@ public class SaslHandlersTest {
         assertThat(response.data().sessionLifetimeMs()).isZero();
         assertThat(connection.isReady()).isTrue();
         assertThat(connection.principal()).isEqualTo(new FlussPrincipal("alice", "User"));
+    }
+
+    @Test
+    public void testFramedAuthenticateAfterV0HandshakeIsRejected() {
+        KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
+        new SaslHandshakeHandler()
+                .handle(connection, "KAFKA", null, handshake("PLAIN", (short) 0))
+                .join();
+        AtomicBoolean closeAfterResponse = new AtomicBoolean();
+
+        SaslAuthenticateResponse response =
+                new SaslAuthenticateHandler()
+                        .handle(
+                                connection,
+                                authenticate("valid-token", (short) 0),
+                                () -> closeAfterResponse.set(true))
+                        .join();
+
+        assertThat(Errors.forCode(response.data().errorCode()))
+                .isEqualTo(Errors.ILLEGAL_SASL_STATE);
+        assertThat(connection.shouldClose()).isTrue();
+        assertThat(connection.isAuthenticatingWithRawTokens()).isFalse();
+        assertThat(closeAfterResponse).isTrue();
     }
 
     @Test
@@ -214,8 +243,12 @@ public class SaslHandlersTest {
     }
 
     private static SaslHandshakeRequest handshake(String mechanism) {
+        return handshake(mechanism, (short) 1);
+    }
+
+    private static SaslHandshakeRequest handshake(String mechanism, short version) {
         return new SaslHandshakeRequest(
-                new SaslHandshakeRequestData().setMechanism(mechanism), (short) 1);
+                new SaslHandshakeRequestData().setMechanism(mechanism), version);
     }
 
     private static SaslAuthenticateRequest authenticate(String token, short version) {
