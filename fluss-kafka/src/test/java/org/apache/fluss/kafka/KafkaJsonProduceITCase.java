@@ -79,6 +79,8 @@ class KafkaJsonProduceITCase {
                                         .column(
                                                 "received_at",
                                                 DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                        .column("float_value", DataTypes.FLOAT())
+                                        .column("double_value", DataTypes.DOUBLE())
                                         .build())
                         .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
                         .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "message_key")
@@ -100,7 +102,8 @@ class KafkaJsonProduceITCase {
                                 producer.send(
                                                 record(
                                                         path,
-                                                        "{\"id\":7,\"amount\":12345678901234567890.1234567890}"))
+                                                        "{\"id\":7,\"amount\":12345678901234567890.1234567890,"
+                                                                + "\"float_value\":-0.0,\"double_value\":-0.0}"))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
                         .isZero();
@@ -115,6 +118,10 @@ class KafkaJsonProduceITCase {
                                             new BigDecimal("12345678901234567890.1234567890"));
                             assertThat(row.getTimestampLtz(3, 3).getEpochMillisecond())
                                     .isEqualTo(123L);
+                            assertThat(Float.floatToRawIntBits(row.getFloat(4)))
+                                    .isEqualTo(Float.floatToRawIntBits(-0.0F));
+                            assertThat(Double.doubleToRawLongBits(row.getDouble(5)))
+                                    .isEqualTo(Double.doubleToRawLongBits(-0.0D));
                         });
             } finally {
                 admin.dropTable(path, true).get();
