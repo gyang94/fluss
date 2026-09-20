@@ -30,6 +30,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.function.Supplier;
 
+import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Per-connection authentication state for a Kafka protocol channel. */
@@ -51,6 +52,7 @@ public final class KafkaSaslConnection implements AutoCloseable {
 
     private volatile State state;
     private volatile FlussPrincipal principal;
+    private volatile boolean rawSaslTokens;
     @Nullable private ServerAuthenticator authenticator;
 
     private KafkaSaslConnection(
@@ -84,6 +86,11 @@ public final class KafkaSaslConnection implements AutoCloseable {
     /** Returns whether this connection is exchanging SASL authentication tokens. */
     public boolean isAuthenticating() {
         return state == State.AUTHENTICATING;
+    }
+
+    /** Returns whether incoming frames are raw SASL tokens following a v0 handshake. */
+    public boolean isAuthenticatingWithRawTokens() {
+        return state == State.AUTHENTICATING && rawSaslTokens;
     }
 
     /** Returns whether this connection is ready to serve normal Kafka requests. */
@@ -137,6 +144,19 @@ public final class KafkaSaslConnection implements AutoCloseable {
      */
     public synchronized void beginAuthentication(
             String mechanism, String listenerName, @Nullable SocketAddress remoteAddress) {
+        beginAuthentication(mechanism, listenerName, remoteAddress, (short) 1);
+    }
+
+    /** Starts authentication using raw tokens for handshake v0 or Kafka-framed tokens for v1. */
+    public synchronized void beginAuthentication(
+            String mechanism,
+            String listenerName,
+            @Nullable SocketAddress remoteAddress,
+            short handshakeVersion) {
+        checkArgument(
+                handshakeVersion == 0 || handshakeVersion == 1,
+                "Unsupported SASL handshake version: %s",
+                handshakeVersion);
         if (state != State.AUTHENTICATION_REQUIRED) {
             throw new IllegalStateException("SASL handshake is not allowed in the current state.");
         }
@@ -151,6 +171,7 @@ public final class KafkaSaslConnection implements AutoCloseable {
                     new DefaultAuthenticateContext(
                             listenerName, clientIpAddress(remoteAddress), mechanism));
             authenticator = newAuthenticator;
+            rawSaslTokens = handshakeVersion == 0;
             state = State.AUTHENTICATING;
         } catch (AuthenticationException e) {
             closeAuthenticator(newAuthenticator);
