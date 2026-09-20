@@ -28,8 +28,10 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.StreamReadCon
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.DoubleNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.FloatNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.fluss.types.DataType;
 
 import javax.annotation.Nullable;
@@ -153,7 +155,43 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                     break;
             }
         }
-        return OBJECT_MAPPER.readTree(parser);
+        return readBoundedTree(parser, path);
+    }
+
+    private static JsonNode readBoundedTree(JsonParser parser, String path) throws IOException {
+        // Bound every container while consuming tokens, before allocating excess children.
+        // The parser independently enforces nesting depth and rejects duplicate object fields.
+        switch (parser.currentToken()) {
+            case START_ARRAY:
+                ArrayNode array = OBJECT_MAPPER.createArrayNode();
+                while (parser.nextToken() != JsonToken.END_ARRAY) {
+                    checkContainerSize(array.size() + 1, path);
+                    array.add(readBoundedTree(parser, JsonPath.index(path, array.size())));
+                }
+                return array;
+            case START_OBJECT:
+                ObjectNode object = OBJECT_MAPPER.createObjectNode();
+                while (parser.nextToken() != JsonToken.END_OBJECT) {
+                    checkContainerSize(object.size() + 1, path);
+                    String fieldName = parser.currentName();
+                    parser.nextToken();
+                    object.set(fieldName, readBoundedTree(parser, JsonPath.field(path, fieldName)));
+                }
+                return object;
+            default:
+                return OBJECT_MAPPER.readTree(parser);
+        }
+    }
+
+    private static void checkContainerSize(int size, String path) {
+        if (size > MAX_CONTAINER_ELEMENTS) {
+            throw new KafkaRecordEncodingException(
+                    "Invalid Kafka record value at "
+                            + path
+                            + ": container size exceeds "
+                            + MAX_CONTAINER_ELEMENTS
+                            + ".");
+        }
     }
 
     private Object[] nullValues() {

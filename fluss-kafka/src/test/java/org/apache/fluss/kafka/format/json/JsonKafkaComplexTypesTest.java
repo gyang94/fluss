@@ -24,15 +24,21 @@ import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericArray;
 import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -180,6 +186,138 @@ class JsonKafkaComplexTypesTest {
                 oversizedArray.toString(),
                 "$[\"values\"]",
                 "container size exceeds");
+    }
+
+    @ParameterizedTest(name = "{index}: {0}")
+    @MethodSource("oversizedContainers")
+    void testRejectsOversizedContainersBeforeReadingExcessChild(
+            String description, DataType dataType, String json, String path) {
+        // The excess child is deliberately unfinished. Reading it before checking the
+        // containing ARRAY/MAP/ROW limit would fail with a syntax error instead.
+        assertFailure(
+                DataTypes.ROW(DataTypes.FIELD("value", dataType)),
+                "{\"value\":" + json,
+                path,
+                "container size exceeds " + JsonToFlussConverters.MAX_CONTAINER_ELEMENTS);
+    }
+
+    private static Stream<Arguments> oversizedContainers() {
+        String array = containerAtLimit(false);
+        String object = containerAtLimit(true);
+        String oversizedArray = array.substring(0, array.length() - 1) + ",[";
+        String oversizedObject = object.substring(0, object.length() - 1) + ",\"excess\":{";
+        DataType arrayType = DataTypes.ARRAY(DataTypes.INT());
+        DataType mapType = DataTypes.MAP(DataTypes.STRING(), DataTypes.INT());
+        RowType rowType = rowTypeAtLimit();
+        return Stream.of(
+                Arguments.of("ARRAY", arrayType, oversizedArray, "$[\"value\"]"),
+                Arguments.of("MAP", mapType, oversizedObject, "$[\"value\"]"),
+                Arguments.of("ROW", rowType, oversizedObject, "$[\"value\"]"),
+                Arguments.of(
+                        "ARRAY inside ROW",
+                        DataTypes.ROW(DataTypes.FIELD("nested", arrayType)),
+                        "{\"nested\":" + oversizedArray,
+                        "$[\"value\"][\"nested\"]"),
+                Arguments.of(
+                        "MAP inside ARRAY",
+                        DataTypes.ARRAY(mapType),
+                        "[" + oversizedObject,
+                        "$[\"value\"][0]"),
+                Arguments.of(
+                        "ROW inside MAP",
+                        DataTypes.MAP(DataTypes.STRING(), rowType),
+                        "{\"nested\":" + oversizedObject,
+                        "$[\"value\"][\"nested\"]"));
+    }
+
+    @Test
+    void testAcceptsLimitForEachSiblingContainer() {
+        String array = containerAtLimit(false);
+        String object = containerAtLimit(true);
+        RowType rowType =
+                DataTypes.ROW(
+                        DataTypes.FIELD(
+                                "arrays", DataTypes.ARRAY(DataTypes.ARRAY(DataTypes.INT()))),
+                        DataTypes.FIELD(
+                                "maps",
+                                DataTypes.ARRAY(
+                                        DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))),
+                        DataTypes.FIELD("rows", DataTypes.ARRAY(rowTypeAtLimit())));
+        Object[] values =
+                decoder(rowType)
+                        .decode(
+                                bytes(
+                                        "{\"arrays\":["
+                                                + array
+                                                + ","
+                                                + array
+                                                + "],\"maps\":["
+                                                + object
+                                                + ","
+                                                + object
+                                                + "],\"rows\":["
+                                                + object
+                                                + ","
+                                                + object
+                                                + "]}"));
+
+        int limit = JsonToFlussConverters.MAX_CONTAINER_ELEMENTS;
+        for (int i = 0; i < 2; i++) {
+            GenericArray arrayValue = (GenericArray) ((GenericArray) values[0]).getArray(i);
+            assertThat(arrayValue.size()).isEqualTo(limit);
+            assertThat(arrayValue.getInt(limit - 1)).isZero();
+            GenericMap mapValue = (GenericMap) ((GenericArray) values[1]).getMap(i);
+            assertThat(mapValue.size()).isEqualTo(limit);
+            assertThat(mapValue.get(BinaryString.fromString("k" + (limit - 1)))).isEqualTo(0);
+            GenericRow rowValue = (GenericRow) ((GenericArray) values[2]).getRow(i, limit);
+            assertThat(rowValue.getFieldCount()).isEqualTo(limit);
+            assertThat(rowValue.getInt(limit - 1)).isZero();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "{\"value\":[{\"a\":[],\"a\":[]}]}",
+                "{\"value\":[{\"a\":[1,]}]}",
+                "{\"value\":[{\"a\":[1]",
+                "{\"value\":[{\"a\":[1]}]} {}",
+            })
+    void testRetainsStrictParsingForNestedContainers(String json) {
+        JsonKafkaFieldDecoder nestedDecoder =
+                decoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "value",
+                                        DataTypes.ARRAY(
+                                                DataTypes.MAP(
+                                                        DataTypes.STRING(),
+                                                        DataTypes.ARRAY(DataTypes.INT()))))));
+        assertThatThrownBy(() -> nestedDecoder.decode(bytes(json)))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("not valid strict UTF-8 JSON");
+    }
+
+    private static RowType rowTypeAtLimit() {
+        DataField[] fields = new DataField[JsonToFlussConverters.MAX_CONTAINER_ELEMENTS];
+        for (int i = 0; i < fields.length; i++) {
+            fields[i] = DataTypes.FIELD("k" + i, DataTypes.INT());
+        }
+        return DataTypes.ROW(fields);
+    }
+
+    private static String containerAtLimit(boolean object) {
+        StringBuilder json = new StringBuilder(object ? "{" : "[");
+        for (int i = 0; i < JsonToFlussConverters.MAX_CONTAINER_ELEMENTS; i++) {
+            if (i > 0) {
+                json.append(',');
+            }
+            if (object) {
+                json.append('"').append('k').append(i).append("\":");
+            }
+            json.append('0');
+        }
+        return json.append(object ? '}' : ']').toString();
     }
 
     @Test
