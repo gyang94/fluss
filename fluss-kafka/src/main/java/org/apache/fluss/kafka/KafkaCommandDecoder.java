@@ -21,7 +21,9 @@ import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
+import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelFuture;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelFutureListener;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.shaded.netty4.io.netty.channel.SimpleChannelInboundHandler;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleState;
@@ -100,6 +102,12 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
         KafkaRequest request = null;
         boolean handedToProcessor = false;
         try {
+            if (saslConnection.isAuthenticatingWithRawTokens()) {
+                // Handshake v0 tokens have only the length prefix removed by the frame decoder;
+                // their contents must never be parsed as a Kafka request header.
+                authenticateRawToken(ctx, buffer);
+                return;
+            }
             ByteBuffer nioBuffer = buffer.nioBuffer();
             RequestHeader header = RequestHeader.parse(nioBuffer);
             if (!saslConnection.isRequestAllowed(header.apiKey())) {
@@ -141,6 +149,22 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             // asynchronously. Release the decoder's ownership on every path; the request releases
             // its retained reference after response handling or cancellation.
             ReferenceCountUtil.release(buffer);
+        }
+    }
+
+    private void authenticateRawToken(ChannelHandlerContext ctx, ByteBuf buffer) {
+        byte[] token = new byte[buffer.readableBytes()];
+        buffer.getBytes(buffer.readerIndex(), token);
+        try {
+            byte[] challenge = saslConnection.authenticate(token);
+            // PLAIN completes with an empty challenge. Legacy clients still expect its length
+            // prefix, but no Kafka response header or SaslAuthenticate response fields.
+            ctx.writeAndFlush(Unpooled.wrappedBuffer(challenge))
+                    .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+        } catch (RuntimeException e) {
+            // The raw token protocol has no error response. Do not log token-derived details.
+            LOG.warn("SASL authentication failed on Kafka listener {}", listenerName);
+            close();
         }
     }
 
