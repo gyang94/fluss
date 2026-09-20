@@ -63,7 +63,9 @@ public final class SaslAuthenticateHandler implements KafkaApiHandler<SaslAuthen
             KafkaSaslConnection connection,
             SaslAuthenticateRequest request,
             Runnable closeConnectionAfterResponse) {
-        if (!connection.authenticationEnabled() || !connection.isAuthenticating()) {
+        if (!connection.authenticationEnabled()
+                || !connection.isAuthenticating()
+                || connection.isAuthenticatingWithRawTokens()) {
             return failure(
                     connection,
                     closeConnectionAfterResponse,

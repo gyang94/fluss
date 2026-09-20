@@ -39,7 +39,7 @@ import java.util.concurrent.CompletableFuture;
 public final class SaslHandshakeHandler implements KafkaApiHandler<SaslHandshakeRequest> {
 
     private static final KafkaApiSpec API_SPEC =
-            new KafkaApiSpec(ApiKeys.SASL_HANDSHAKE, (short) 1, (short) 1, true);
+            new KafkaApiSpec(ApiKeys.SASL_HANDSHAKE, (short) 0, (short) 1, true);
 
     @Override
     public KafkaApiSpec apiSpec() {
@@ -89,7 +89,8 @@ public final class SaslHandshakeHandler implements KafkaApiHandler<SaslHandshake
         }
 
         try {
-            connection.beginAuthentication(mechanism, listenerName, remoteAddress);
+            connection.beginAuthentication(
+                    mechanism, listenerName, remoteAddress, request.version());
             return CompletableFuture.completedFuture(
                     response(
                             Errors.NONE,

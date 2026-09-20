@@ -27,6 +27,8 @@ import org.apache.fluss.security.auth.sasl.plain.PlainSaslServerConfigManager;
 
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -54,8 +56,9 @@ public class KafkaSaslConnectionTest {
         assertThat(connection.shouldClose()).isFalse();
     }
 
-    @Test
-    public void testSuccessfulAuthenticationTransitionsToReady() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testSuccessfulAuthenticationTransitionsToReady(short version) {
         TestingServerAuthenticator authenticator = new TestingServerAuthenticator();
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(() -> authenticator);
 
@@ -69,9 +72,11 @@ public class KafkaSaslConnectionTest {
         connection.beginAuthentication(
                 KafkaSaslConnection.PLAIN_MECHANISM,
                 "KAFKA",
-                new InetSocketAddress("127.0.0.1", 9092));
+                new InetSocketAddress("127.0.0.1", 9092),
+                version);
 
         assertThat(connection.isAuthenticating()).isTrue();
+        assertThat(connection.isAuthenticatingWithRawTokens()).isEqualTo(version == 0);
         assertThat(connection.isRequestAllowed(ApiKeys.API_VERSIONS)).isTrue();
         assertThat(connection.isRequestAllowed(ApiKeys.SASL_AUTHENTICATE)).isTrue();
         assertThat(connection.isRequestAllowed(ApiKeys.SASL_HANDSHAKE)).isTrue();
@@ -84,6 +89,7 @@ public class KafkaSaslConnectionTest {
 
         assertThat(challenge).isEmpty();
         assertThat(connection.isReady()).isTrue();
+        assertThat(connection.isAuthenticatingWithRawTokens()).isFalse();
         assertThat(connection.principal()).isEqualTo(new FlussPrincipal("alice", "User"));
         assertThat(connection.isRequestAllowed(ApiKeys.PRODUCE)).isTrue();
         assertThat(connection.shouldClose()).isFalse();
