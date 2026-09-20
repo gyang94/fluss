@@ -29,6 +29,7 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.security.acl.AccessControlEntry;
@@ -84,6 +85,7 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -141,7 +143,10 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 .build(),
                         false)
                 .get();
-        FLUSS_CLUSTER_EXTENSION.waitUntilAllGatewayHasSameMetadata();
+        long tableId =
+                flussAdmin.getTableInfo(TablePath.of(DATABASE, TABLE_NAME)).get().getTableId();
+        // The raw socket tests do not retry Produce while bucket leadership is being initialized.
+        FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(new TableBucket(tableId, 0));
         bootstrapServers =
                 FLUSS_CLUSTER_EXTENSION.getTabletServerNodes("KAFKA").stream()
                         .map(node -> node.host() + ":" + node.port())
@@ -157,7 +162,13 @@ public class KafkaSaslPlainAuthenticationITCase {
                 // Preserve the primary test failure when cleanup cannot complete.
             }
             try {
-                flussAdmin.dropAcls(Collections.singletonList(AclBindingFilter.ANY)).all().get();
+                Collection<AclBinding> deletedAcls =
+                        flussAdmin
+                                .dropAcls(Collections.singletonList(AclBindingFilter.ANY))
+                                .all()
+                                .get();
+                // The next test reuses the same principal and table path on this cluster.
+                FLUSS_CLUSTER_EXTENSION.waitUntilAuthenticationSync(deletedAcls, false);
             } catch (Exception ignored) {
                 // Preserve the primary test failure when cleanup cannot complete.
             }
