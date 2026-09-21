@@ -85,7 +85,7 @@ class KafkaJsonSchemaTest {
                         Schema.newBuilder()
                                 .column("id", DataTypes.INT().copy(false))
                                 .column("key", DataTypes.STRING())
-                                .column("time", DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                .column("time", DataTypes.TIMESTAMP(3).copy(false))
                                 .column("amount", DataTypes.DECIMAL(8, 2))
                                 .build())
                 .distributedBy(1)
