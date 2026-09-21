@@ -190,6 +190,11 @@ public class KafkaSaslPlainAuthenticationITCase {
                                     .get(30, TimeUnit.SECONDS))
                     .containsKey(TOPIC);
             assertThat(
+                            producer.send(new ProducerRecord<byte[], byte[]>(TOPIC, KEY, null))
+                                    .get(30, TimeUnit.SECONDS)
+                                    .offset())
+                    .isEqualTo(-1L);
+            assertThat(
                             producer.send(new ProducerRecord<>(TOPIC, KEY, VALUE))
                                     .get(30, TimeUnit.SECONDS))
                     .isNotNull();
@@ -218,6 +223,13 @@ public class KafkaSaslPlainAuthenticationITCase {
             assertThat(producer.partitionsFor(TOPIC)).hasSize(1);
             assertThatThrownBy(
                             () ->
+                                    producer.send(
+                                                    new ProducerRecord<byte[], byte[]>(
+                                                            TOPIC, KEY, null))
+                                            .get(30, TimeUnit.SECONDS))
+                    .hasRootCauseInstanceOf(TopicAuthorizationException.class);
+            assertThatThrownBy(
+                            () ->
                                     producer.send(new ProducerRecord<>(TOPIC, KEY, VALUE))
                                             .get(30, TimeUnit.SECONDS))
                     .hasRootCauseInstanceOf(TopicAuthorizationException.class);
@@ -236,6 +248,17 @@ public class KafkaSaslPlainAuthenticationITCase {
             authenticateV0(socket);
             MetadataResponse metadata = (MetadataResponse) sendRequest(socket, metadataRequest());
             assertSuccessfulMetadata(metadata);
+            ProduceResponse filtered = (ProduceResponse) sendRequest(socket, produceRequest(null));
+            assertThat(filtered.errorCounts()).containsOnlyKeys(Errors.NONE);
+            assertThat(
+                            filtered.data()
+                                    .responses()
+                                    .iterator()
+                                    .next()
+                                    .partitionResponses()
+                                    .get(0)
+                                    .baseOffset())
+                    .isEqualTo(-1L);
             ProduceResponse produced = (ProduceResponse) sendRequest(socket, produceRequest());
             assertThat(produced.errorCounts()).containsOnlyKeys(Errors.NONE);
             assertFlussRecord();
@@ -258,6 +281,8 @@ public class KafkaSaslPlainAuthenticationITCase {
             authenticateV0(socket);
             MetadataResponse metadata = (MetadataResponse) sendRequest(socket, metadataRequest());
             assertSuccessfulMetadata(metadata);
+            ProduceResponse filtered = (ProduceResponse) sendRequest(socket, produceRequest(null));
+            assertThat(filtered.errorCounts()).containsOnlyKeys(Errors.TOPIC_AUTHORIZATION_FAILED);
             ProduceResponse produced = (ProduceResponse) sendRequest(socket, produceRequest());
             assertThat(produced.errorCounts()).containsOnlyKeys(Errors.TOPIC_AUTHORIZATION_FAILED);
         }
@@ -358,8 +383,12 @@ public class KafkaSaslPlainAuthenticationITCase {
     }
 
     private static ProduceRequest produceRequest() {
+        return produceRequest(VALUE);
+    }
+
+    private static ProduceRequest produceRequest(byte[] value) {
         MemoryRecords records =
-                MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(KEY, VALUE));
+                MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(KEY, value));
         ProduceRequestData.TopicProduceData topicData =
                 new ProduceRequestData.TopicProduceData()
                         .setName(TOPIC)
