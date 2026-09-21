@@ -24,7 +24,7 @@ import org.apache.fluss.kafka.schema.KafkaTopicSchema;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericArray;
 import org.apache.fluss.row.GenericRow;
-import org.apache.fluss.row.TimestampLtz;
+import org.apache.fluss.row.TimestampNtz;
 
 import java.util.List;
 
@@ -53,7 +53,16 @@ public final class KafkaRowAssembler {
         setProjectedFields(row, topicSchema.keyProjection(), keyValues);
         setProjectedFields(row, topicSchema.valueProjection(), valueValues);
         if (topicSchema.timestampPosition() >= 0) {
-            row.setField(topicSchema.timestampPosition(), TimestampLtz.fromEpochMillis(timestamp));
+            int position = topicSchema.timestampPosition();
+            if (timestamp == -1L) {
+                if (!topicSchema.rowType().getTypeAt(position).isNullable()) {
+                    throw new KafkaRecordEncodingException(
+                            "Missing Kafka timestamp cannot populate a NOT NULL timestamp column.");
+                }
+            } else {
+                // Epoch milliseconds define UTC calendar fields, independently of the JVM zone.
+                row.setField(position, TimestampNtz.fromMillis(timestamp));
+            }
         }
         if (topicSchema.headersPosition() >= 0) {
             row.setField(topicSchema.headersPosition(), toHeaders(headers));
