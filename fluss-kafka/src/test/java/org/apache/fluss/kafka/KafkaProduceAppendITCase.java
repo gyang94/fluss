@@ -191,7 +191,7 @@ class KafkaProduceAppendITCase {
                     while (count < values.size() && System.nanoTime() < deadline) {
                         for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
                             assertThat(record.getRow().getBytes(0)).isEqualTo(values.get(count));
-                            assertThat(record.getRow().getTimestampLtz(1, 3).getEpochMillisecond())
+                            assertThat(record.getRow().getTimestampNtz(1, 3).getMillisecond())
                                     .isEqualTo(count);
                             count++;
                         }
@@ -224,7 +224,7 @@ class KafkaProduceAppendITCase {
                                 .isEqualTo(new String(expectedValue, StandardCharsets.UTF_8));
                         assertThat(row.getString(3).toString()).isEqualTo("key");
                     }
-                    assertThat(row.getTimestampLtz(1, 3).getEpochMillisecond()).isEqualTo(123L);
+                    assertThat(row.getTimestampNtz(1, 3).getMillisecond()).isEqualTo(123L);
                     assertThat(row.getArray(2).size()).isEqualTo(2);
                     assertThat(row.getArray(2).getRow(0, 2).getString(0).toString())
                             .isEqualTo("source");
@@ -242,7 +242,7 @@ class KafkaProduceAppendITCase {
                 .schema(
                         Schema.newBuilder()
                                 .column("body", raw ? DataTypes.BYTES() : DataTypes.STRING())
-                                .column("received_at", DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                .column("received_at", DataTypes.TIMESTAMP(3).copy(false))
                                 .column(
                                         "attributes",
                                         DataTypes.ARRAY(
