@@ -76,9 +76,7 @@ class KafkaJsonProduceITCase {
                                         .column("id", DataTypes.INT().copy(false))
                                         .column("message_key", DataTypes.STRING())
                                         .column("amount", DataTypes.DECIMAL(30, 10))
-                                        .column(
-                                                "received_at",
-                                                DataTypes.TIMESTAMP(3).copy(false))
+                                        .column("received_at", DataTypes.TIMESTAMP(3).copy(false))
                                         .column("float_value", DataTypes.FLOAT())
                                         .column("double_value", DataTypes.DOUBLE())
                                         .build())
@@ -116,8 +114,7 @@ class KafkaJsonProduceITCase {
                             assertThat(row.getDecimal(2, 30, 10).toBigDecimal())
                                     .isEqualByComparingTo(
                                             new BigDecimal("12345678901234567890.1234567890"));
-                            assertThat(row.getTimestampNtz(3, 3).getMillisecond())
-                                    .isEqualTo(123L);
+                            assertThat(row.getTimestampNtz(3, 3).getMillisecond()).isEqualTo(123L);
                             assertThat(Float.floatToRawIntBits(row.getFloat(4)))
                                     .isEqualTo(Float.floatToRawIntBits(-0.0F));
                             assertThat(Double.doubleToRawLongBits(row.getDouble(5)))
@@ -287,6 +284,66 @@ class KafkaJsonProduceITCase {
                         row -> {
                             assertThat(row.getInt(0)).isEqualTo(7);
                             assertThat(row.isNullAt(1)).isTrue();
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
+    void testNullableTypeRescueReachesNativeStorageAndNotNullRemainsFatal() throws Exception {
+        TableDescriptor descriptor =
+                descriptor(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT().copy(false))
+                                        .column("value", DataTypes.INT())
+                                        .column(
+                                                "nested",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "required",
+                                                                DataTypes.INT().copy(false))))
+                                        .column("items", DataTypes.ARRAY(DataTypes.INT()))
+                                        .column("rescue", DataTypes.STRING())
+                                        .build())
+                        .customProperty(KafkaDataFormat.VALUE_RESCUE_COLUMN_CONFIG, "rescue")
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            TablePath path = TablePath.of(DATABASE, "json_type_rescue");
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                for (String json :
+                        new String[] {
+                            "{\"id\":\"bad\"}", "{\"id\":1,\"nested\":{\"required\":\"bad\"}}"
+                        }) {
+                    assertThatThrownBy(
+                                    () ->
+                                            producer.send(record(path, json))
+                                                    .get(30, TimeUnit.SECONDS))
+                            .hasCauseInstanceOf(InvalidRecordException.class);
+                }
+                assertThat(
+                                producer.send(
+                                                record(
+                                                        path,
+                                                        "{\"id\":1,\"value\":\"bad\",\"nested\":{\"required\":2,\"extra\":3},\"items\":[4,\"bad\"]}"))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        row -> {
+                            assertThat(row.getInt(0)).isEqualTo(1);
+                            assertThat(row.isNullAt(1)).isTrue();
+                            assertThat(row.getRow(2, 1).getInt(0)).isEqualTo(2);
+                            assertThat(row.getArray(3).getInt(0)).isEqualTo(4);
+                            assertThat(row.getArray(3).isNullAt(1)).isTrue();
+                            assertThat(row.getString(4).toString())
+                                    .isEqualTo(
+                                            "{\"value\":\"bad\",\"nested\":{\"extra\":3},\"items\":[null,\"bad\"]}");
                         });
             } finally {
                 admin.dropTable(path, true).get();

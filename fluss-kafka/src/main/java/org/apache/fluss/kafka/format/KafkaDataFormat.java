@@ -49,7 +49,7 @@ public enum KafkaDataFormat {
     /** Fluss column populated from the Kafka record headers. */
     public static final String HEADERS_COLUMN_CONFIG = "kafka.metadata.headers.column";
 
-    /** Nullable STRING column that receives unknown JSON fields. */
+    /** Nullable STRING column that receives unknown fields and nullable JSON type mismatches. */
     public static final String VALUE_RESCUE_COLUMN_CONFIG = "kafka.value.rescue-column";
 
     private final String value;

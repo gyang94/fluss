@@ -22,11 +22,19 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 
 import javax.annotation.Nullable;
 
+import java.util.function.Consumer;
+
 /** Converts one JSON node into the internal representation of one Fluss field. */
 @Internal
 interface JsonToFlussConverter {
 
     /** Converts the node, which is null when the JSON property is missing. */
     @Nullable
-    Object convert(@Nullable JsonNode node, String path);
+    default Object convert(@Nullable JsonNode node, String path) {
+        return convert(node, path, null);
+    }
+
+    /** Converts a node, optionally collecting recoverable nullable-field conversion failures. */
+    @Nullable
+    Object convert(@Nullable JsonNode node, String path, @Nullable Consumer<JsonNode> rescue);
 }

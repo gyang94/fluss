@@ -157,13 +157,27 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                     }
                     continue;
                 }
-                JsonNode value = readValue(parser, projection.dataTypeAt(position), path);
+                JsonNode value =
+                        readValue(
+                                parser,
+                                projection.dataTypeAt(position),
+                                path,
+                                rescuedFields != null);
                 if (nestedRescues != null) {
                     nestedRescues[position] =
                             extractNestedUnknownFields(
                                     value, projection.dataTypeAt(position), path);
                 }
-                values[position] = converters[position].convert(value, path);
+                values[position] =
+                        converters[position].convert(
+                                value,
+                                path,
+                                nestedRescues == null
+                                        ? null
+                                        : rescued ->
+                                                nestedRescues[position] =
+                                                        JsonRescue.merge(
+                                                                nestedRescues[position], rescued));
                 present[position] = true;
             }
             if (parser.nextToken() != null) {
@@ -198,7 +212,8 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
         }
     }
 
-    private static JsonNode readValue(JsonParser parser, DataType dataType, String path)
+    private static JsonNode readValue(
+            JsonParser parser, DataType dataType, String path, boolean rescueEnabled)
             throws IOException {
         if (parser.currentToken() == JsonToken.START_OBJECT
                 || parser.currentToken() == JsonToken.START_ARRAY) {
@@ -208,6 +223,9 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 case MAP:
                     break;
                 default:
+                    if (rescueEnabled && dataType.isNullable()) {
+                        break;
+                    }
                     throw new KafkaRecordEncodingException(
                             "Invalid Kafka record value at " + path + ": expected a JSON scalar.");
             }
@@ -218,9 +236,17 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             // retain exact Jackson integer/BigDecimal nodes and their strict conversion rules.
             switch (dataType.getTypeRoot()) {
                 case FLOAT:
-                    return FloatNode.valueOf(Float.parseFloat(parser.getText()));
+                    float floatValue = Float.parseFloat(parser.getText());
+                    if (rescueEnabled && dataType.isNullable() && !Float.isFinite(floatValue)) {
+                        return readBoundedTree(parser, path);
+                    }
+                    return FloatNode.valueOf(floatValue);
                 case DOUBLE:
-                    return DoubleNode.valueOf(Double.parseDouble(parser.getText()));
+                    double doubleValue = Double.parseDouble(parser.getText());
+                    if (rescueEnabled && dataType.isNullable() && !Double.isFinite(doubleValue)) {
+                        return readBoundedTree(parser, path);
+                    }
+                    return DoubleNode.valueOf(doubleValue);
                 default:
                     break;
             }
