@@ -58,6 +58,11 @@ public final class KafkaRequestContext {
         return new KafkaRequestContext(request);
     }
 
+    /** Whether the request can still begin work on its original connection generation. */
+    public boolean serviceAvailable() {
+        return request.serviceAvailable();
+    }
+
     /** Returns the request correlation ID. */
     public int correlationId() {
         return correlationId;

@@ -127,6 +127,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private CompletableFuture<TopicResult> writeTopic(
             KafkaProduceCommand command, TopicWrite topic) {
         try {
+            command.ensureServiceAvailable();
             checkInterrupted();
             TablePath path = topicMapper.toTablePath(topic.topicName());
             setCurrentSession(command);
@@ -155,6 +156,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     private CompletableFuture<TopicResult> produceTopic(
             KafkaProduceCommand command, TopicWrite topic, TableInfo tableInfo) {
+        command.ensureServiceAvailable();
         // Admission must match Metadata, including when the schema changes between requests.
         KafkaTopicWritePlan writePlan = transcoder.prepare(tableInfo);
         ProduceLogRequest request =
@@ -176,6 +178,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 continue;
             }
             try {
+                command.ensureServiceAvailable();
                 if (partition.hasNullValues() && partition.nonNullRecords().isEmpty()) {
                     setCurrentSession(command);
                     service.authorizeTableWrite(tableInfo.getTableId());
@@ -198,6 +201,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                     toTopicResult(topic, new ProduceLogResponse(), failures));
         }
         try {
+            command.ensureServiceAvailable();
             checkInterrupted();
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended;

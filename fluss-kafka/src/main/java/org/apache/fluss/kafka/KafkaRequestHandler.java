@@ -78,6 +78,12 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
 
     @Override
     public void processRequest(KafkaRequest request) {
+        if (!request.serviceAvailable()) {
+            request.fail(
+                    new org.apache.kafka.common.errors.BrokerNotAvailableException(
+                            "Kafka service is disabled for this connection."));
+            return;
+        }
         dispatcher
                 .dispatch(request)
                 .whenComplete(

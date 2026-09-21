@@ -124,7 +124,8 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                         topics,
                         context.listenerName(),
                         clientAddress(context.remoteAddress()),
-                        context.principal());
+                        context.principal(),
+                        context::serviceAvailable);
         CompletableFuture<KafkaProduceResult> result;
         try {
             result =

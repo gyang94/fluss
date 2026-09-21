@@ -55,6 +55,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -98,6 +99,101 @@ class GatewayKafkaProduceBackendTest {
                 executor.closeAsync().get(10, TimeUnit.SECONDS);
             }
         }
+    }
+
+    @Test
+    void testDisableDuringMetadataLookupPreventsNativeAppend() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        service.pendingMetadata = new CompletableFuture<>();
+        AtomicBoolean enabled = new AtomicBoolean(true);
+        CompletableFuture<KafkaProduceResult> result =
+                backend(service).write(guardedCommand(enabled));
+        enabled.set(false);
+        service.pendingMetadata.complete(metadata(false));
+        assertErrors(result.join(), Errors.REQUEST_TIMED_OUT);
+        assertThat(service.append).isNull();
+    }
+
+    @Test
+    void testDisableDuringConversionPreventsNativeAppend() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        AtomicBoolean enabled = new AtomicBoolean(true);
+        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(
+                        service,
+                        service,
+                        (records, table) -> {
+                            enabled.set(false);
+                            return transcoder.transcode(records, table);
+                        });
+        assertErrors(backend.write(guardedCommand(enabled)).join(), Errors.REQUEST_TIMED_OUT);
+        assertThat(service.append).isNull();
+        assertThat(service.drains).isZero();
+    }
+
+    @Test
+    void testDisableWhileConversionIsQueuedPreventsMetadataAndAppend() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        AtomicBoolean enabled = new AtomicBoolean(true);
+        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 2);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            executor.submit(
+                    Thread.currentThread().getId(),
+                    () -> {
+                        entered.countDown();
+                        try {
+                            assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new AssertionError(e);
+                        }
+                        return CompletableFuture.completedFuture(null);
+                    });
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            GatewayKafkaProduceBackend backend =
+                    new GatewayKafkaProduceBackend(
+                            service, service, new ArrowKafkaRecordTranscoder(), executor);
+            CompletableFuture<KafkaProduceResult> result = backend.write(guardedCommand(enabled));
+            enabled.set(false);
+            release.countDown();
+            assertErrors(result.get(10, TimeUnit.SECONDS), Errors.REQUEST_TIMED_OUT);
+            assertThat(service.metadataPaths).isEmpty();
+            assertThat(service.append).isNull();
+        } finally {
+            release.countDown();
+            executor.closeAsync().join();
+        }
+    }
+
+    @Test
+    void testDisableLeavesSubmittedNativeFutureAuthoritative() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        service.pendingAppend = new CompletableFuture<>();
+        AtomicBoolean enabled = new AtomicBoolean(true);
+        CompletableFuture<KafkaProduceResult> result =
+                backend(service).write(guardedCommand(enabled));
+        assertThat(service.append).isNotNull();
+        enabled.set(false);
+        assertThat(service.pendingAppend).isNotDone();
+        assertThat(result).isNotDone();
+        service.pendingAppend.complete(success(0));
+        assertErrors(result.join(), Errors.NONE);
+        assertThat(result.join().topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
+    }
+
+    private static KafkaProduceCommand guardedCommand(AtomicBoolean enabled) throws Exception {
+        KafkaProduceCommand command = command((short) 1, topic("kafka.topic", good(0)));
+        return new KafkaProduceCommand(
+                command.acks(),
+                command.timeoutMs(),
+                command.topics(),
+                command.listenerName(),
+                command.clientAddress(),
+                command.principal(),
+                enabled::get);
     }
 
     @Test

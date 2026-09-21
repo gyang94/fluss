@@ -2684,8 +2684,18 @@ public class ConfigOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            "Whether enable fluss kafka. Disabled by default. "
-                                    + "When this option is set to true, the fluss kafka will be enabled.");
+                            "Whether Kafka listeners provide service. Disabled by default and dynamically "
+                                    + "reconfigurable. Configured Kafka addresses and ports remain bound when "
+                                    + "disabled; new connections are closed and existing connections drain.");
+
+    public static final ConfigOption<Duration> KAFKA_SERVICE_DRAIN_TIMEOUT =
+            key("kafka.service.drain-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(30))
+                    .withDescription(
+                            "Maximum time to flush responses for admitted Kafka requests when service "
+                                    + "is disabled, before disconnecting clients. Startup configuration. "
+                                    + "Disconnecting does not roll back submitted native writes.");
 
     public static final ConfigOption<List<String>> KAFKA_LISTENER_NAMES =
             key("kafka.listener.names")

@@ -59,6 +59,8 @@ public class KafkaRequest implements RpcRequest {
     private final AtomicBoolean bufferReleased = new AtomicBoolean();
     private final AtomicBoolean responseBufferReleased = new AtomicBoolean();
     private boolean responseBufferRetained;
+    private final AtomicBoolean networkCompleted = new AtomicBoolean();
+    private KafkaServiceController.Connection serviceConnection;
     private volatile boolean cancelled = false;
     private volatile boolean closeConnectionAfterResponse;
 
@@ -213,6 +215,21 @@ public class KafkaRequest implements RpcRequest {
 
     public void cancel() {
         cancelled = true;
+        markNetworkCompleted();
+    }
+
+    void attachServiceConnection(KafkaServiceController.Connection connection) {
+        serviceConnection = connection;
+    }
+
+    void markNetworkCompleted() {
+        if (networkCompleted.compareAndSet(false, true) && serviceConnection != null) {
+            serviceConnection.finishRequest();
+        }
+    }
+
+    boolean serviceAvailable() {
+        return !cancelled && (serviceConnection == null || serviceConnection.isServing());
     }
 
     public boolean cancelled() {

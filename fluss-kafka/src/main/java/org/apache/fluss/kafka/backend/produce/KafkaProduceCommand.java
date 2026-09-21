@@ -26,6 +26,8 @@ import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.function.BooleanSupplier;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -39,6 +41,7 @@ public final class KafkaProduceCommand {
     private final String listenerName;
     private final @Nullable InetAddress clientAddress;
     private final FlussPrincipal principal;
+    private final BooleanSupplier serviceAvailable;
 
     /** Creates a Kafka write command. */
     public KafkaProduceCommand(
@@ -58,12 +61,32 @@ public final class KafkaProduceCommand {
             String listenerName,
             @Nullable InetAddress clientAddress,
             FlussPrincipal principal) {
+        this(acks, timeoutMs, topics, listenerName, clientAddress, principal, () -> true);
+    }
+
+    /** Creates a command fenced by its originating connection generation. */
+    public KafkaProduceCommand(
+            short acks,
+            int timeoutMs,
+            List<TopicWrite> topics,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal,
+            BooleanSupplier serviceAvailable) {
+        this.serviceAvailable = checkNotNull(serviceAvailable);
         this.acks = acks;
         this.timeoutMs = timeoutMs;
         this.topics = immutableCopy(topics);
         this.listenerName = checkNotNull(listenerName);
         this.clientAddress = clientAddress;
         this.principal = checkNotNull(principal);
+    }
+
+    /** Rejects queued or converting work after its connection stops serving requests. */
+    public void ensureServiceAvailable() {
+        if (!serviceAvailable.getAsBoolean()) {
+            throw new CancellationException("Kafka service is disabled for this connection.");
+        }
     }
 
     /** Returns Kafka required acknowledgements. */
