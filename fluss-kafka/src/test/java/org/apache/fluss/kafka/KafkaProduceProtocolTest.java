@@ -70,6 +70,62 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Protocol tests independent of the Fluss append and record conversion backends. */
 class KafkaProduceProtocolTest {
 
+    @ParameterizedTest
+    @EnumSource(
+            value = CompressionType.class,
+            names = {"GZIP", "SNAPPY", "LZ4", "ZSTD"})
+    void testCorruptCompressedStreamDoesNotSuppressValidPartition(CompressionType codec) {
+        byte[] value = new byte[1024];
+        Arrays.fill(value, (byte) 7);
+        MemoryRecords malformed =
+                MemoryRecords.withRecords(
+                        RecordBatch.MAGIC_VALUE_V2,
+                        0L,
+                        Compression.of(codec).build(),
+                        new SimpleRecord(value));
+        ByteBuffer bytes = malformed.buffer();
+        // Preserve a valid outer batch CRC to exercise the decompressor, not just the CRC guard.
+        for (int i = DefaultRecordBatch.RECORD_BATCH_OVERHEAD; i < bytes.limit(); i++) {
+            bytes.put(i, (byte) 0);
+        }
+        updateBatchChecksum(malformed);
+        malformed.batches().iterator().next().ensureValid();
+        ProduceResponse response =
+                dispatch(
+                        request(
+                                (short) 11,
+                                (short) 1,
+                                partition(0, malformed),
+                                partition(1, records())),
+                        command -> {
+                            assertThat(command.topics().get(0).partitions())
+                                    .extracting(KafkaProduceCommand.PartitionWrite::partitionId)
+                                    .containsExactly(1);
+                            return successful(command);
+                        });
+        assertThat(
+                        response.data()
+                                .responses()
+                                .find("topic")
+                                .partitionResponses()
+                                .get(0)
+                                .errorCode())
+                .isIn(Errors.CORRUPT_MESSAGE.code(), Errors.INVALID_RECORD.code());
+        assertThat(
+                        response.data()
+                                .responses()
+                                .find("topic")
+                                .partitionResponses()
+                                .get(1)
+                                .errorCode())
+                .isEqualTo(Errors.NONE.code());
+        assertErrors(
+                dispatch(
+                        request((short) 11, (short) 1, partition(0, records())),
+                        KafkaProduceProtocolTest::successful),
+                Errors.NONE);
+    }
+
     @Test
     void testSupportedVersionsCopyRecordsAndForwardContext() {
         for (short version = 3; version <= 11; version++) {

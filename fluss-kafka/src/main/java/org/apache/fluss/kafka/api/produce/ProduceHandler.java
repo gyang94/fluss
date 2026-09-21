@@ -32,6 +32,7 @@ import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
 
 import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.InvalidRequiredAcksException;
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -51,6 +52,7 @@ import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.utils.BufferSupplier;
 import org.apache.kafka.common.utils.CloseableIterator;
 
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -255,12 +257,30 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                                     copyBuffer(record.hasValue() ? record.value() : null),
                                     copyHeaders(record.headers())));
                 }
+            } catch (RuntimeException failure) {
+                throw normalizeRecordCopyFailure(failure);
             }
         }
         if (copied.isEmpty() || validBytes != records.sizeInBytes()) {
             throw new InvalidRequestException("Empty or truncated Kafka record batch.");
         }
         return copied;
+    }
+
+    static RuntimeException normalizeRecordCopyFailure(RuntimeException failure) {
+        Throwable cause = failure;
+        boolean invalidStream = false;
+        while (cause != null && cause != cause.getCause()) {
+            // Codec wrappers must preserve specific protocol errors, including admission limits.
+            if (cause instanceof ApiException) {
+                return (ApiException) cause;
+            }
+            invalidStream |= cause instanceof IOException;
+            cause = cause.getCause();
+        }
+        return invalidStream
+                ? new InvalidRecordException("Failed to decompress Kafka record batch.", failure)
+                : failure;
     }
 
     private static ProduceResponse toResponse(KafkaProduceResult result) {

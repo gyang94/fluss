@@ -112,6 +112,81 @@ class KafkaProduceAppendITCase {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
+    void testCompressedBatchPreservesRecordsInNativeStorage(String codec) throws Exception {
+        TablePath path = TablePath.of(DATABASE, "compressed_" + codec);
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor("raw"), false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            try (KafkaProducer<byte[], byte[]> producer = compressedProducer(codec)) {
+                producer.partitionsFor(path.toString());
+                List<Future<RecordMetadata>> writes = new ArrayList<>();
+                for (int i = 0; i < 50; i++) {
+                    writes.add(
+                            producer.send(
+                                    new ProducerRecord<>(
+                                            path.toString(),
+                                            0,
+                                            1000L + i,
+                                            KEY,
+                                            ("value-" + i).getBytes(StandardCharsets.UTF_8),
+                                            Arrays.asList(
+                                                    new RecordHeader("source", VALUE),
+                                                    new RecordHeader("source", null)))));
+                }
+                producer.flush();
+                for (int i = 0; i < writes.size(); i++) {
+                    assertThat(writes.get(i).get(30, TimeUnit.SECONDS).offset()).isEqualTo(i);
+                }
+                try (Table table = connection.getTable(path);
+                        LogScanner scanner = table.newScan().createLogScanner()) {
+                    scanner.subscribeFromBeginning(0);
+                    int count = 0;
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                    while (count < writes.size() && System.nanoTime() < deadline) {
+                        for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                            InternalRow row = record.getRow();
+                            assertThat(record.logOffset()).isEqualTo(count);
+                            assertThat(row.getBytes(0))
+                                    .isEqualTo(("value-" + count).getBytes(StandardCharsets.UTF_8));
+                            assertThat(row.getTimestampNtz(1, 3).getMillisecond())
+                                    .isEqualTo(1000L + count);
+                            assertThat(row.getBytes(3)).isEqualTo(KEY);
+                            assertThat(row.getArray(2).size()).isEqualTo(2);
+                            assertThat(row.getArray(2).getRow(0, 2).getBytes(1)).isEqualTo(VALUE);
+                            assertThat(row.getArray(2).getRow(1, 2).isNullAt(1)).isTrue();
+                            count++;
+                        }
+                    }
+                    assertThat(count).isEqualTo(50);
+                }
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    private static KafkaProducer<byte[], byte[]> compressedProducer(String codec) {
+        ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+        Map<String, Object> config = new HashMap<>();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, node.host() + ":" + node.port());
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
+        config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
+        config.put(ProducerConfig.ACKS_CONFIG, "all");
+        config.put(ProducerConfig.BATCH_SIZE_CONFIG, 65536);
+        config.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, codec);
+        // Explicit flush sends a single accumulated batch instead of one request per send.
+        config.put(ProducerConfig.LINGER_MS_CONFIG, 60000L);
+        config.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 90000);
+        config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 10000);
+        config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 30000);
+        return new KafkaProducer<>(config);
+    }
+
     @Test
     void testNullValuesAreSkippedWhileEmptyValuesAndNullKeysSurvive() throws Exception {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
