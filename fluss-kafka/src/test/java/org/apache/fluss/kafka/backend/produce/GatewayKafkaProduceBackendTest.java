@@ -17,6 +17,7 @@
 
 package org.apache.fluss.kafka.backend.produce;
 
+import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
@@ -56,6 +57,84 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests append admission, error isolation, session propagation and delayed-fetch completion. */
 class GatewayKafkaProduceBackendTest {
+
+    @Test
+    void testAllNullValuesRequireAuthorizationWithoutAppend() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        KafkaProduceResult result =
+                backend(service)
+                        .write(command((short) 1, topic("kafka.topic", nullValue(0), nullValue(8))))
+                        .join();
+        assertErrors(result, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(-1L);
+        assertThat(service.writeChecks).isEqualTo(1);
+        assertThat(service.append).isNull();
+        assertThat(service.drains).isZero();
+        service.denyWrite = true;
+        assertErrors(
+                backend(service)
+                        .write(command((short) 1, topic("kafka.topic", nullValue(0))))
+                        .join(),
+                Errors.TOPIC_AUTHORIZATION_FAILED);
+        assertThat(service.append).isNull();
+    }
+
+    @Test
+    void testNullValuesCannotBypassTableAndSchemaValidation() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        for (String name : new String[] {"invalid", "missing"}) {
+            assertErrors(
+                    backend(service)
+                            .write(command((short) 1, topic("kafka." + name, nullValue(0))))
+                            .join(),
+                    name.equals("invalid")
+                            ? Errors.INVALID_TOPIC_EXCEPTION
+                            : Errors.UNKNOWN_TOPIC_OR_PARTITION);
+        }
+        assertThat(service.writeChecks).isZero();
+        assertThat(service.append).isNull();
+    }
+
+    @Test
+    void testMixedNullValuesAreRemovedBeforeDecodingAndHideOffsets() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        List<Record> seen = new ArrayList<>();
+        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(
+                        service,
+                        service,
+                        (records, table) -> {
+                            seen.addAll(records);
+                            return transcoder.transcode(records, table);
+                        });
+        Record empty = new Record(1L, null, new byte[0], Collections.emptyList());
+        Record valid = good(0).records().get(0);
+        KafkaProduceResult result =
+                backend.write(
+                                command(
+                                        (short) 1,
+                                        topic(
+                                                "kafka.topic",
+                                                new PartitionWrite(
+                                                        0,
+                                                        Arrays.asList(
+                                                                nullValue(0).records().get(0),
+                                                                empty,
+                                                                valid)))))
+                        .join();
+        assertErrors(result, Errors.NONE);
+        assertThat(seen).containsExactly(empty, valid);
+        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(-1L);
+        assertThat(service.drains).isEqualTo(1);
+    }
+
+    private static PartitionWrite nullValue(int partition) {
+        return new PartitionWrite(
+                partition,
+                Collections.singletonList(
+                        new Record(-1L, new byte[] {(byte) 0xff}, null, Collections.emptyList())));
+    }
 
     @Test
     void testDrainsImmediatelyWhileAcksAllResponseIsPending() throws Exception {
@@ -449,6 +528,8 @@ class GatewayKafkaProduceBackendTest {
         private boolean throwAppend;
         private boolean asyncMissing;
         private int drains;
+        private int writeChecks;
+        private boolean denyWrite;
         private CountDownLatch metadataEntered;
         private CountDownLatch appended;
         private Thread metadataThread;
@@ -476,6 +557,16 @@ class GatewayKafkaProduceBackendTest {
                             GatewayKafkaProduceBackendTest.metadata(name.equals("invalid"))
                                     .setTableId(database.equals("other") ? 43L : 42L))
                     : pendingMetadata;
+        }
+
+        @Override
+        public void authorizeTableWrite(long tableId) {
+            assertThat(tableId).isEqualTo(42L);
+            assertThat(currentListenerName()).isEqualTo("KAFKA");
+            writeChecks++;
+            if (denyWrite) {
+                throw new AuthorizationException("Write denied");
+            }
         }
 
         @Override

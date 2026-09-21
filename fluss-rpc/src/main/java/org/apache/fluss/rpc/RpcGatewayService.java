@@ -77,6 +77,14 @@ public abstract class RpcGatewayService implements RpcGateway {
         }
     }
 
+    /**
+     * Authorizes a table write that may not append any records, using the current request session.
+     * Services must explicitly support this operation; the default never grants write access.
+     */
+    public void authorizeTableWrite(long tableId) {
+        throw new UnsupportedOperationException("This service cannot authorize table writes.");
+    }
+
     /** Returns the provider type of this RPC gateway service. */
     public abstract ServerType providerType();
 

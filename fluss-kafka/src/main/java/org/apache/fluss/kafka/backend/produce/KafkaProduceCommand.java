@@ -109,16 +109,37 @@ public final class KafkaProduceCommand {
     public static final class PartitionWrite {
         private final int partitionId;
         private final List<Record> records;
+        private final List<Record> nonNullRecords;
 
         /** Creates the writes for one partition. */
         public PartitionWrite(int partitionId, List<Record> records) {
             this.partitionId = partitionId;
             this.records = immutableCopy(records);
+            List<Record> retained = new ArrayList<>();
+            for (Record record : this.records) {
+                if (record.borrowedValue() != null) {
+                    retained.add(record);
+                }
+            }
+            this.nonNullRecords =
+                    retained.size() == records.size()
+                            ? this.records
+                            : Collections.unmodifiableList(retained);
         }
 
         /** Returns the Kafka partition ID. */
         public int partitionId() {
             return partitionId;
+        }
+
+        /** Returns records with non-null values, preserving their original order. */
+        public List<Record> nonNullRecords() {
+            return nonNullRecords;
+        }
+
+        /** Whether filtering changed the correspondence between Kafka and native offsets. */
+        public boolean hasNullValues() {
+            return records.size() != nonNullRecords.size();
         }
 
         /** Returns copied records in append order. */
