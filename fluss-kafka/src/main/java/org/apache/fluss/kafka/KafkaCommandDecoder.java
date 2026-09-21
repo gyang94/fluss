@@ -66,6 +66,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     private final int numChannels;
     private final String listenerName;
     private final KafkaSaslConnection saslConnection;
+    private @Nullable KafkaServiceController.Connection serviceConnection;
 
     // Need to use a Queue to store the inflight responses, because Kafka clients require the
     // responses to be sent in order.
@@ -98,6 +99,14 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
 
     @Override
     public void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
+        boolean serviceRequestOwned = false;
+        if (serviceConnection != null) {
+            if (!serviceConnection.startRequest()) {
+                ReferenceCountUtil.release(buffer);
+                return;
+            }
+            serviceRequestOwned = true;
+        }
         CompletableFuture<AbstractResponse> future = new CompletableFuture<>();
         KafkaRequest request = null;
         boolean handedToProcessor = false;
@@ -105,6 +114,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             if (saslConnection.isAuthenticatingWithRawTokens()) {
                 // Handshake v0 tokens have only the length prefix removed by the frame decoder;
                 // their contents must never be parsed as a Kafka request header.
+                serviceRequestOwned = false;
                 authenticateRawToken(ctx, buffer);
                 return;
             }
@@ -121,6 +131,10 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             request =
                     parseRequest(
                             ctx, future, buffer, listenerName, saslConnection, header, nioBuffer);
+            if (serviceRequestOwned) {
+                request.attachServiceConnection(serviceConnection);
+                serviceRequestOwned = false;
+            }
             request.retainBufferForResponseQueue();
             inflightResponses.addLast(request);
             future.whenCompleteAsync((r, t) -> sendResponse(ctx), ctx.executor());
@@ -141,10 +155,14 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
         } catch (Throwable t) {
             if (request != null && !handedToProcessor) {
                 request.releaseBuffer();
+                request.markNetworkCompleted();
             }
             LOG.error("Error handling request", t);
             close();
         } finally {
+            if (serviceRequestOwned) {
+                serviceConnection.finishRequest();
+            }
             // KafkaRequest retains the buffer because Kafka record sets can reference its memory
             // asynchronously. Release the decoder's ownership on every path; the request releases
             // its retained reference after response handling or cancellation.
@@ -160,9 +178,18 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             // PLAIN completes with an empty challenge. Legacy clients still expect its length
             // prefix, but no Kafka response header or SaslAuthenticate response fields.
             ctx.writeAndFlush(Unpooled.wrappedBuffer(challenge))
-                    .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                    .addListener(ChannelFutureListener.CLOSE_ON_FAILURE)
+                    .addListener(
+                            ignored -> {
+                                if (serviceConnection != null) {
+                                    serviceConnection.finishRequest();
+                                }
+                            });
         } catch (RuntimeException e) {
             // The raw token protocol has no error response. Do not log token-derived details.
+            if (serviceConnection != null) {
+                serviceConnection.finishRequest();
+            }
             LOG.warn("SASL authentication failed on Kafka listener {}", listenerName);
             close();
         }
@@ -172,6 +199,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         super.channelActive(ctx);
         this.ctx = ctx;
+        this.serviceConnection = KafkaServiceController.connection(ctx.channel());
         this.remoteAddress = ctx.channel().remoteAddress();
         isActive.set(true);
         LOG.info("New connection from {}", ctx.channel().remoteAddress());
@@ -211,6 +239,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                     // if acks=0, we don't need to wait for the response to be sent
                     inflightResponses.pollFirst();
                     request.releaseResponseBuffer();
+                    request.markNetworkCompleted();
                     continue;
                 }
             }
@@ -229,6 +258,8 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             if (isActive.get()) {
                 ByteBuf buffer = request.responseBuffer();
                 ChannelFuture responseFuture = ctx.writeAndFlush(buffer);
+                KafkaRequest completedRequest = request;
+                responseFuture.addListener(ignored -> completedRequest.markNetworkCompleted());
                 if (request.shouldCloseConnectionAfterResponse()) {
                     isActive.set(false);
                     saslConnection.close();
@@ -241,6 +272,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 }
             } else {
                 request.releaseResponseBuffer();
+                request.markNetworkCompleted();
             }
         }
     }

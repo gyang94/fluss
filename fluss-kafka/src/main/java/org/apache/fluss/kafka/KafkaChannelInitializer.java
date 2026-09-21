@@ -41,6 +41,7 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
     private final @Nullable Supplier<ServerAuthenticator> authenticatorSupplier;
     private final LengthFieldPrepender prepender = new LengthFieldPrepender(4);
     private final boolean preferHeap;
+    private final @Nullable KafkaServiceController serviceController;
 
     /** Creates a PLAINTEXT channel initializer. */
     public KafkaChannelInitializer(
@@ -60,7 +61,26 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
             int maxRequestSize,
             boolean preferHeap,
             @Nullable Supplier<ServerAuthenticator> authenticatorSupplier) {
+        this(
+                requestChannels,
+                listenerName,
+                maxIdleTimeSeconds,
+                maxRequestSize,
+                preferHeap,
+                authenticatorSupplier,
+                null);
+    }
+
+    KafkaChannelInitializer(
+            RequestChannel[] requestChannels,
+            String listenerName,
+            long maxIdleTimeSeconds,
+            int maxRequestSize,
+            boolean preferHeap,
+            @Nullable Supplier<ServerAuthenticator> authenticatorSupplier,
+            @Nullable KafkaServiceController serviceController) {
         super(maxIdleTimeSeconds);
+        this.serviceController = serviceController;
         this.requestChannels = requestChannels;
         this.listenerName = listenerName;
         this.maxRequestSize = maxRequestSize;
@@ -75,6 +95,9 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
         // credential token, so authenticated listeners must never install the payload logger.
         if (authenticatorSupplier != null && ch.pipeline().get("loggingHandler") != null) {
             ch.pipeline().remove("loggingHandler");
+        }
+        if (serviceController != null) {
+            ch.pipeline().addLast("kafkaService", serviceController.newConnection());
         }
         addIdleStateHandler(ch);
         ch.pipeline().addLast(prepender);
