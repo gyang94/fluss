@@ -76,9 +76,7 @@ class KafkaJsonProduceITCase {
                                         .column("id", DataTypes.INT().copy(false))
                                         .column("message_key", DataTypes.STRING())
                                         .column("amount", DataTypes.DECIMAL(30, 10))
-                                        .column(
-                                                "received_at",
-                                                DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                                        .column("received_at", DataTypes.TIMESTAMP(3).copy(false))
                                         .column("float_value", DataTypes.FLOAT())
                                         .column("double_value", DataTypes.DOUBLE())
                                         .build())
@@ -116,12 +114,52 @@ class KafkaJsonProduceITCase {
                             assertThat(row.getDecimal(2, 30, 10).toBigDecimal())
                                     .isEqualByComparingTo(
                                             new BigDecimal("12345678901234567890.1234567890"));
-                            assertThat(row.getTimestampLtz(3, 3).getEpochMillisecond())
-                                    .isEqualTo(123L);
+                            assertThat(row.getTimestampNtz(3, 3).getMillisecond()).isEqualTo(123L);
                             assertThat(Float.floatToRawIntBits(row.getFloat(4)))
                                     .isEqualTo(Float.floatToRawIntBits(-0.0F));
                             assertThat(Double.doubleToRawLongBits(row.getDouble(5)))
                                     .isEqualTo(Double.doubleToRawLongBits(-0.0D));
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
+    void testNullJsonValuesSkipDecodingWhileNullFieldsRemainRows() throws Exception {
+        TableDescriptor descriptor =
+                descriptor(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT().copy(false))
+                                        .column("optional", DataTypes.STRING())
+                                        .build())
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            TablePath path = TablePath.of(DATABASE, "json_null_values");
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<byte[], byte[]>(
+                                                        path.toString(), 0, null, null))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isEqualTo(-1L);
+                assertThatThrownBy(() -> producer.send(record(path, "")).get(30, TimeUnit.SECONDS))
+                        .hasCauseInstanceOf(InvalidRecordException.class);
+                assertThat(
+                                producer.send(record(path, "{\"id\":7,\"optional\":null}"))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        row -> {
+                            assertThat(row.getInt(0)).isEqualTo(7);
+                            assertThat(row.isNullAt(1)).isTrue();
                         });
             } finally {
                 admin.dropTable(path, true).get();
