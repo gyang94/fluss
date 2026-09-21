@@ -18,6 +18,7 @@
 package org.apache.fluss.rpc.netty.server;
 
 import org.apache.fluss.shaded.netty4.io.netty.channel.Channel;
+import org.apache.fluss.utils.ExceptionUtils;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,7 +30,10 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
  * A queue channel that can receive requests and send responses.
@@ -39,8 +43,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * reads when the queue size exceeds the backpressure threshold.
  *
  * <p>Each RequestChannel instance manages its own associated Netty channels (those hashed to this
- * RequestChannel) and independently controls their backpressure state. This design encapsulates all
- * backpressure logic within the RequestChannel, eliminating the need for global state management.
+ * RequestChannel) and independently controls their queue backpressure state. Protocols that manage
+ * their own read control can instead subscribe to queue pressure with {@link
+ * #subscribeQueuePressure(Channel, QueuePressureListener)}.
  */
 @ThreadSafe
 public class RequestChannel {
@@ -69,6 +74,12 @@ public class RequestChannel {
      * backpressure is released, ALL channels are resumed simultaneously.
      */
     private final Set<Channel> associatedChannels = ConcurrentHashMap.newKeySet();
+
+    /** Protocol-owned read controllers, separate from directly managed native channels. */
+    private final Set<PressureSubscription> pressureSubscriptions = ConcurrentHashMap.newKeySet();
+
+    /** Immutable snapshots identify transitions even if pressure changes back before delivery. */
+    private volatile QueuePressureState queuePressureState = new QueuePressureState(false);
 
     /**
      * Indicates whether backpressure is currently active. When true, all associated channels have
@@ -189,6 +200,55 @@ public class RequestChannel {
         }
     }
 
+    /**
+     * Subscribes to queue pressure without changing the channel's read configuration.
+     *
+     * <p>The listener is called on the supplied active channel's EventLoop, outside the queue's
+     * backpressure lock. The first notification reports the latest pressure state, including
+     * pressure already active at subscription time. Pending notifications are coalesced, so this is
+     * a current-state subscription rather than a history of every transition. At most one
+     * notification task per subscription is pending on the EventLoop.
+     *
+     * <p>The listener must be non-blocking and combine queue pressure with its protocol's other
+     * pause reasons. A channel using this subscription must not also use {@link
+     * #registerChannel(Channel)}, which directly controls reads. The caller must close the
+     * subscription when the connection is removed. Inactive channels and rejected notification
+     * tasks also close the subscription. Non-fatal listener failures are logged and do not affect
+     * request ownership or other subscribers.
+     *
+     * @param channel the active channel whose EventLoop delivers notifications
+     * @param listener the protocol's pressure listener
+     * @return an independently closeable subscription
+     */
+    public QueuePressureSubscription subscribeQueuePressure(
+            Channel channel, QueuePressureListener listener) {
+        PressureSubscription subscription =
+                new PressureSubscription(
+                        checkNotNull(channel, "channel"), checkNotNull(listener, "listener"));
+        pressureSubscriptions.add(subscription);
+        // Scheduling after insertion closes the race with a concurrent pressure transition:
+        // either its notification pass includes us, or our initial task reads its latest state.
+        subscription.scheduleNotification();
+        return subscription;
+    }
+
+    /** Receives queue pressure for a protocol that owns its connection's read control. */
+    @FunctionalInterface
+    public interface QueuePressureListener {
+        /** Applies the latest queue pressure state on the subscribed channel's EventLoop. */
+        void onQueuePressureChanged(boolean pressureActive);
+    }
+
+    /** A thread-safe handle for cancelling one queue pressure subscription. */
+    public interface QueuePressureSubscription extends AutoCloseable {
+        /**
+         * Cancels pending and future notifications. Closing is idempotent; a callback already
+         * running may finish. Protocol-owned asynchronous work must also check connection state.
+         */
+        @Override
+        void close();
+    }
+
     /** Reconciles the backpressure state with the current queue size. */
     private void reconcileBackpressure() {
         int queueSize = requestQueue.size();
@@ -206,17 +266,22 @@ public class RequestChannel {
                         return;
                     }
                     isBackpressureActive = false;
+                    queuePressureState = new QueuePressureState(false);
                     resumeAllChannels(queueSize);
                 } else {
                     if (queueSize < backpressureThreshold) {
                         return;
                     }
                     isBackpressureActive = true;
+                    queuePressureState = new QueuePressureState(true);
                     pauseAllChannels(queueSize);
                 }
             }
         } finally {
             backpressureLock.unlock();
+            for (PressureSubscription subscription : pressureSubscriptions) {
+                subscription.scheduleNotification();
+            }
         }
     }
 
@@ -256,6 +321,79 @@ public class RequestChannel {
                                                 channel.remoteAddress());
                                     }
                                 });
+            }
+        }
+    }
+
+    private static final class QueuePressureState {
+        private final boolean active;
+
+        private QueuePressureState(boolean active) {
+            this.active = active;
+        }
+    }
+
+    private final class PressureSubscription implements QueuePressureSubscription {
+        private final Channel channel;
+        private final QueuePressureListener listener;
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private final AtomicBoolean notificationScheduled = new AtomicBoolean();
+        private volatile QueuePressureState deliveredState;
+
+        private PressureSubscription(Channel channel, QueuePressureListener listener) {
+            this.channel = channel;
+            this.listener = listener;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                pressureSubscriptions.remove(this);
+            }
+        }
+
+        private void scheduleNotification() {
+            if (closed.get()) {
+                return;
+            }
+            if (!channel.isActive()) {
+                close();
+                return;
+            }
+            if (deliveredState == queuePressureState
+                    || !notificationScheduled.compareAndSet(false, true)) {
+                return;
+            }
+            try {
+                channel.eventLoop().execute(this::notifyPressure);
+            } catch (RuntimeException failure) {
+                // Scheduling failures must not make a successful enqueue appear to have failed.
+                close();
+                notificationScheduled.set(false);
+                LOG.debug(
+                        "Unable to schedule queue pressure notification for {}.", channel, failure);
+            }
+        }
+
+        private void notifyPressure() {
+            try {
+                if (closed.get() || !channel.isActive()) {
+                    close();
+                    return;
+                }
+                QueuePressureState currentState = queuePressureState;
+                if (deliveredState != currentState) {
+                    deliveredState = currentState;
+                    listener.onQueuePressureChanged(currentState.active);
+                }
+            } catch (Throwable failure) {
+                ExceptionUtils.rethrowIfFatalErrorOrOOM(failure);
+                LOG.warn("Queue pressure listener failed for {}.", channel, failure);
+            } finally {
+                notificationScheduled.set(false);
+                // A transition during delivery may have found our task already scheduled. Recheck
+                // after clearing the flag so that neither that transition nor a newer one is lost.
+                scheduleNotification();
             }
         }
     }
