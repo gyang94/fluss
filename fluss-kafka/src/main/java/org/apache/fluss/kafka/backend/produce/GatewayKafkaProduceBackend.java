@@ -133,6 +133,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private CompletableFuture<TopicResult> writeTopic(
             KafkaProduceCommand command, TopicWrite topic) {
         try {
+            command.ensureServiceAvailable();
             checkInterrupted();
             TablePath path = topicMapper.toTablePath(topic.topicName());
             setCurrentSession(command);
@@ -161,6 +162,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     private CompletableFuture<TopicResult> produceTopic(
             KafkaProduceCommand command, TopicWrite topic, TableInfo tableInfo) {
+        command.ensureServiceAvailable();
         // Admission must match Metadata, including when the schema changes between requests.
         // Even a cached snapshot is selected only after fetching the authoritative descriptor.
         if (!schemaResolver.isEnabled(tableInfo.toTableDescriptor())) {
@@ -187,6 +189,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 continue;
             }
             try {
+                command.ensureServiceAvailable();
                 BytesView records =
                         transcoder.transcode(
                                 partition.partitionId(), partition.records(), writePlan);
@@ -203,6 +206,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                     toTopicResult(topic, new ProduceLogResponse(), failures));
         }
         try {
+            command.ensureServiceAvailable();
             checkInterrupted();
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended = gateway.produceLog(request);

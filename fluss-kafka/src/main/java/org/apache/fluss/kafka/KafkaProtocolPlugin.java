@@ -52,6 +52,7 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     private static final String PLAINTEXT_AUTH_PROTOCOL = "plaintext";
 
     private Configuration conf;
+    private KafkaServiceController serviceController;
     private KafkaProduceConversionExecutor conversionExecutor;
     private CompletableFuture<Void> closeFuture;
     private PlainSaslServerConfigManager plainSaslServerConfigManager;
@@ -67,6 +68,14 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public void setup(Configuration conf) {
         validateKafkaAuthenticationConfiguration(conf);
+        if (conf.get(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT).isNegative()
+                || conf.get(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT).isZero()) {
+            throw new ConfigException("kafka.service.drain-timeout must be positive.");
+        }
+        this.serviceController =
+                new KafkaServiceController(
+                        conf.get(ConfigOptions.KAFKA_ENABLED),
+                        conf.get(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT));
         this.saslListenerNames = saslListenerNames(conf);
         this.plainSaslServerConfigManager = new PlainSaslServerConfigManager(conf);
         this.conf = plainSaslServerConfigManager.getConfiguration();
@@ -96,7 +105,8 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
                 conf.get(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME).getSeconds(),
                 (int) conf.get(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE).getBytes(),
                 conf.getBoolean(ConfigOptions.NETTY_CLIENT_ALLOCATOR_HEAP_BUFFER_FIRST),
-                authenticatorSupplier);
+                authenticatorSupplier,
+                serviceController);
     }
 
     @Override
@@ -124,6 +134,7 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public synchronized CompletableFuture<Void> closeAsync() {
         if (closeFuture == null) {
+            serviceController.close();
             closeFuture =
                     conversionExecutor == null
                             ? CompletableFuture.completedFuture(null)
@@ -148,6 +159,11 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public void reconfigure(Configuration newConfig) throws ConfigException {
         plainSaslServerConfigManager.reconfigure(newConfig);
+        serviceController.setEnabled(newConfig.get(ConfigOptions.KAFKA_ENABLED));
+    }
+
+    KafkaServiceController getServiceControllerForTesting() {
+        return serviceController;
     }
 
     private static void validateKafkaAuthenticationConfiguration(Configuration configuration) {
