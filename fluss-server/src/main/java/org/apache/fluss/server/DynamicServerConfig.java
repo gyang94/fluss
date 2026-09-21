@@ -82,6 +82,7 @@ class DynamicServerConfig {
             new HashSet<>(
                     Arrays.asList(
                             DATALAKE_FORMAT.key(),
+                            ConfigOptions.KAFKA_ENABLED.key(),
                             LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED.key(),
                             LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER.key(),
                             KV_LEADER_REPLICA_MEMORY_RESERVED.key(),
