@@ -38,7 +38,7 @@ import org.apache.fluss.row.GenericArray;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalArray;
 import org.apache.fluss.row.InternalRow;
-import org.apache.fluss.row.TimestampLtz;
+import org.apache.fluss.row.TimestampNtz;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.CloseableIterator;
@@ -49,10 +49,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.TimeZone;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -89,7 +93,7 @@ class ArrowKafkaRecordTranscoderTest {
                             assertThat(row.getBytes(0)).isEqualTo(bytes("message"));
                             assertThat(row.getBytes(3)).isEqualTo(bytes("键"));
                         }
-                        assertThat(row.getTimestampLtz(1, 3).getEpochMillisecond()).isEqualTo(123L);
+                        assertThat(row.getTimestampNtz(1, 3).getMillisecond()).isEqualTo(123L);
                         InternalArray headers = row.getArray(2);
                         assertThat(headers.size()).isEqualTo(2);
                         assertThat(headers.getRow(0, 2).getString(0).toString())
@@ -98,6 +102,59 @@ class ArrowKafkaRecordTranscoderTest {
                         assertThat(headers.getRow(1, 2).isNullAt(1)).isTrue();
                     });
         }
+    }
+
+    @Test
+    void testTimestampCalendarValuesAreIndependentOfDefaultTimeZone() throws Exception {
+        TimeZone original = TimeZone.getDefault();
+        long millis = 1700000000123L;
+        try {
+            for (String zone : new String[] {"UTC", "Asia/Shanghai", "America/Los_Angeles"}) {
+                TimeZone.setDefault(TimeZone.getTimeZone(zone));
+                TableInfo table = envelope(false);
+                read(
+                        transcoder.transcode(
+                                Collections.singletonList(
+                                        new Record(
+                                                millis,
+                                                null,
+                                                bytes("value"),
+                                                Collections.emptyList())),
+                                table),
+                        table,
+                        1,
+                        row ->
+                                assertThat(row.getTimestampNtz(1, 3).toLocalDateTime())
+                                        .isEqualTo(
+                                                LocalDateTime.ofInstant(
+                                                        Instant.ofEpochMilli(millis),
+                                                        ZoneOffset.UTC)));
+            }
+        } finally {
+            TimeZone.setDefault(original);
+        }
+    }
+
+    @Test
+    void testMissingTimestampRespectsColumnNullability() throws Exception {
+        List<Record> records =
+                Collections.singletonList(
+                        new Record(-1L, null, bytes("value"), Collections.emptyList()));
+        TableInfo nullable = envelope(false, true);
+        read(
+                transcoder.transcode(records, nullable),
+                nullable,
+                1,
+                row -> assertThat(row.isNullAt(1)).isTrue());
+        assertThatThrownBy(() -> transcoder.transcode(records, envelope(false)))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("Missing Kafka timestamp");
+        TableInfo unmapped = valueTable(false);
+        read(
+                transcoder.transcode(records, unmapped),
+                unmapped,
+                1,
+                row -> assertThat(row.getString(0).toString()).isEqualTo("value"));
     }
 
     @Test
@@ -282,7 +339,7 @@ class ArrowKafkaRecordTranscoderTest {
                         assertThat(row.getBytes(0)).isEqualTo(bytes("消息-" + i));
                         assertThat(row.getBytes(3)).isEqualTo(bytes("key-" + i));
                     }
-                    assertThat(row.getTimestampLtz(1, 3).getEpochMillisecond()).isEqualTo(i);
+                    assertThat(row.getTimestampNtz(1, 3).getMillisecond()).isEqualTo(i);
                     InternalArray headers = row.getArray(2);
                     assertThat(headers.size()).isEqualTo(2);
                     assertThat(headers.getRow(0, 2).getString(0).toString()).isEqualTo("duplicate");
@@ -301,7 +358,7 @@ class ArrowKafkaRecordTranscoderTest {
         GenericRow row =
                 GenericRow.of(
                         value,
-                        TimestampLtz.fromEpochMillis(1L),
+                        TimestampNtz.fromMillis(1L),
                         new GenericArray(
                                 new Object[] {
                                     GenericRow.of(BinaryString.fromString("header"), headerValue)
@@ -315,7 +372,7 @@ class ArrowKafkaRecordTranscoderTest {
                                         key[0] = (byte) i;
                                         value[0] = (byte) (i + 10);
                                         headerValue[0] = (byte) (i + 20);
-                                        row.setField(1, TimestampLtz.fromEpochMillis(i));
+                                        row.setField(1, TimestampNtz.fromMillis(i));
                                         consumer.append(row);
                                     }
                                     Arrays.fill(key, (byte) -1);
@@ -333,7 +390,7 @@ class ArrowKafkaRecordTranscoderTest {
                     int i = nextRecord.getAndIncrement();
                     assertThat(actual.getBytes(3)).containsExactly((byte) i);
                     assertThat(actual.getBytes(0)).containsExactly((byte) (i + 10));
-                    assertThat(actual.getTimestampLtz(1, 3).getEpochMillisecond()).isEqualTo(i);
+                    assertThat(actual.getTimestampNtz(1, 3).getMillisecond()).isEqualTo(i);
                     assertThat(actual.getArray(2).getRow(0, 2).getBytes(1))
                             .containsExactly((byte) (i + 20));
                 });
@@ -400,10 +457,14 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     private static TableInfo envelope(boolean string) {
+        return envelope(string, false);
+    }
+
+    private static TableInfo envelope(boolean string, boolean nullableTimestamp) {
         Schema schema =
                 Schema.newBuilder()
                         .column("body", string ? DataTypes.STRING() : DataTypes.BYTES())
-                        .column("time", DataTypes.TIMESTAMP_LTZ(3).copy(false))
+                        .column("time", DataTypes.TIMESTAMP(3).copy(nullableTimestamp))
                         .column(
                                 "attrs",
                                 DataTypes.ARRAY(
