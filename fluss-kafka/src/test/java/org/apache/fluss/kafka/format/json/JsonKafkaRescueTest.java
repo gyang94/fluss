@@ -26,6 +26,7 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.JsonNodeType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
@@ -44,9 +45,140 @@ import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-/** Tests optional unknown-field rescue while preserving strict type validation. */
+/** Tests structural rescue while keeping NOT NULL and resource violations fatal. */
 class JsonKafkaRescueTest {
+
+    @Test
+    void testUnexpectedConversionFailureIsNotRescued() {
+        JsonNode broken = mock(JsonNode.class);
+        IllegalStateException failure = new IllegalStateException("unexpected conversion failure");
+        when(broken.getNodeType()).thenReturn(JsonNodeType.BOOLEAN);
+        when(broken.booleanValue()).thenThrow(failure);
+        assertThatThrownBy(
+                        () ->
+                                JsonToFlussConverters.create(DataTypes.BOOLEAN())
+                                        .convert(
+                                                broken,
+                                                "$",
+                                                rescued -> {
+                                                    throw new AssertionError("Unexpected rescue");
+                                                }))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasCause(failure);
+    }
+
+    @Test
+    void testNullableFailuresMergeWithUnknownFieldsAtStructuralLocations() throws Exception {
+        RowType nested = DataTypes.ROW(DataTypes.FIELD("known", DataTypes.INT()));
+        RowType schema =
+                DataTypes.ROW(
+                        DataTypes.FIELD("details", nested),
+                        DataTypes.FIELD("items", DataTypes.ARRAY(nested)),
+                        DataTypes.FIELD("attributes", DataTypes.MAP(DataTypes.STRING(), nested)),
+                        DataTypes.FIELD("rescue", DataTypes.STRING()));
+        String longKey = new String(new char[512]).replace('\0', 'x') + ".[]";
+        Object[] values =
+                rescueDecoder(schema, "rescue")
+                        .decode(
+                                bytes(
+                                        "{\"details\":{\"known\":\"bad\",\"extra\":1},"
+                                                + "\"items\":[{\"known\":2},{\"known\":\"bad\",\"extra\":3}],"
+                                                + "\"attributes\":{\""
+                                                + longKey
+                                                + "\":{\"known\":false,\"extra\":4}}}"));
+        assertThat(((GenericRow) values[0]).isNullAt(0)).isTrue();
+        GenericArray array = (GenericArray) values[1];
+        assertThat(array.getRow(0, 1).getInt(0)).isEqualTo(2);
+        assertThat(array.getRow(1, 1).isNullAt(0)).isTrue();
+        assertThat(
+                        ((GenericRow)
+                                        ((GenericMap) values[2])
+                                                .get(BinaryString.fromString(longKey)))
+                                .isNullAt(0))
+                .isTrue();
+        JsonNode rescued = new ObjectMapper().readTree(values[3].toString());
+        assertThat(rescued.get("details").get("known").textValue()).isEqualTo("bad");
+        assertThat(rescued.get("details").get("extra").intValue()).isEqualTo(1);
+        assertThat(rescued.get("items").get(0).isNull()).isTrue();
+        assertThat(rescued.get("items").get(1).get("known").textValue()).isEqualTo("bad");
+        assertThat(rescued.get("items").get(1).get("extra").intValue()).isEqualTo(3);
+        assertThat(rescued.get("attributes").get(longKey).get("known").booleanValue()).isFalse();
+        assertThat(rescued.get("attributes").get(longKey).get("extra").intValue()).isEqualTo(4);
+    }
+
+    @Test
+    void testNullableParentNeverRescuesRequiredDescendantFailures() {
+        RowType required = DataTypes.ROW(DataTypes.FIELD("required", DataTypes.INT().copy(false)));
+        JsonKafkaFieldDecoder decoder =
+                rescueDecoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("row", required),
+                                DataTypes.FIELD("array", DataTypes.ARRAY(required)),
+                                DataTypes.FIELD("map", DataTypes.MAP(DataTypes.STRING(), required)),
+                                DataTypes.FIELD("rescue", DataTypes.STRING())),
+                        "rescue");
+        for (String json :
+                new String[] {
+                    "{\"row\":{\"required\":\"bad\"}}",
+                    "{\"row\":{}}",
+                    "{\"row\":{\"required\":null}}",
+                    "{\"array\":[{\"required\":\"bad\"}]}",
+                    "{\"map\":{\"x\":{\"required\":\"bad\"}}}"
+                }) {
+            assertThatThrownBy(() -> decoder.decode(bytes(json)))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("required");
+        }
+    }
+
+    @Test
+    void testScalarFailuresAndWrongContainersPreserveOriginalValues() throws Exception {
+        RowType schema =
+                DataTypes.ROW(
+                        DataTypes.FIELD("integer", DataTypes.INT()),
+                        DataTypes.FIELD("decimal", DataTypes.DECIMAL(3, 1)),
+                        DataTypes.FIELD("float", DataTypes.FLOAT()),
+                        DataTypes.FIELD("date", DataTypes.DATE()),
+                        DataTypes.FIELD("bytes", DataTypes.BYTES()),
+                        DataTypes.FIELD("string", DataTypes.STRING()),
+                        DataTypes.FIELD("rescue", DataTypes.STRING()));
+        String json =
+                "{\"integer\":2147483648,\"decimal\":123.45,\"float\":1e40,"
+                        + "\"date\":\"invalid\",\"bytes\":\"%%%\",\"string\":{\"original\":[1,2]}}";
+        Object[] values = rescueDecoder(schema, "rescue").decode(bytes(json));
+        for (int i = 0; i < 6; i++) {
+            assertThat(values[i]).isNull();
+        }
+        ObjectMapper mapper =
+                new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
+        assertThat(mapper.readTree(values[6].toString())).isEqualTo(mapper.readTree(json));
+        assertThatThrownBy(() -> rescueDecoder(schema, null).decode(bytes(json)))
+                .isInstanceOf(KafkaRecordEncodingException.class);
+    }
+
+    @Test
+    void testNullableWrongContainerStillEnforcesResourceLimits() {
+        JsonKafkaFieldDecoder decoder =
+                rescueDecoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("value", DataTypes.INT()),
+                                DataTypes.FIELD("rescue", DataTypes.STRING())),
+                        "rescue");
+        String atLimit = containerAtLimit(false);
+        assertThat(decoder.decode(bytes("{\"value\":" + atLimit + "}"))[0]).isNull();
+        assertThatThrownBy(
+                        () ->
+                                decoder.decode(
+                                        bytes(
+                                                "{\"value\":"
+                                                        + atLimit.substring(0, atLimit.length() - 1)
+                                                        + ",0]}")))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("container size exceeds");
+    }
 
     @Test
     void testRescuesUnknownRootAndNestedFieldsAsJsonString() {
@@ -104,7 +236,7 @@ class JsonKafkaRescueTest {
     }
 
     @Test
-    void testRejectsExplicitNonNullRescueColumnAndKeepsTypeChecksStrict() {
+    void testRejectsExplicitNonNullRescueColumnAndRescuesNullableTypeMismatch() {
         RowType rowType =
                 DataTypes.ROW(
                         DataTypes.FIELD("id", DataTypes.BIGINT()),
@@ -114,9 +246,9 @@ class JsonKafkaRescueTest {
         assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":1,\"kafka_rescue\":\"supplied\"}")))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("configured rescue column is reserved");
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":\"not-a-number\"}")))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining("expected a JSON integer");
+        Object[] values = decoder.decode(bytes("{\"id\":\"not-a-number\"}"));
+        assertThat(values[0]).isNull();
+        assertThat(values[1].toString()).isEqualTo("{\"id\":\"not-a-number\"}");
     }
 
     @Test
@@ -240,7 +372,7 @@ class JsonKafkaRescueTest {
         JsonKafkaFieldDecoder decoder =
                 rescueDecoder(
                         DataTypes.ROW(
-                                DataTypes.FIELD("value", DataTypes.STRING()),
+                                DataTypes.FIELD("value", DataTypes.STRING().copy(false)),
                                 DataTypes.FIELD("rescue", DataTypes.STRING())),
                         "rescue");
         assertThatThrownBy(() -> decoder.decode(bytes("{\"extra\":1,\"value\":" + container)))
