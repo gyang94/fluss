@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.api.produce;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.KafkaRequestContext;
+import org.apache.fluss.kafka.KafkaServiceUnavailableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceBackend;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
@@ -123,6 +124,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                 topics.add(new TopicWrite(topic.name(), partitions));
             }
         }
+        context.serviceGuard().ensureAvailable();
         KafkaProduceCommand command =
                 new KafkaProduceCommand(
                         request.acks(),
@@ -131,7 +133,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                         context.listenerName(),
                         clientAddress(context.remoteAddress()),
                         context.principal(),
-                        context::serviceAvailable);
+                        context.serviceGuard());
         CompletableFuture<KafkaProduceResult> result;
         try {
             result =
@@ -175,6 +177,17 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                             partitions.add(value);
                         }
                         ordered.add(new TopicResult(topic.name(), partitions));
+                    }
+                    if (ordered.stream()
+                            .flatMap(topic -> topic.partitions().stream())
+                            .anyMatch(
+                                    partition ->
+                                            partition.error() == Errors.BROKER_NOT_AVAILABLE)) {
+                        org.slf4j.LoggerFactory.getLogger(ProduceHandler.class)
+                                .info(KafkaServiceUnavailableException.MESSAGE);
+                        if (request.acks() == 0) {
+                            context.closeWithoutResponse();
+                        }
                     }
                     return toResponse(new KafkaProduceResult(ordered));
                 });

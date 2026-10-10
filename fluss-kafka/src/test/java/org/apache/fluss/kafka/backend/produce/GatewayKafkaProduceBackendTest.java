@@ -235,7 +235,7 @@ class GatewayKafkaProduceBackendTest {
                 backend(service).write(guardedCommand(enabled));
         enabled.set(false);
         service.pendingMetadata.complete(metadata(false));
-        assertErrors(result.join(), Errors.REQUEST_TIMED_OUT);
+        assertErrors(result.join(), Errors.BROKER_NOT_AVAILABLE);
         assertThat(service.append).isNull();
     }
 
@@ -252,7 +252,7 @@ class GatewayKafkaProduceBackendTest {
                             enabled.set(false);
                             return transcoder.transcode(records, table);
                         });
-        assertErrors(backend.write(guardedCommand(enabled)).join(), Errors.REQUEST_TIMED_OUT);
+        assertErrors(backend.write(guardedCommand(enabled)).join(), Errors.BROKER_NOT_AVAILABLE);
         assertThat(service.append).isNull();
         assertThat(service.drains).isZero();
     }
@@ -284,7 +284,7 @@ class GatewayKafkaProduceBackendTest {
             CompletableFuture<KafkaProduceResult> result = backend.write(guardedCommand(enabled));
             enabled.set(false);
             release.countDown();
-            assertErrors(result.get(10, TimeUnit.SECONDS), Errors.REQUEST_TIMED_OUT);
+            assertErrors(result.get(10, TimeUnit.SECONDS), Errors.BROKER_NOT_AVAILABLE);
             assertThat(service.metadataPaths).isEmpty();
             assertThat(service.append).isNull();
         } finally {
