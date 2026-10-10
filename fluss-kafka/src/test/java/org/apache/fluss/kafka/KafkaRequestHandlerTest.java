@@ -319,11 +319,12 @@ public class KafkaRequestHandlerTest {
             assertThat(request.apiVersion()).isEqualTo(version);
             handler.processRequest(request);
             assertThat(request.future()).isDone();
-            channel.runPendingTasks();
-            assertThat(buffer.refCnt()).isZero();
         } finally {
+            // Mirror RequestProcessor's independent ownership before response-queue cleanup.
             request.releaseBuffer();
         }
+        channel.runPendingTasks();
+        assertThat(buffer.refCnt()).isZero();
     }
 
     private static ApiVersionsResponse parseWireResponse(

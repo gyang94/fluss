@@ -17,6 +17,7 @@
 
 package org.apache.fluss.kafka.api.versions;
 
+import org.apache.fluss.kafka.KafkaRequest;
 import org.apache.fluss.kafka.KafkaRequestContext;
 import org.apache.fluss.kafka.api.produce.ProduceHandler;
 import org.apache.fluss.kafka.api.sasl.SaslAuthenticateHandler;
@@ -24,6 +25,8 @@ import org.apache.fluss.kafka.api.sasl.SaslHandshakeHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersion;
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -32,20 +35,26 @@ import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
+import org.apache.kafka.common.requests.RequestHeader;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Tests registry-backed capability advertisement by {@link ApiVersionsHandler}. */
 class ApiVersionsHandlerTest {
 
     @ParameterizedTest
-    @ValueSource(shorts = {0, 1, 2, 3, 4})
-    void testAdvertiseRegisteredRangesAndExcludeHiddenApis(short version) {
+    @CsvSource({
+        "0, false", "1, false", "2, false", "3, false", "4, false",
+        "0, true", "1, true", "2, true", "3, true", "4, true"
+    })
+    void testAdvertiseRegisteredRangesAndExcludeHiddenApis(short version, boolean saslEnabled) {
         KafkaApiRegistry registry = new KafkaApiRegistry();
         ApiVersionsHandler handler = new ApiVersionsHandler(registry);
         registry.register(handler);
@@ -67,10 +76,21 @@ class ApiVersionsHandlerTest {
 
         ApiVersionsResponse response =
                 (ApiVersionsResponse)
-                        handler.handle(null, new ApiVersionsRequest.Builder().build(version))
+                        handler.handle(
+                                        context(version, saslEnabled),
+                                        new ApiVersionsRequest.Builder().build(version))
                                 .join();
 
         assertThat(response.data().errorCode()).isEqualTo(Errors.NONE.code());
+        if (!saslEnabled) {
+            assertThat(response.data().apiKeys())
+                    .extracting(ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
+                    .containsExactly(
+                            tuple(ApiKeys.PRODUCE.id, (short) 3, (short) 11),
+                            tuple(ApiKeys.METADATA.id, (short) 2, (short) 7),
+                            tuple(ApiKeys.API_VERSIONS.id, (short) 0, (short) 4));
+            return;
+        }
         assertThat(response.data().apiKeys())
                 .extracting(ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
                 .containsExactly(
@@ -79,6 +99,23 @@ class ApiVersionsHandlerTest {
                         tuple(ApiKeys.SASL_HANDSHAKE.id, (short) 0, (short) 1),
                         tuple(ApiKeys.API_VERSIONS.id, (short) 0, (short) 4),
                         tuple(ApiKeys.SASL_AUTHENTICATE.id, (short) 0, (short) 2));
+    }
+
+    private static KafkaRequestContext context(short version, boolean saslEnabled) {
+        KafkaRequest request = mock(KafkaRequest.class);
+        when(request.header())
+                .thenReturn(new RequestHeader(ApiKeys.API_VERSIONS, version, "client", 1));
+        when(request.ctx()).thenReturn(mock(ChannelHandlerContext.class));
+        when(request.saslConnection())
+                .thenReturn(
+                        saslEnabled
+                                ? KafkaSaslConnection.sasl(
+                                        () -> {
+                                            throw new AssertionError(
+                                                    "Capability advertisement must not initialize authentication.");
+                                        })
+                                : KafkaSaslConnection.plaintext());
+        return KafkaRequestContext.fromRequest(request);
     }
 
     private static final class TestingApiHandler implements KafkaApiHandler<AbstractRequest> {

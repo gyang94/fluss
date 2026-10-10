@@ -25,11 +25,12 @@ import org.apache.fluss.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateEvent;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateHandler;
 
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -38,9 +39,10 @@ import static org.mockito.Mockito.when;
 /** Tests Kafka listener idle-time configuration and idle-event handling. */
 class KafkaProtocolPluginTest {
 
-    @Test
-    void testDefaultNettyIdleTimeout() throws Exception {
-        EmbeddedChannel channel = createChannel(new Configuration());
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDefaultNettyIdleTimeout(boolean saslEnabled) throws Exception {
+        EmbeddedChannel channel = createChannel(configuration(saslEnabled));
         try {
             IdleStateHandler idleHandler = channel.pipeline().get(IdleStateHandler.class);
             assertThat(idleHandler.getAllIdleTimeInMillis())
@@ -53,9 +55,9 @@ class KafkaProtocolPluginTest {
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {0, 7})
-    void testConfiguredNettyIdleTimeout(long timeoutSeconds) throws Exception {
-        Configuration conf = new Configuration();
+    @CsvSource({"0, false", "7, false", "0, true", "7, true"})
+    void testConfiguredNettyIdleTimeout(long timeoutSeconds, boolean saslEnabled) throws Exception {
+        Configuration conf = configuration(saslEnabled);
         conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ofSeconds(timeoutSeconds));
         EmbeddedChannel channel = createChannel(conf);
         try {
@@ -69,9 +71,10 @@ class KafkaProtocolPluginTest {
         }
     }
 
-    @Test
-    void testOnlyAllIdleClosesConnection() throws Exception {
-        EmbeddedChannel channel = createChannel(new Configuration());
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testOnlyAllIdleClosesConnection(boolean saslEnabled) throws Exception {
+        EmbeddedChannel channel = createChannel(configuration(saslEnabled));
         try {
             channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_READER_IDLE_STATE_EVENT);
             assertThat(channel.isActive()).isTrue();
@@ -82,6 +85,19 @@ class KafkaProtocolPluginTest {
         } finally {
             channel.finishAndReleaseAll();
         }
+    }
+
+    private static Configuration configuration(boolean saslEnabled) {
+        Configuration conf = new Configuration();
+        if (saslEnabled) {
+            conf.set(
+                    ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
+                    Collections.singletonMap("KAFKA", "sasl"));
+            conf.set(
+                    ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
+                    Collections.singletonList("PLAIN"));
+        }
+        return conf;
     }
 
     private static EmbeddedChannel createChannel(Configuration conf) throws Exception {
