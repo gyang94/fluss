@@ -19,6 +19,8 @@ package org.apache.fluss.kafka.api.versions;
 
 import org.apache.fluss.kafka.KafkaRequestContext;
 import org.apache.fluss.kafka.api.produce.ProduceHandler;
+import org.apache.fluss.kafka.api.sasl.SaslAuthenticateHandler;
+import org.apache.fluss.kafka.api.sasl.SaslHandshakeHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
@@ -60,6 +62,8 @@ class ApiVersionsHandlerTest {
                 new KafkaApiRegistry(
                         Arrays.asList(
                                 handler,
+                                new SaslHandshakeHandler(),
+                                new SaslAuthenticateHandler(),
                                 new ProduceHandler(
                                         command -> {
                                             throw new AssertionError(
@@ -86,7 +90,9 @@ class ApiVersionsHandlerTest {
                 .containsExactly(
                         tuple(ApiKeys.PRODUCE.id, (short) 3, (short) 11),
                         tuple(ApiKeys.METADATA.id, (short) 2, (short) 7),
-                        tuple(ApiKeys.API_VERSIONS.id, (short) 0, (short) 4));
+                        tuple(ApiKeys.SASL_HANDSHAKE.id, (short) 0, (short) 1),
+                        tuple(ApiKeys.API_VERSIONS.id, (short) 0, (short) 4),
+                        tuple(ApiKeys.SASL_AUTHENTICATE.id, (short) 0, (short) 2));
     }
 
     private static final class TestingApiHandler implements KafkaApiHandler<AbstractRequest> {
