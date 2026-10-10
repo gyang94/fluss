@@ -44,11 +44,20 @@ import org.apache.fluss.types.DataTypes;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.ApiVersionsRequest;
+import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.requests.RequestUtils;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -110,10 +119,13 @@ class KafkaServiceSwitchITCase {
                             .get(10, TimeUnit.SECONDS);
                     assertThatThrownBy(() -> send(producer, path, 4))
                             .hasRootCauseInstanceOf(
-                                    org.apache.kafka.common.errors.TimeoutException.class);
+                                    org.apache.kafka.common.errors.BrokerNotAvailableException
+                                            .class);
                     assertRows(table, 1, 2, 3);
                     setEnabled(admin, true);
-                    send(producer, path, 5);
+                    try (KafkaProducer<String, String> reopened = producer()) {
+                        send(reopened, path, 5);
+                    }
                     assertRows(table, 1, 2, 3, 5);
                 }
                 assertThat(CLUSTER.getTabletServerNodes("KAFKA"))
@@ -207,7 +219,25 @@ class KafkaServiceSwitchITCase {
         for (ServerNode node : CLUSTER.getTabletServerNodes("KAFKA")) {
             try (Socket socket = new Socket(node.host(), node.port())) {
                 socket.setSoTimeout(5000);
-                assertThat(socket.getInputStream().read()).isEqualTo(-1);
+                ApiVersionsRequest body = new ApiVersionsRequest.Builder().build((short) 0);
+                RequestHeader header =
+                        new RequestHeader(ApiKeys.API_VERSIONS, (short) 0, "disabled", 77);
+                ByteBuffer bytes =
+                        RequestUtils.serialize(
+                                header.data(), header.headerVersion(), body.data(), body.version());
+                byte[] payload = new byte[bytes.remaining()];
+                bytes.get(payload);
+                DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+                output.writeInt(payload.length);
+                output.write(payload);
+                output.flush();
+                DataInputStream input = new DataInputStream(socket.getInputStream());
+                byte[] response = new byte[input.readInt()];
+                input.readFully(response);
+                assertThat(
+                                AbstractResponse.parseResponse(ByteBuffer.wrap(response), header)
+                                        .errorCounts())
+                        .containsOnlyKeys(Errors.BROKER_NOT_AVAILABLE);
             }
         }
     }

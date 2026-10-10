@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.KafkaServiceGuard;
 import org.apache.fluss.security.acl.FlussPrincipal;
 
 import javax.annotation.Nullable;
@@ -26,8 +27,8 @@ import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CancellationException;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -41,7 +42,7 @@ public final class KafkaProduceCommand {
     private final String listenerName;
     private final @Nullable InetAddress clientAddress;
     private final FlussPrincipal principal;
-    private final BooleanSupplier serviceAvailable;
+    private final KafkaServiceGuard serviceGuard;
 
     /** Creates a Kafka write command. */
     public KafkaProduceCommand(
@@ -73,7 +74,26 @@ public final class KafkaProduceCommand {
             @Nullable InetAddress clientAddress,
             FlussPrincipal principal,
             BooleanSupplier serviceAvailable) {
-        this.serviceAvailable = checkNotNull(serviceAvailable);
+        this(
+                acks,
+                timeoutMs,
+                topics,
+                listenerName,
+                clientAddress,
+                principal,
+                new KafkaServiceGuard(serviceAvailable));
+    }
+
+    /** Creates a command sharing atomic submission admission with its service controller. */
+    public KafkaProduceCommand(
+            short acks,
+            int timeoutMs,
+            List<TopicWrite> topics,
+            String listenerName,
+            @Nullable InetAddress clientAddress,
+            FlussPrincipal principal,
+            KafkaServiceGuard serviceGuard) {
+        this.serviceGuard = checkNotNull(serviceGuard);
         this.acks = acks;
         this.timeoutMs = timeoutMs;
         this.topics = immutableCopy(topics);
@@ -84,9 +104,12 @@ public final class KafkaProduceCommand {
 
     /** Rejects queued or converting work after its connection stops serving requests. */
     public void ensureServiceAvailable() {
-        if (!serviceAvailable.getAsBoolean()) {
-            throw new CancellationException("Kafka service is disabled for this connection.");
-        }
+        serviceGuard.ensureAvailable();
+    }
+
+    /** Submits native work atomically with respect to service disable. */
+    public <T> T submitIfServiceAvailable(Supplier<T> submission) {
+        return serviceGuard.execute(submission);
     }
 
     /** Returns Kafka required acknowledgements. */

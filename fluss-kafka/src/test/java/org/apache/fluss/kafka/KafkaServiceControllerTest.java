@@ -28,90 +28,44 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 
-import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Service switching preserves submitted ownership and permanently retires old connections. */
 class KafkaServiceControllerTest {
     @Test
-    void testDisabledConnectionsCannotBecomeActiveWhenReopened() {
+    void testDisabledConnectionsRemainReadableAndOldGenerationsStayRetired() {
         KafkaServiceController controller =
                 new KafkaServiceController(false, Duration.ofSeconds(30));
-        EmbeddedChannel rejected = new EmbeddedChannel(controller.newConnection());
+        EmbeddedChannel old = new EmbeddedChannel(controller.newConnection());
         try {
-            assertThat(rejected.isActive()).isFalse();
+            assertThat(old.isActive()).isTrue();
+            assertThat(KafkaServiceController.connection(old).isServing()).isFalse();
+            ByteBuf bytes = Unpooled.buffer().writeInt(42);
+            assertThat(old.writeInbound(bytes)).isTrue();
+            ByteBuf decoded = old.readInbound();
+            assertThat(decoded.readInt()).isEqualTo(42);
+            decoded.release();
             controller.setEnabled(true);
-            EmbeddedChannel accepted = new EmbeddedChannel(controller.newConnection());
+            EmbeddedChannel fresh = new EmbeddedChannel(controller.newConnection());
             try {
-                assertThat(accepted.isActive()).isTrue();
-                assertThat(rejected.isActive()).isFalse();
+                assertThat(KafkaServiceController.connection(fresh).isServing()).isTrue();
+                assertThat(KafkaServiceController.connection(old).isServing()).isFalse();
                 controller.setEnabled(false);
-                accepted.runPendingTasks();
-                assertThat(accepted.isActive()).isFalse();
-                assertThat(controller.drainingConnections()).isZero();
+                fresh.runPendingTasks();
+                assertThat(fresh.isActive()).isTrue();
+                assertThat(KafkaServiceController.connection(fresh).isServing()).isFalse();
+                controller.setEnabled(true);
+                assertThat(KafkaServiceController.connection(fresh).isServing()).isFalse();
+                assertThat(controller.retiredConnections()).isEqualTo(2);
             } finally {
-                accepted.finishAndReleaseAll();
+                fresh.finishAndReleaseAll();
             }
         } finally {
-            rejected.finishAndReleaseAll();
-            controller.close();
-        }
-    }
-
-    @Test
-    void testDrainWaitsForNetworkCompletionAndDoesNotAdmitPipelinedBytes() {
-        KafkaServiceController controller =
-                new KafkaServiceController(true, Duration.ofSeconds(30));
-        EmbeddedChannel channel = new EmbeddedChannel(controller.newConnection());
-        KafkaServiceController.Connection connection = KafkaServiceController.connection(channel);
-        try {
-            assertThat(connection.startRequest()).isTrue();
-            controller.setEnabled(false);
-            channel.runPendingTasks();
-            assertThat(channel.isActive()).isTrue();
-            assertThat(controller.drainingConnections()).isOne();
-            ByteBuf bytes = Unpooled.buffer().writeInt(42);
-            assertThat(channel.writeInbound(bytes)).isFalse();
-            assertThat(bytes.refCnt()).isZero();
-            assertThat(connection.startRequest()).isFalse();
-            connection.finishRequest();
-            channel.runPendingTasks();
-            assertThat(channel.isActive()).isFalse();
-            assertThat(controller.drainingConnections()).isZero();
-        } finally {
-            channel.finishAndReleaseAll();
-            controller.close();
-        }
-    }
-
-    @Test
-    void testReopeningCannotReviveAnOldGenerationOrCloseNewConnections() {
-        KafkaServiceController controller = new KafkaServiceController(true, Duration.ofMillis(1));
-        EmbeddedChannel old = new EmbeddedChannel(controller.newConnection());
-        KafkaServiceController.Connection oldConnection = KafkaServiceController.connection(old);
-        assertThat(oldConnection.startRequest()).isTrue();
-        controller.setEnabled(false);
-        controller.setEnabled(true);
-        EmbeddedChannel fresh = new EmbeddedChannel(controller.newConnection());
-        try {
-            assertThat(oldConnection.isServing()).isFalse();
-            assertThat(oldConnection.startRequest()).isFalse();
-            assertThat(KafkaServiceController.connection(fresh).isServing()).isTrue();
-            retry(
-                    Duration.ofSeconds(5),
-                    () -> {
-                        old.runPendingTasks();
-                        old.runScheduledPendingTasks();
-                        assertThat(old.isActive()).isFalse();
-                    });
-            assertThat(fresh.isActive()).isTrue();
-        } finally {
-            oldConnection.finishRequest();
             old.finishAndReleaseAll();
-            fresh.finishAndReleaseAll();
             controller.close();
         }
+        assertThat(controller.retiredConnections()).isZero();
     }
 
     @Test
