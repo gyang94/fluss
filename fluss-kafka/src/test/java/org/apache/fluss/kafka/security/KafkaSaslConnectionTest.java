@@ -96,8 +96,9 @@ public class KafkaSaslConnectionTest {
         assertThat(authenticator.closed).isTrue();
     }
 
-    @Test
-    public void testFlussPlainAuthenticatorAcceptsKafkaPlainToken() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testFlussPlainAuthenticatorAcceptsKafkaPlainToken(short version) {
         Configuration configuration = new Configuration();
         configuration.set(
                 ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
@@ -114,21 +115,24 @@ public class KafkaSaslConnectionTest {
         connection.beginAuthentication(
                 KafkaSaslConnection.PLAIN_MECHANISM,
                 "KAFKA",
-                new InetSocketAddress("127.0.0.1", 9092));
+                new InetSocketAddress("127.0.0.1", 9092),
+                version);
         connection.authenticate(bytes("\u0000writer\u0000writer-secret"));
 
         assertThat(connection.isReady()).isTrue();
         assertThat(connection.principal()).isEqualTo(new FlussPrincipal("writer", "User"));
     }
 
-    @Test
-    public void testAuthenticationFailureRequiresConnectionClose() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testAuthenticationFailureRequiresConnectionClose(short version) {
         TestingServerAuthenticator authenticator = new TestingServerAuthenticator();
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(() -> authenticator);
         connection.beginAuthentication(
                 KafkaSaslConnection.PLAIN_MECHANISM,
                 "KAFKA",
-                new InetSocketAddress("127.0.0.1", 9092));
+                new InetSocketAddress("127.0.0.1", 9092),
+                version);
 
         assertThatThrownBy(() -> connection.authenticate(bytes("bad-token")))
                 .isInstanceOf(AuthenticationException.class);
@@ -140,14 +144,16 @@ public class KafkaSaslConnectionTest {
         assertThat(connection.isRequestAllowed(ApiKeys.API_VERSIONS)).isFalse();
     }
 
-    @Test
-    public void testCloseReleasesAuthenticator() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testCloseReleasesAuthenticator(short version) {
         TestingServerAuthenticator authenticator = new TestingServerAuthenticator();
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(() -> authenticator);
         connection.beginAuthentication(
                 KafkaSaslConnection.PLAIN_MECHANISM,
                 "KAFKA",
-                new InetSocketAddress("127.0.0.1", 9092));
+                new InetSocketAddress("127.0.0.1", 9092),
+                version);
 
         connection.close();
 
