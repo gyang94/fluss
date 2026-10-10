@@ -163,6 +163,47 @@ class KafkaProduceCommandTest {
     }
 
     @Test
+    void testNullFilteringPreservesRecordIdentityAndTimestampProvenance() {
+        Record filtered =
+                new Record(
+                        123L,
+                        TimestampType.CREATE_TIME,
+                        new byte[] {1},
+                        null,
+                        Collections.emptyList());
+        Record retained =
+                new Record(
+                        456L,
+                        TimestampType.LOG_APPEND_TIME,
+                        new byte[] {2},
+                        new byte[] {3},
+                        Collections.emptyList());
+        Record empty =
+                new Record(
+                        Record.NO_TIMESTAMP,
+                        TimestampType.CREATE_TIME,
+                        null,
+                        new byte[0],
+                        Collections.emptyList());
+        List<Record> source = new ArrayList<>(Arrays.asList(filtered, retained, empty));
+        PartitionWrite partition = new PartitionWrite(0, source);
+        source.clear();
+
+        assertThat(partition.records()).containsExactly(filtered, retained, empty);
+        assertThat(partition.hasNullValues()).isTrue();
+        assertThat(partition.nonNullRecords()).containsExactly(retained, empty);
+        assertThat(partition.nonNullRecords().get(0)).isSameAs(retained);
+        assertThat(partition.nonNullRecords().get(0).timestampType())
+                .isEqualTo(TimestampType.LOG_APPEND_TIME);
+        assertThat(partition.nonNullRecords().get(0).timestamp()).isEqualTo(456L);
+        assertThat(partition.nonNullRecords().get(1).timestampType())
+                .isEqualTo(TimestampType.CREATE_TIME);
+        assertThat(partition.nonNullRecords().get(1).hasTimestamp()).isFalse();
+        assertThatThrownBy(() -> partition.nonNullRecords().clear())
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
     void testBorrowedPayloadsReuseOwnedArraysWhileCopyAccessorsRemainDefensive() {
         byte[] key = {1};
         byte[] value = {2};
