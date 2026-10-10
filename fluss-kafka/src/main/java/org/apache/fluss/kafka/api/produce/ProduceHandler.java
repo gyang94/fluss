@@ -23,6 +23,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceBackend;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
@@ -239,6 +240,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                                 + recordCount
                                 + ".");
             }
+            TimestampType timestampType = timestampType(batch);
             // The ordinary compressed iterator preallocates a list using the untrusted record
             // count. Stream records instead and close the decompressor on success and failure.
             try (CloseableIterator<org.apache.kafka.common.record.Record> iterator =
@@ -249,6 +251,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                     copied.add(
                             new KafkaProduceCommand.Record(
                                     record.timestamp(),
+                                    timestampType,
                                     copyBuffer(record.hasKey() ? record.key() : null),
                                     copyBuffer(record.hasValue() ? record.value() : null),
                                     copyHeaders(record.headers())));
@@ -259,6 +262,19 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
             throw new InvalidRequestException("Empty or truncated Kafka record batch.");
         }
         return copied;
+    }
+
+    private static TimestampType timestampType(RecordBatch batch) {
+        switch (batch.timestampType()) {
+            case CREATE_TIME:
+                return TimestampType.CREATE_TIME;
+            case LOG_APPEND_TIME:
+                return TimestampType.LOG_APPEND_TIME;
+            case NO_TIMESTAMP_TYPE:
+                return TimestampType.UNKNOWN;
+            default:
+                throw new InvalidRecordException("Unknown batch timestamp type.");
+        }
     }
 
     private static ProduceResponse toResponse(KafkaProduceResult result) {
