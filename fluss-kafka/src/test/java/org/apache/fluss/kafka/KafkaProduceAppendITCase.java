@@ -113,6 +113,42 @@ class KafkaProduceAppendITCase {
     }
 
     @Test
+    void testNullValuesRemainFilteredWithoutAdvancingNativeOffsets() throws Exception {
+        // Preserve the existing filtering behavior until the FIP defines its null-value contract.
+        TablePath path = TablePath.of(DATABASE, "produce_filtered_nulls");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor("raw"), false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            try (KafkaProducer<byte[], byte[]> producer = producer("all", 0)) {
+                ProducerRecord<byte[], byte[]> filtered =
+                        new ProducerRecord<byte[], byte[]>(path.toString(), 0, 123L, KEY, null);
+                ProducerRecord<byte[], byte[]> retained =
+                        new ProducerRecord<>(
+                                path.toString(),
+                                0,
+                                123L,
+                                KEY,
+                                VALUE,
+                                Arrays.asList(
+                                        new RecordHeader("source", VALUE),
+                                        new RecordHeader("source", null)));
+                assertThat(producer.send(filtered).get(30, TimeUnit.SECONDS).offset())
+                        .isEqualTo(-1L);
+                assertThat(producer.send(retained).get(30, TimeUnit.SECONDS).offset()).isZero();
+                assertThat(producer.send(filtered).get(30, TimeUnit.SECONDS).offset())
+                        .isEqualTo(-1L);
+                assertThat(producer.send(retained).get(30, TimeUnit.SECONDS).offset())
+                        .isEqualTo(1L);
+                assertReadback(connection, path, "raw", VALUE);
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
     void testSameNamedTablesAcrossDatabases() throws Exception {
         Map<TablePath, byte[]> tables = new LinkedHashMap<>();
         tables.put(TablePath.of("produce_first", "events"), VALUE);
