@@ -131,6 +131,68 @@ class KafkaProduceProtocolTest {
                 Errors.NONE);
     }
 
+    @ParameterizedTest
+    @EnumSource(
+            value = CompressionType.class,
+            names = {"GZIP", "SNAPPY", "LZ4", "ZSTD"})
+    void testTruncatedCompressedStreamsDoNotSuppressValidPartition(CompressionType codec) {
+        byte[] value = new byte[1024];
+        Arrays.fill(value, (byte) 7);
+        MemoryRecords complete =
+                MemoryRecords.withRecords(
+                        RecordBatch.MAGIC_VALUE_V2,
+                        0L,
+                        Compression.of(codec).build(),
+                        new SimpleRecord(value));
+        for (int size = DefaultRecordBatch.RECORD_BATCH_OVERHEAD;
+                size < complete.sizeInBytes();
+                size++) {
+            ByteBuffer bytes = ByteBuffer.allocate(size);
+            ByteBuffer source = complete.buffer().duplicate();
+            source.limit(size);
+            bytes.put(source).flip();
+            // The batch length excludes the base offset and the length field itself.
+            bytes.putInt(Long.BYTES, size - Long.BYTES - Integer.BYTES);
+            MemoryRecords truncated = MemoryRecords.readableRecords(bytes);
+            updateBatchChecksum(truncated);
+            truncated.batches().iterator().next().ensureValid();
+            MemoryRecords valid =
+                    timestampedRecords(
+                            codec,
+                            org.apache.kafka.common.record.TimestampType.LOG_APPEND_TIME,
+                            123L,
+                            456L,
+                            789L);
+            AtomicReference<KafkaProduceCommand> copied = new AtomicReference<>();
+            ProduceResponse response =
+                    dispatch(
+                            request(
+                                    (short) 11,
+                                    (short) 1,
+                                    partition(0, truncated),
+                                    partition(1, valid)),
+                            command -> {
+                                assertThat(command.topics().get(0).partitions())
+                                        .extracting(KafkaProduceCommand.PartitionWrite::partitionId)
+                                        .containsExactly(1);
+                                copied.set(command);
+                                return successful(command);
+                            });
+            assertErrors(response, Errors.INVALID_RECORD, Errors.NONE);
+            // Neither the sibling failure nor releasing its input may invalidate owned records.
+            Arrays.fill(valid.buffer().array(), (byte) 0);
+            assertThat(copied.get().topics().get(0).partitions().get(0).records())
+                    .allSatisfy(
+                            record -> {
+                                assertThat(record.timestamp()).isEqualTo(123L);
+                                assertThat(record.timestampType())
+                                        .isEqualTo(TimestampType.LOG_APPEND_TIME);
+                                assertThat(record.key()).containsExactly((byte) 1);
+                                assertThat(record.value()).containsExactly((byte) 2);
+                            });
+        }
+    }
+
     @Test
     void testSupportedVersionsCopyRecordsAndForwardContext() {
         for (short version = 3; version <= 11; version++) {

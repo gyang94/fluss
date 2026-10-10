@@ -58,6 +58,7 @@ import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -309,7 +310,9 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
             if (cause instanceof ApiException) {
                 return (ApiException) cause;
             }
-            invalidStream |= cause instanceof IOException;
+            // The LZ4 header reader can expose buffer underflow for a truncated descriptor.
+            invalidStream |=
+                    cause instanceof IOException || cause instanceof BufferUnderflowException;
             cause = cause.getCause();
         }
         return invalidStream
