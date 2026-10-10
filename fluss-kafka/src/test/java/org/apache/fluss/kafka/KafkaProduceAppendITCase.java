@@ -635,7 +635,9 @@ class KafkaProduceAppendITCase {
                     count++;
                 }
             }
-            assertThat(count).as("native readback for %s", path).isEqualTo(expectedValues.size());
+            assertThat(count)
+                    .as("Native readback for %s (%s)", path, format)
+                    .isEqualTo(expectedValues.size());
         }
     }
 
