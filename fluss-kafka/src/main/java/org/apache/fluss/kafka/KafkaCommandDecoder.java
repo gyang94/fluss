@@ -73,6 +73,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     // See: org.apache.kafka.clients.InFlightRequests#completeNext
     private final ConcurrentLinkedDeque<KafkaRequest> inflightResponses =
             new ConcurrentLinkedDeque<>();
+    private boolean sendingResponses;
     protected final AtomicBoolean isActive = new AtomicBoolean(true);
     protected volatile ChannelHandlerContext ctx;
     protected SocketAddress remoteAddress;
@@ -120,14 +121,6 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             }
             ByteBuffer nioBuffer = buffer.nioBuffer();
             RequestHeader header = RequestHeader.parse(nioBuffer);
-            if (!saslConnection.isRequestAllowed(header.apiKey())) {
-                LOG.warn(
-                        "Rejecting Kafka API {} before authentication completes on listener {}",
-                        header.apiKey(),
-                        listenerName);
-                close();
-                return;
-            }
             request =
                     parseRequest(
                             ctx, future, buffer, listenerName, saslConnection, header, nioBuffer);
@@ -171,10 +164,21 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     }
 
     private void authenticateRawToken(ChannelHandlerContext ctx, ByteBuf buffer) {
+        if (serviceConnection != null && !serviceConnection.isServing()) {
+            serviceConnection.finishRequest();
+            LOG.info(KafkaServiceUnavailableException.MESSAGE);
+            close();
+            return;
+        }
         byte[] token = new byte[buffer.readableBytes()];
         buffer.getBytes(buffer.readerIndex(), token);
         try {
-            byte[] challenge = saslConnection.authenticate(token);
+            byte[] challenge =
+                    serviceConnection == null
+                            ? saslConnection.authenticate(token)
+                            : serviceConnection
+                                    .guard(() -> isActive.get())
+                                    .execute(() -> saslConnection.authenticate(token));
             // PLAIN completes with an empty challenge. Legacy clients still expect its length
             // prefix, but no Kafka response header or SaslAuthenticate response fields.
             ctx.writeAndFlush(Unpooled.wrappedBuffer(challenge))
@@ -190,7 +194,11 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             if (serviceConnection != null) {
                 serviceConnection.finishRequest();
             }
-            LOG.warn("SASL authentication failed on Kafka listener {}", listenerName);
+            if (e instanceof KafkaServiceUnavailableException) {
+                LOG.info(KafkaServiceUnavailableException.MESSAGE);
+            } else {
+                LOG.warn("SASL authentication failed on Kafka listener {}", listenerName);
+            }
             close();
         }
     }
@@ -200,6 +208,15 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
         super.channelActive(ctx);
         this.ctx = ctx;
         this.serviceConnection = KafkaServiceController.connection(ctx.channel());
+        if (serviceConnection != null) {
+            serviceConnection.onDisabled(
+                    () -> {
+                        if (saslConnection.isAuthenticatingWithRawTokens()) {
+                            LOG.info(KafkaServiceUnavailableException.MESSAGE);
+                            close();
+                        }
+                    });
+        }
         this.remoteAddress = ctx.channel().remoteAddress();
         isActive.set(true);
         LOG.info("New connection from {}", ctx.channel().remoteAddress());
@@ -226,12 +243,40 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     }
 
     private void sendResponse(ChannelHandlerContext ctx) {
+        // Writes may complete inline and run another completion callback. Never interleave the
+        // length prefix/body of this response with a later response on that reentrant path.
+        if (sendingResponses) {
+            return;
+        }
+        sendingResponses = true;
+        try {
+            sendReadyResponses(ctx);
+        } finally {
+            sendingResponses = false;
+        }
+    }
+
+    private void sendReadyResponses(ChannelHandlerContext ctx) {
         KafkaRequest request;
         while ((request = inflightResponses.peekFirst()) != null) {
             CompletableFuture<AbstractResponse> f = request.future();
             ApiKeys apiKey = request.apiKey();
             boolean isDone = f.isDone();
             boolean cancelled = request.cancelled();
+
+            if (isDone && request.suppressResponse()) {
+                inflightResponses.pollFirst();
+                request.releaseResponseBuffer();
+                request.markNetworkCompleted();
+                isActive.set(false);
+                // An empty flush is ordered after earlier response writes, including writes
+                // whose promises have not completed yet.
+                ctx.pipeline()
+                        .firstContext()
+                        .writeAndFlush(Unpooled.EMPTY_BUFFER)
+                        .addListener(ChannelFutureListener.CLOSE);
+                break;
+            }
 
             if (apiKey.equals(PRODUCE)) {
                 ProduceRequest produceRequest = request.request();

@@ -63,6 +63,16 @@ public final class KafkaRequestContext {
         return request.serviceAvailable();
     }
 
+    /** Returns the service guard for native submission and credential evaluation. */
+    public KafkaServiceGuard serviceGuard() {
+        return request.serviceGuard();
+    }
+
+    /** Closes this request in FIFO order without a Kafka response. */
+    public void closeWithoutResponse() {
+        request.closeWithoutResponse();
+    }
+
     /** Returns the request correlation ID. */
     public int correlationId() {
         return correlationId;

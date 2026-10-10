@@ -23,6 +23,8 @@ import org.apache.fluss.rpc.protocol.RequestType;
 import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
+import org.apache.fluss.shaded.netty4.io.netty.util.Attribute;
+import org.apache.fluss.shaded.netty4.io.netty.util.AttributeKey;
 import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
 
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -42,6 +44,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Represents a request received from Kafka protocol channel. */
 public class KafkaRequest implements RpcRequest {
+    private static final AttributeKey<Long> CLOSING = AttributeKey.valueOf("fluss.kafka.closing");
     private static final AtomicLong ID_GENERATOR = new AtomicLong(0);
 
     private final ApiKeys apiKey;
@@ -52,6 +55,7 @@ public class KafkaRequest implements RpcRequest {
     private final String listenerName;
     private final KafkaSaslConnection saslConnection;
     private final FlussPrincipal principal;
+    private final boolean authenticationAllowed;
     private final ByteBuf buffer;
     private final ChannelHandlerContext ctx;
     private final long startTimeMs;
@@ -61,6 +65,9 @@ public class KafkaRequest implements RpcRequest {
     private boolean responseBufferRetained;
     private final AtomicBoolean networkCompleted = new AtomicBoolean();
     private KafkaServiceController.Connection serviceConnection;
+    private KafkaServiceGuard serviceGuard =
+            new KafkaServiceGuard(() -> !this.cancelled && !isConnectionClosing());
+    private volatile boolean suppressResponse;
     private volatile boolean cancelled = false;
     private volatile boolean closeConnectionAfterResponse;
 
@@ -125,6 +132,7 @@ public class KafkaRequest implements RpcRequest {
         this.listenerName = listenerName;
         this.saslConnection = saslConnection;
         this.principal = saslConnection.principal();
+        this.authenticationAllowed = saslConnection.isRequestAllowed(apiKey);
         this.buffer = buffer.retain();
         this.ctx = ctx;
         this.startTimeMs = System.currentTimeMillis();
@@ -220,6 +228,7 @@ public class KafkaRequest implements RpcRequest {
 
     void attachServiceConnection(KafkaServiceController.Connection connection) {
         serviceConnection = connection;
+        serviceGuard = connection.guard(() -> !cancelled && !isConnectionClosing());
     }
 
     void markNetworkCompleted() {
@@ -228,8 +237,52 @@ public class KafkaRequest implements RpcRequest {
         }
     }
 
-    boolean serviceAvailable() {
-        return !cancelled && (serviceConnection == null || serviceConnection.isServing());
+    /** Authentication admission captured at decode time, before a later handshake can succeed. */
+    public boolean authenticationAllowed() {
+        return authenticationAllowed;
+    }
+
+    /** Whether an earlier request has already requested FIFO connection closure. */
+    public boolean isConnectionClosing() {
+        Long closeAfter = ctx.channel() == null ? null : ctx.channel().attr(CLOSING).get();
+        return closeAfter != null && requestId > closeAfter;
+    }
+
+    private void markClosingBoundary() {
+        if (ctx.channel() == null) {
+            return;
+        }
+        Attribute<Long> boundary = ctx.channel().attr(CLOSING);
+        while (true) {
+            Long previous = boundary.get();
+            if ((previous != null && previous <= requestId)
+                    || boundary.compareAndSet(previous, requestId)) {
+                return;
+            }
+        }
+    }
+
+    /** Whether this request may begin work in its connection generation. */
+    public boolean serviceAvailable() {
+        return serviceGuard.isAvailable();
+    }
+
+    /** Returns the admission guard shared with service transitions. */
+    public KafkaServiceGuard serviceGuard() {
+        return serviceGuard;
+    }
+
+    /** Closes in response order without serializing a response for this request. */
+    public void closeWithoutResponse() {
+        suppressResponse = true;
+        markClosingBoundary();
+        if (serviceConnection != null) {
+            serviceConnection.closeAfterPendingResponses();
+        }
+    }
+
+    boolean suppressResponse() {
+        return suppressResponse;
     }
 
     public boolean cancelled() {
@@ -239,6 +292,7 @@ public class KafkaRequest implements RpcRequest {
     /** Marks this request so the channel closes only after its response has been flushed. */
     public void closeConnectionAfterResponse() {
         closeConnectionAfterResponse = true;
+        markClosingBoundary();
     }
 
     /** Returns whether the channel must close after this request's response is flushed. */

@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.exception.TableNotExistException;
+import org.apache.fluss.kafka.KafkaServiceUnavailableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
@@ -207,6 +208,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         partition.partitionId(), failedPartition(partition.partitionId(), failure));
             }
         }
+        command.ensureServiceAvailable();
         if (request.getBucketsReqsCount() == 0) {
             return CompletableFuture.completedFuture(
                     toTopicResult(topic, new ProduceLogResponse(), failures));
@@ -215,14 +217,19 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             command.ensureServiceAvailable();
             checkInterrupted();
             setCurrentSession(command);
-            CompletableFuture<ProduceLogResponse> appended;
-            try {
-                appended = gateway.produceLog(request);
-            } finally {
-                // produceLog appends synchronously, but acks=-1 can finish later. Wake delayed
-                // fetches now so replicas can fetch the append needed to complete that response.
-                service.tryCompleteActions();
-            }
+            CompletableFuture<ProduceLogResponse> appended =
+                    command.submitIfServiceAvailable(
+                            () -> {
+                                try {
+                                    return gateway.produceLog(request);
+                                } finally {
+                                    // Native append is synchronous; replication acknowledgements
+                                    // may complete
+                                    // later. Wake replica fetches only after submission actually
+                                    // starts.
+                                    service.tryCompleteActions();
+                                }
+                            });
             return appended.handle(
                     (response, failure) ->
                             failure == null
@@ -235,6 +242,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     private static TopicResult failedAppend(
             TopicWrite topic, Map<Integer, PartitionResult> failures, Throwable failure) {
+        if (unwrap(failure) instanceof KafkaServiceUnavailableException) {
+            return failedTopic(topic, failure);
+        }
         List<PartitionResult> results = new ArrayList<>();
         for (PartitionWrite partition : topic.partitions()) {
             PartitionResult local = failures.get(partition.partitionId());
@@ -314,21 +324,23 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private static PartitionResult failedPartition(int partitionId, Throwable failure) {
         Throwable cause = unwrap(failure);
         Errors kafkaError =
-                cause instanceof RejectedExecutionException
-                                || cause instanceof TimeoutException
-                                || cause instanceof InterruptedException
-                                || cause instanceof CancellationException
-                        ? Errors.REQUEST_TIMED_OUT
-                        : cause instanceof KafkaTopicSchemaException
-                                        || cause instanceof InvalidTopicException
-                                ? Errors.INVALID_TOPIC_EXCEPTION
-                                : cause instanceof KafkaRecordEncodingException
-                                        ? Errors.INVALID_RECORD
-                                        : cause instanceof IllegalArgumentException
-                                                ? Errors.INVALID_REQUEST
-                                                : toKafkaError(
-                                                        org.apache.fluss.rpc.protocol.Errors
-                                                                .forException(cause));
+                cause instanceof KafkaServiceUnavailableException
+                        ? Errors.BROKER_NOT_AVAILABLE
+                        : cause instanceof RejectedExecutionException
+                                        || cause instanceof TimeoutException
+                                        || cause instanceof InterruptedException
+                                        || cause instanceof CancellationException
+                                ? Errors.REQUEST_TIMED_OUT
+                                : cause instanceof KafkaTopicSchemaException
+                                                || cause instanceof InvalidTopicException
+                                        ? Errors.INVALID_TOPIC_EXCEPTION
+                                        : cause instanceof KafkaRecordEncodingException
+                                                ? Errors.INVALID_RECORD
+                                                : cause instanceof IllegalArgumentException
+                                                        ? Errors.INVALID_REQUEST
+                                                        : toKafkaError(
+                                                                org.apache.fluss.rpc.protocol.Errors
+                                                                        .forException(cause));
         return new PartitionResult(partitionId, kafkaError, -1L, cause.getMessage());
     }
 

@@ -21,7 +21,6 @@ import org.apache.fluss.shaded.netty4.io.netty.channel.Channel;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelInboundHandlerAdapter;
 import org.apache.fluss.shaded.netty4.io.netty.util.AttributeKey;
-import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,6 +36,8 @@ import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BooleanSupplier;
 
 /** Controls Kafka service admission without changing listeners or shared transport resources. */
 @ThreadSafe
@@ -46,6 +47,9 @@ final class KafkaServiceController implements AutoCloseable {
             AttributeKey.valueOf("fluss.kafka.service.connection");
 
     private final Object lock = new Object();
+    // Concurrent submissions hold read admission only through their synchronous native call;
+    // disable takes write admission, so it cannot pass an in-progress submission boundary.
+    private final ReentrantReadWriteLock submissionLock = new ReentrantReadWriteLock();
     private final Set<Connection> connections = new HashSet<>();
     private final Duration drainTimeout;
     private volatile boolean enabled;
@@ -60,7 +64,7 @@ final class KafkaServiceController implements AutoCloseable {
         return enabled;
     }
 
-    int drainingConnections() {
+    int retiredConnections() {
         synchronized (lock) {
             return (int) connections.stream().filter(connection -> !connection.accepting).count();
         }
@@ -68,20 +72,24 @@ final class KafkaServiceController implements AutoCloseable {
 
     void setEnabled(boolean newEnabled) {
         List<Connection> draining;
-        synchronized (lock) {
-            if (closed || enabled == newEnabled) {
-                return;
+        submissionLock.writeLock().lock();
+        try {
+            synchronized (lock) {
+                if (closed || enabled == newEnabled) {
+                    return;
+                }
+                enabled = newEnabled;
+                draining = newEnabled ? new ArrayList<>() : new ArrayList<>(connections);
+                draining.forEach(connection -> connection.accepting = false);
             }
-            enabled = newEnabled;
-            draining = newEnabled ? new ArrayList<>() : new ArrayList<>(connections);
-            // Permanently retire these connections before reopening can race with this drain.
-            draining.forEach(connection -> connection.accepting = false);
+        } finally {
+            submissionLock.writeLock().unlock();
         }
         LOG.info(
-                "Kafka service enabled={}, draining {} existing connections.",
+                "Kafka service enabled={}, retiring {} existing connections.",
                 newEnabled,
                 draining.size());
-        draining.forEach(Connection::drain);
+        draining.forEach(Connection::serviceDisabled);
     }
 
     ChannelInboundHandlerAdapter newConnection() {
@@ -95,20 +103,26 @@ final class KafkaServiceController implements AutoCloseable {
     @Override
     public void close() {
         List<Connection> snapshot;
-        synchronized (lock) {
-            closed = true;
-            enabled = false;
-            snapshot = new ArrayList<>(connections);
-            snapshot.forEach(connection -> connection.accepting = false);
+        submissionLock.writeLock().lock();
+        try {
+            synchronized (lock) {
+                closed = true;
+                enabled = false;
+                snapshot = new ArrayList<>(connections);
+                snapshot.forEach(connection -> connection.accepting = false);
+            }
+        } finally {
+            submissionLock.writeLock().unlock();
         }
         snapshot.forEach(connection -> connection.channel.close());
     }
 
-    /** One connection generation; once drained, it can never resume serving requests. */
+    /** One connection generation; once retired, it can never resume serving requests. */
     final class Connection extends ChannelInboundHandlerAdapter {
         private final AtomicInteger requests = new AtomicInteger();
         private volatile boolean accepting = true;
         private Channel channel;
+        private Runnable onDisabled = () -> {};
         // Accessed only on the channel event loop.
         private @Nullable ScheduledFuture<?> drainTask;
 
@@ -118,15 +132,9 @@ final class KafkaServiceController implements AutoCloseable {
             channel.attr(CONNECTION).set(this);
             synchronized (lock) {
                 accepting = enabled && !closed;
-                if (accepting) {
-                    connections.add(this);
-                }
+                connections.add(this);
             }
-            if (accepting) {
-                super.channelActive(ctx);
-            } else {
-                ctx.close();
-            }
+            super.channelActive(ctx);
         }
 
         boolean isServing() {
@@ -135,7 +143,7 @@ final class KafkaServiceController implements AutoCloseable {
 
         boolean startRequest() {
             synchronized (lock) {
-                if (!isServing()) {
+                if (closed || !channel.isActive()) {
                     return false;
                 }
                 requests.incrementAndGet();
@@ -143,47 +151,42 @@ final class KafkaServiceController implements AutoCloseable {
             }
         }
 
+        int pendingRequests() {
+            return requests.get();
+        }
+
         void finishRequest() {
-            if (requests.decrementAndGet() == 0 && !accepting) {
-                channel.close();
-            }
+            requests.decrementAndGet();
         }
 
-        private void drain() {
-            try {
-                channel.eventLoop()
-                        .execute(
-                                () -> {
-                                    if (!channel.isActive()) {
-                                        return;
-                                    }
-                                    channel.config().setAutoRead(false);
-                                    if (requests.get() == 0) {
-                                        channel.close();
-                                    } else if (drainTask == null) {
-                                        drainTask =
-                                                channel.eventLoop()
-                                                        .schedule(
-                                                                () -> channel.close(),
-                                                                drainTimeout.toMillis(),
-                                                                TimeUnit.MILLISECONDS);
-                                    }
-                                });
-            } catch (RuntimeException failure) {
-                channel.close();
-                LOG.warn(
-                        "Unable to schedule Kafka connection drain; disconnected immediately.",
-                        failure);
-            }
+        KafkaServiceGuard guard(BooleanSupplier requestActive) {
+            return new KafkaServiceGuard(
+                    submissionLock.readLock(), () -> isServing() && requestActive.getAsBoolean());
         }
 
-        @Override
-        public void channelRead(ChannelHandlerContext ctx, Object message) throws Exception {
-            if (isServing()) {
-                super.channelRead(ctx, message);
-            } else {
-                ReferenceCountUtil.release(message);
-            }
+        void onDisabled(Runnable listener) {
+            onDisabled = listener;
+        }
+
+        private void serviceDisabled() {
+            channel.eventLoop().execute(() -> onDisabled.run());
+        }
+
+        // A protocol request which has no legal error response closes in FIFO order. Bound the
+        // wait for earlier responses without cancelling their native acknowledgement futures.
+        void closeAfterPendingResponses() {
+            channel.eventLoop()
+                    .execute(
+                            () -> {
+                                if (drainTask == null && channel.isActive()) {
+                                    drainTask =
+                                            channel.eventLoop()
+                                                    .schedule(
+                                                            () -> channel.close(),
+                                                            drainTimeout.toMillis(),
+                                                            TimeUnit.MILLISECONDS);
+                                }
+                            });
         }
 
         @Override
