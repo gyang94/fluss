@@ -127,29 +127,73 @@ public final class KafkaProduceCommand {
         }
     }
 
+    /**
+     * Timestamp provenance supplied by a batch, independent of whether a record has a timestamp.
+     */
+    @Internal
+    public enum TimestampType {
+        /** No batch timestamp type was supplied, including by the legacy record constructor. */
+        UNKNOWN,
+        /** The timestamp was assigned when the record was created. */
+        CREATE_TIME,
+        /** The timestamp was assigned when the batch was appended to a log. */
+        LOG_APPEND_TIME
+    }
+
     /** A copied Kafka record whose lifetime is independent of the network request buffer. */
     @Internal
     public static final class Record {
+        /** Sentinel used when the input record has no timestamp. */
+        public static final long NO_TIMESTAMP = -1L;
+
         private final long timestamp;
+        private final TimestampType timestampType;
         private final @Nullable byte[] key;
         private final @Nullable byte[] value;
         private final List<RecordHeader> headers;
 
-        /** Creates a copied Kafka record. */
+        /**
+         * Creates a copied record without batch timestamp provenance.
+         *
+         * <p>The type is {@link TimestampType#UNKNOWN} even when a timestamp is present. Callers
+         * that know the batch type should use the explicit constructor instead of inferring it from
+         * the timestamp value.
+         */
         public Record(
                 long timestamp,
                 @Nullable byte[] key,
                 @Nullable byte[] value,
                 List<RecordHeader> headers) {
+            this(timestamp, TimestampType.UNKNOWN, key, value, headers);
+        }
+
+        /** Creates a copied record with the timestamp type supplied by its source batch. */
+        public Record(
+                long timestamp,
+                TimestampType timestampType,
+                @Nullable byte[] key,
+                @Nullable byte[] value,
+                List<RecordHeader> headers) {
             this.timestamp = timestamp;
+            this.timestampType = checkNotNull(timestampType);
             this.key = copyNullable(key);
             this.value = copyNullable(value);
             this.headers = immutableCopy(headers);
         }
 
-        /** Returns the Kafka record timestamp. */
+        /** Returns the record timestamp in milliseconds, or {@link #NO_TIMESTAMP} when absent. */
         public long timestamp() {
             return timestamp;
+        }
+
+        /** Returns whether the input record has a timestamp, independently of its batch type. */
+        public boolean hasTimestamp() {
+            return timestamp != NO_TIMESTAMP;
+        }
+
+        /** Returns the source batch's timestamp type, never inferred from the timestamp value. */
+        public TimestampType timestampType() {
+            return timestampType;
         }
 
         /** Returns a copy of the nullable Kafka record key. */
