@@ -28,6 +28,7 @@ import org.apache.fluss.rpc.netty.server.RequestsMetrics;
 
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
@@ -70,6 +71,18 @@ class KafkaServiceDisabledITCase {
                     AbstractRequest request = (AbstractRequest) args.get()[0];
                     send(socket, request, 99);
                     assertThat(socket.getInputStream().read()).isEqualTo(-1);
+                }
+            }
+            for (CompressionType codec : CompressionType.values()) {
+                if (codec != CompressionType.NONE) {
+                    try (Socket socket = fixture.connect()) {
+                        send(
+                                socket,
+                                KafkaProduceCompressionDisabledTest.compressedRequest(
+                                        codec, (short) 11, (short) 0),
+                                99);
+                        assertThat(socket.getInputStream().read()).isEqualTo(-1);
+                    }
                 }
             }
             fixture.setEnabled(true);
@@ -121,6 +134,18 @@ class KafkaServiceDisabledITCase {
                     KafkaServiceDisabledTest.request(
                             (ApiKeys) values[0], (short) values[1], (short) values[2]);
             headers.add(send(socket, body, ++correlation));
+        }
+        for (CompressionType codec : CompressionType.values()) {
+            if (codec != CompressionType.NONE) {
+                for (short acks : new short[] {-1, 1}) {
+                    headers.add(
+                            send(
+                                    socket,
+                                    KafkaProduceCompressionDisabledTest.compressedRequest(
+                                            codec, (short) 11, acks),
+                                    ++correlation));
+                }
+            }
         }
         for (RequestHeader header : headers) {
             assertThat(response(socket, header).errorCounts())

@@ -233,7 +233,11 @@ class KafkaProduceAppendITCase {
                                     .isEqualTo(1000L + count);
                             assertThat(row.getBytes(3)).isEqualTo(KEY);
                             assertThat(row.getArray(2).size()).isEqualTo(2);
+                            assertThat(row.getArray(2).getRow(0, 2).getString(0).toString())
+                                    .isEqualTo("source");
                             assertThat(row.getArray(2).getRow(0, 2).getBytes(1)).isEqualTo(VALUE);
+                            assertThat(row.getArray(2).getRow(1, 2).getString(0).toString())
+                                    .isEqualTo("source");
                             assertThat(row.getArray(2).getRow(1, 2).isNullAt(1)).isTrue();
                             count++;
                         }
