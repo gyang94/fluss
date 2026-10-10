@@ -3040,15 +3040,15 @@ public class ConfigOptions {
                     .withDescription(
                             "Whether Kafka listeners provide service. Disabled by default and dynamically "
                                     + "reconfigurable. Configured Kafka addresses and ports remain bound when "
-                                    + "disabled; new connections are closed and existing connections drain.");
+                                    + "disabled; supported requests receive Kafka service-unavailable errors.");
 
     public static final ConfigOption<Duration> KAFKA_SERVICE_DRAIN_TIMEOUT =
             key("kafka.service.drain-timeout")
                     .durationType()
                     .defaultValue(Duration.ofSeconds(30))
                     .withDescription(
-                            "Maximum time to flush responses for admitted Kafka requests when service "
-                                    + "is disabled, before disconnecting clients. Startup configuration. "
+                            "Maximum time to flush earlier Kafka responses when a request requires "
+                                    + "disconnection without a response. Startup configuration. "
                                     + "Disconnecting does not roll back submitted native writes.");
 
     public static final ConfigOption<List<String>> KAFKA_LISTENER_NAMES =
