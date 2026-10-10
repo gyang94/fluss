@@ -24,12 +24,16 @@ import org.apache.fluss.security.auth.ServerAuthenticator;
 
 import org.apache.kafka.common.message.SaslAuthenticateRequestData;
 import org.apache.kafka.common.message.SaslHandshakeRequestData;
+import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.requests.RequestUtils;
+import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.requests.SaslAuthenticateRequest;
 import org.apache.kafka.common.requests.SaslAuthenticateResponse;
 import org.apache.kafka.common.requests.SaslHandshakeRequest;
 import org.apache.kafka.common.requests.SaslHandshakeResponse;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -38,6 +42,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /** Protocol response tests for the Kafka SASL handlers. */
 public class SaslHandlersTest {
@@ -58,6 +66,8 @@ public class SaslHandlersTest {
                                 handshake("PLAIN", version))
                         .join();
 
+        response = roundTrip(response, ApiKeys.SASL_HANDSHAKE, version);
+
         assertThat(Errors.forCode(response.data().errorCode())).isEqualTo(Errors.NONE);
         assertThat(response.data().mechanisms()).containsExactly("PLAIN");
         assertThat(connection.isAuthenticating()).isTrue();
@@ -65,8 +75,9 @@ public class SaslHandlersTest {
         connection.close();
     }
 
-    @Test
-    public void testUnsupportedHandshakeMechanismClosesAfterErrorResponse() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testUnsupportedHandshakeMechanismClosesAfterErrorResponse(short version) {
         SaslHandshakeHandler handler = new SaslHandshakeHandler();
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
         AtomicBoolean closeAfterResponse = new AtomicBoolean();
@@ -76,9 +87,11 @@ public class SaslHandlersTest {
                                 connection,
                                 "KAFKA",
                                 new InetSocketAddress("127.0.0.1", 9092),
-                                handshake("SCRAM-SHA-256"),
+                                handshake("SCRAM-SHA-256", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_HANDSHAKE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.UNSUPPORTED_SASL_MECHANISM);
@@ -87,8 +100,9 @@ public class SaslHandlersTest {
         assertThat(closeAfterResponse).isTrue();
     }
 
-    @Test
-    public void testHandshakeOnPlaintextConnectionReturnsIllegalState() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testHandshakeOnPlaintextConnectionReturnsIllegalState(short version) {
         SaslHandshakeHandler handler = new SaslHandshakeHandler();
         KafkaSaslConnection connection = KafkaSaslConnection.plaintext();
         AtomicBoolean closeAfterResponse = new AtomicBoolean();
@@ -98,9 +112,11 @@ public class SaslHandlersTest {
                                 connection,
                                 "KAFKA",
                                 new InetSocketAddress("127.0.0.1", 9092),
-                                handshake("PLAIN"),
+                                handshake("PLAIN", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_HANDSHAKE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.ILLEGAL_SASL_STATE);
@@ -108,12 +124,13 @@ public class SaslHandlersTest {
         assertThat(closeAfterResponse).isTrue();
     }
 
-    @Test
-    public void testRepeatedHandshakeReturnsIllegalState() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testRepeatedHandshakeReturnsIllegalState(short version) {
         SaslHandshakeHandler handler = new SaslHandshakeHandler();
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
         InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 9092);
-        handler.handle(connection, "KAFKA", remoteAddress, handshake("PLAIN")).join();
+        handler.handle(connection, "KAFKA", remoteAddress, handshake("PLAIN", version)).join();
         AtomicBoolean closeAfterResponse = new AtomicBoolean();
 
         SaslHandshakeResponse response =
@@ -121,9 +138,11 @@ public class SaslHandlersTest {
                                 connection,
                                 "KAFKA",
                                 remoteAddress,
-                                handshake("PLAIN"),
+                                handshake("PLAIN", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_HANDSHAKE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.ILLEGAL_SASL_STATE);
@@ -142,6 +161,8 @@ public class SaslHandlersTest {
         SaslAuthenticateResponse response =
                 handler.handle(connection, authenticate("valid-token", version)).join();
 
+        response = roundTrip(response, ApiKeys.SASL_AUTHENTICATE, version);
+
         assertThat(Errors.forCode(response.data().errorCode())).isEqualTo(Errors.NONE);
         assertThat(response.data().errorMessage()).isNull();
         assertThat(response.data().authBytes()).isEmpty();
@@ -150,8 +171,9 @@ public class SaslHandlersTest {
         assertThat(connection.principal()).isEqualTo(new FlussPrincipal("alice", "User"));
     }
 
-    @Test
-    public void testFramedAuthenticateAfterV0HandshakeIsRejected() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    public void testFramedAuthenticateAfterV0HandshakeIsRejected(short version) {
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
         new SaslHandshakeHandler()
                 .handle(connection, "KAFKA", null, handshake("PLAIN", (short) 0))
@@ -162,9 +184,11 @@ public class SaslHandlersTest {
                 new SaslAuthenticateHandler()
                         .handle(
                                 connection,
-                                authenticate("valid-token", (short) 0),
+                                authenticate("valid-token", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_AUTHENTICATE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.ILLEGAL_SASL_STATE);
@@ -173,8 +197,9 @@ public class SaslHandlersTest {
         assertThat(closeAfterResponse).isTrue();
     }
 
-    @Test
-    public void testBadCredentialsReturnSafeFailureAndCloseAfterResponse() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    public void testBadCredentialsReturnSafeFailureAndCloseAfterResponse(short version) {
         SaslAuthenticateHandler handler = new SaslAuthenticateHandler();
         KafkaSaslConnection connection = authenticatedHandshakeConnection();
         AtomicBoolean closeAfterResponse = new AtomicBoolean();
@@ -182,9 +207,11 @@ public class SaslHandlersTest {
         SaslAuthenticateResponse response =
                 handler.handle(
                                 connection,
-                                authenticate("secret-value", (short) 1),
+                                authenticate("secret-value", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_AUTHENTICATE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.SASL_AUTHENTICATION_FAILED);
@@ -197,8 +224,9 @@ public class SaslHandlersTest {
         assertThat(closeAfterResponse).isTrue();
     }
 
-    @Test
-    public void testAuthenticateBeforeHandshakeReturnsIllegalState() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    public void testAuthenticateBeforeHandshakeReturnsIllegalState(short version) {
         SaslAuthenticateHandler handler = new SaslAuthenticateHandler();
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
         AtomicBoolean closeAfterResponse = new AtomicBoolean();
@@ -206,9 +234,11 @@ public class SaslHandlersTest {
         SaslAuthenticateResponse response =
                 handler.handle(
                                 connection,
-                                authenticate("valid-token", (short) 0),
+                                authenticate("valid-token", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_AUTHENTICATE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.ILLEGAL_SASL_STATE);
@@ -216,34 +246,103 @@ public class SaslHandlersTest {
         assertThat(closeAfterResponse).isTrue();
     }
 
-    @Test
-    public void testAuthenticateAfterCompletionReturnsIllegalState() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    public void testAuthenticateAfterCompletionReturnsIllegalState(short version) {
         SaslAuthenticateHandler handler = new SaslAuthenticateHandler();
         KafkaSaslConnection connection = authenticatedHandshakeConnection();
-        handler.handle(connection, authenticate("valid-token", (short) 2)).join();
+        handler.handle(connection, authenticate("valid-token", version)).join();
         AtomicBoolean closeAfterResponse = new AtomicBoolean();
 
         SaslAuthenticateResponse response =
                 handler.handle(
                                 connection,
-                                authenticate("valid-token", (short) 2),
+                                authenticate("valid-token", version),
                                 () -> closeAfterResponse.set(true))
                         .join();
+
+        response = roundTrip(response, ApiKeys.SASL_AUTHENTICATE, version);
 
         assertThat(Errors.forCode(response.data().errorCode()))
                 .isEqualTo(Errors.ILLEGAL_SASL_STATE);
         assertThat(connection.shouldClose()).isTrue();
         assertThat(closeAfterResponse).isTrue();
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    public void testHandshakeInitializationFailureClosesAuthenticator(short version)
+            throws Exception {
+        ServerAuthenticator authenticator = mock(ServerAuthenticator.class);
+        doThrow(new AuthenticationException("internal initialization details"))
+                .when(authenticator)
+                .initialize(any());
+        KafkaSaslConnection connection = KafkaSaslConnection.sasl(() -> authenticator);
+        AtomicBoolean closeAfterResponse = new AtomicBoolean();
+
+        SaslHandshakeResponse response =
+                new SaslHandshakeHandler()
+                        .handle(
+                                connection,
+                                "KAFKA",
+                                new InetSocketAddress("127.0.0.1", 9092),
+                                handshake("PLAIN", version),
+                                () -> closeAfterResponse.set(true))
+                        .join();
+        response = roundTrip(response, ApiKeys.SASL_HANDSHAKE, version);
+
+        assertThat(Errors.forCode(response.data().errorCode()))
+                .isEqualTo(Errors.SASL_AUTHENTICATION_FAILED);
+        assertThat(response.data().mechanisms()).containsExactly("PLAIN");
+        assertThat(connection.isAuthenticating()).isFalse();
+        assertThat(connection.principal()).isEqualTo(FlussPrincipal.ANONYMOUS);
+        assertThat(connection.shouldClose()).isTrue();
+        assertThat(closeAfterResponse).isTrue();
+        verify(authenticator).close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    public void testAuthenticateOnPlaintextConnectionReturnsIllegalState(short version) {
+        KafkaSaslConnection connection = KafkaSaslConnection.plaintext();
+        AtomicBoolean closeAfterResponse = new AtomicBoolean();
+
+        SaslAuthenticateResponse response =
+                new SaslAuthenticateHandler()
+                        .handle(
+                                connection,
+                                authenticate("valid-token", version),
+                                () -> closeAfterResponse.set(true))
+                        .join();
+        response = roundTrip(response, ApiKeys.SASL_AUTHENTICATE, version);
+
+        assertThat(Errors.forCode(response.data().errorCode()))
+                .isEqualTo(Errors.ILLEGAL_SASL_STATE);
+        assertThat(response.data().authBytes()).isEmpty();
+        assertThat(connection.shouldClose()).isTrue();
+        assertThat(closeAfterResponse).isTrue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T extends AbstractResponse> T roundTrip(
+            T response, ApiKeys apiKey, short version) {
+        RequestHeader requestHeader = new RequestHeader(apiKey, version, "sasl-test", 37);
+        ResponseHeader responseHeader = requestHeader.toResponseHeader();
+        // Parse the bytes as a client would, including version-specific headers/correlation IDs.
+        return (T)
+                AbstractResponse.parseResponse(
+                        RequestUtils.serialize(
+                                responseHeader.data(),
+                                responseHeader.headerVersion(),
+                                response.data(),
+                                version),
+                        requestHeader);
     }
 
     private static KafkaSaslConnection authenticatedHandshakeConnection() {
         KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingServerAuthenticator::new);
         connection.beginAuthentication("PLAIN", "KAFKA", new InetSocketAddress("127.0.0.1", 9092));
         return connection;
-    }
-
-    private static SaslHandshakeRequest handshake(String mechanism) {
-        return handshake(mechanism, (short) 1);
     }
 
     private static SaslHandshakeRequest handshake(String mechanism, short version) {
