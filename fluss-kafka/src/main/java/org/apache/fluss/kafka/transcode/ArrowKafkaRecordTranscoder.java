@@ -59,9 +59,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTableSchema schema = plan.topicSchema();
-        KafkaFieldDecoder valueDecoder =
-                formats.createDecoder(
-                        schema.valueType(), schema.valueProjection(), schema.valueLayout());
+        KafkaFieldDecoder valueDecoder = formats.createDecoder(schema);
         KafkaRowAssembler assembler = plan.rowAssembler();
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {

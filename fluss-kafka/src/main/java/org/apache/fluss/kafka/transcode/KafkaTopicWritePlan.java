@@ -38,11 +38,7 @@ public final class KafkaTopicWritePlan {
         this.tableInfo = checkNotNull(tableInfo);
         this.topicSchema = checkNotNull(topicSchema);
         // Validate supported value formats and projections when compiling the plan.
-        new KafkaFormatFactoryRegistry()
-                .createDecoder(
-                        topicSchema.valueType(),
-                        topicSchema.valueProjection(),
-                        topicSchema.valueLayout());
+        new KafkaFormatFactoryRegistry().createDecoder(topicSchema);
         this.rowAssembler = new KafkaRowAssembler(topicSchema);
     }
 

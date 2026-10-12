@@ -18,8 +18,10 @@
 package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
+import org.apache.fluss.kafka.transcode.KafkaRowAssembler;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
@@ -35,6 +37,7 @@ import org.apache.fluss.types.RowType;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
@@ -110,8 +113,7 @@ class KafkaFormatFactoryRegistryTest {
                         .build();
         KafkaTableSchema schema = KafkaTableSchema.resolve(table);
         assertThat(schema.valueProjection().positions()).containsExactly(1);
-        KafkaFieldDecoder decoder =
-                formats.createDecoder(schema.valueType(), schema.valueProjection());
+        KafkaFieldDecoder decoder = formats.createDecoder(schema);
         byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
         assertThat(decoder.decode(payload))
                 .containsExactly(string ? BinaryString.fromString("payload") : payload);
@@ -190,6 +192,65 @@ class KafkaFormatFactoryRegistryTest {
                                                 .getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("reserved field");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"flat,false", "flat,true", "nested,false", "nested,true"})
+    void testSchemaFactoryAndAssemblerKeepRescueSeparateFromPhysicalOrder(
+            String layout, boolean first) {
+        Schema.Builder schema = Schema.newBuilder();
+        if (first) {
+            schema.column("_kafka_rescue", DataTypes.STRING());
+        }
+        schema.column("_kafka_key", DataTypes.BYTES());
+        if (!first) {
+            schema.column("_kafka_rescue", DataTypes.STRING());
+        }
+        if (layout.equals("nested")) {
+            schema.column("_kafka_value", DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT())));
+        } else {
+            schema.column("id", DataTypes.INT());
+        }
+        KafkaTableSchema contract =
+                KafkaTableSchema.resolve(
+                        TableDescriptor.builder()
+                                .schema(schema.build())
+                                .distributedBy(1)
+                                .logFormat(LogFormat.ARROW)
+                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
+                                .build());
+        KafkaFieldDecoder decoder = formats.createDecoder(contract);
+        KafkaRowAssembler assembler = new KafkaRowAssembler(contract);
+        Object[] values = decoder.decode("{\"id\":7,\"extra\":2}".getBytes(StandardCharsets.UTF_8));
+        assertThat(values).hasSize(2);
+        byte[] key = {(byte) 0xff};
+        Record record = new Record(123L, key, null, Collections.emptyList());
+        InternalRow row = assembler.assemble(values, record, 7);
+        assertThat(row.getString(contract.rescuePosition()).toString()).isEqualTo("{\"extra\":2}");
+        assertThat(row.getBytes(contract.keyPosition())).isEqualTo(key);
+        int valuePosition = contract.valueProjection().positionAt(0);
+        assertThat(
+                        layout.equals("nested")
+                                ? row.getRow(valuePosition, 1).getInt(0)
+                                : row.getInt(valuePosition))
+                .isEqualTo(7);
+        assertThat(
+                        assembler
+                                .assemble(
+                                        decoder.decode(
+                                                "{\"id\":8}".getBytes(StandardCharsets.UTF_8)),
+                                        record,
+                                        7)
+                                .isNullAt(contract.rescuePosition()))
+                .isTrue();
+        for (Object[] invalid : new Object[][] {new Object[1], new Object[3]}) {
+            assertThatThrownBy(() -> assembler.assemble(invalid, record, 7))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("contract requires 2");
+        }
     }
 
     private static KafkaFieldProjection projection(DataType type) {
