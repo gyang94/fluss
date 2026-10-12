@@ -34,7 +34,6 @@ import org.apache.fluss.types.BinaryType;
 import org.apache.fluss.types.CharType;
 import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
-import org.apache.fluss.types.DataTypeRoot;
 import org.apache.fluss.types.DecimalType;
 import org.apache.fluss.types.LocalZonedTimestampType;
 import org.apache.fluss.types.MapType;
@@ -75,8 +74,7 @@ final class JsonToFlussConverters {
 
     /**
      * Creates a converter for one top-level JSON business field, excluding the JSON root container.
-     * The shared schema contract is validated before checking decoder support; complex types still
-     * require their own converter implementations.
+     * The shared schema contract validates the entire type before recursive converter construction.
      */
     static JsonToFlussConverter create(DataType dataType) {
         try {
@@ -84,11 +82,11 @@ final class JsonToFlussConverters {
         } catch (InvalidTableException e) {
             throw new KafkaTopicSchemaException(e.getMessage());
         }
-        return create(dataType, 0);
+        return createValidated(dataType);
     }
 
-    private static JsonToFlussConverter create(DataType dataType, int nestingDepth) {
-        final JsonToFlussConverter notNullConverter = createNotNull(dataType, nestingDepth);
+    private static JsonToFlussConverter createValidated(DataType dataType) {
+        final JsonToFlussConverter notNullConverter = createNotNull(dataType);
         return (node, path) -> {
             if (node == null || node.isNull()) {
                 if (!dataType.isNullable()) {
@@ -106,7 +104,7 @@ final class JsonToFlussConverters {
         };
     }
 
-    private static JsonToFlussConverter createNotNull(DataType dataType, int nestingDepth) {
+    private static JsonToFlussConverter createNotNull(DataType dataType) {
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:
                 return (node, path) -> {
@@ -193,11 +191,11 @@ final class JsonToFlussConverters {
             case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 return timestampLtzConverter((LocalZonedTimestampType) dataType);
             case ROW:
-                return rowConverter((RowType) dataType, nestingDepth);
+                return rowConverter((RowType) dataType);
             case ARRAY:
-                return arrayConverter((ArrayType) dataType, nestingDepth);
+                return arrayConverter((ArrayType) dataType);
             case MAP:
-                return mapConverter((MapType) dataType, nestingDepth);
+                return mapConverter((MapType) dataType);
             default:
                 throw new KafkaTopicSchemaException(
                         "Kafka JSON format does not support Fluss type "
@@ -343,7 +341,7 @@ final class JsonToFlussConverters {
         }
     }
 
-    private static JsonToFlussConverter rowConverter(RowType dataType, int nestingDepth) {
+    private static JsonToFlussConverter rowConverter(RowType dataType) {
         List<DataField> fields = dataType.getFields();
         String[] fieldNames = new String[fields.size()];
         Set<String> declaredFieldNames = new HashSet<>();
@@ -355,7 +353,7 @@ final class JsonToFlussConverters {
                 throw new KafkaTopicSchemaException(
                         "Duplicate Kafka JSON row field '" + field.getName() + "'.");
             }
-            fieldConverters[i] = create(field.getType(), nestingDepth + 1);
+            fieldConverters[i] = createValidated(field.getType());
         }
         return (node, path) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
@@ -378,8 +376,8 @@ final class JsonToFlussConverters {
         };
     }
 
-    private static JsonToFlussConverter arrayConverter(ArrayType dataType, int nestingDepth) {
-        JsonToFlussConverter elementConverter = create(dataType.getElementType(), nestingDepth + 1);
+    private static JsonToFlussConverter arrayConverter(ArrayType dataType) {
+        JsonToFlussConverter elementConverter = createValidated(dataType.getElementType());
         return (node, path) -> {
             require(node.isArray(), path, dataType, "expected a JSON array");
             requireContainerSize(node.size(), path, dataType);
@@ -391,14 +389,8 @@ final class JsonToFlussConverters {
         };
     }
 
-    private static JsonToFlussConverter mapConverter(MapType dataType, int nestingDepth) {
-        if (dataType.getKeyType().getTypeRoot() != DataTypeRoot.STRING) {
-            throw new KafkaTopicSchemaException(
-                    "Kafka JSON format only supports STRING map keys, but found "
-                            + dataType.asSummaryString()
-                            + ".");
-        }
-        JsonToFlussConverter valueConverter = create(dataType.getValueType(), nestingDepth + 1);
+    private static JsonToFlussConverter mapConverter(MapType dataType) {
+        JsonToFlussConverter valueConverter = createValidated(dataType.getValueType());
         return (node, path) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
             requireContainerSize(node.size(), path, dataType);
@@ -406,10 +398,11 @@ final class JsonToFlussConverters {
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> field = fields.next();
+                String fieldPath = JsonPath.field(path, field.getKey());
+                validateUnicode(field.getKey(), fieldPath, dataType.getKeyType());
                 values.put(
                         BinaryString.fromString(field.getKey()),
-                        valueConverter.convert(
-                                field.getValue(), JsonPath.field(path, field.getKey())));
+                        valueConverter.convert(field.getValue(), fieldPath));
             }
             return new GenericMap(values);
         };
@@ -432,6 +425,11 @@ final class JsonToFlussConverters {
     private static String textualValue(JsonNode node, String path, DataType dataType) {
         require(node.isTextual(), path, dataType, "expected a JSON string");
         String value = node.textValue();
+        validateUnicode(value, path, dataType);
+        return value;
+    }
+
+    private static void validateUnicode(String value, String path, DataType dataType) {
         // Jackson can retain unpaired JSON escapes in Java strings. Reject them before
         // BinaryString's UTF-8 encoding silently replaces them with a question mark.
         for (int i = 0; i < value.length(); i++) {
@@ -451,7 +449,6 @@ final class JsonToFlussConverters {
                         "unpaired UTF-16 surrogate");
             }
         }
-        return value;
     }
 
     private static byte[] decodeBase64(JsonNode node, String path, DataType dataType) {

@@ -1037,7 +1037,7 @@ class GatewayKafkaProduceBackendTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testUnsupportedJsonSchemaIsInvalidTopicEvenForNullValues(boolean nested) throws Exception {
+    void testInvalidJsonSchemaIsInvalidTopicEvenForNullValues(boolean nested) throws Exception {
         TestingProduceService service = new TestingProduceService();
         Schema schema =
                 nested
@@ -1046,10 +1046,13 @@ class GatewayKafkaProduceBackendTest {
                                         "_kafka_value",
                                         DataTypes.ROW(
                                                 DataTypes.FIELD(
-                                                        "id", DataTypes.ARRAY(DataTypes.INT()))))
+                                                        "id",
+                                                        DataTypes.MAP(
+                                                                DataTypes.INT(),
+                                                                DataTypes.STRING()))))
                                 .build()
                         : Schema.newBuilder()
-                                .column("id", DataTypes.ARRAY(DataTypes.INT()))
+                                .column("id", DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))
                                 .build();
         service.pendingMetadata =
                 CompletableFuture.completedFuture(
