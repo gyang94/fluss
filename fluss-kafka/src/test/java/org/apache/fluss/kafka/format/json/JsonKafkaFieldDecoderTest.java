@@ -17,9 +17,13 @@
 
 package org.apache.fluss.kafka.format.json;
 
-import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.config.KafkaValueConversionLayout;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
+import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.Decimal;
+import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -32,6 +36,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -134,8 +139,9 @@ class JsonKafkaFieldDecoderTest {
                 "unknown field");
     }
 
-    @Test
-    void testFieldCountLimitBeforeReadingExcessFieldValue() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testFieldCountLimitBeforeReadingExcessFieldValue(boolean nested) {
         int maximumFields = JsonKafkaFieldDecoder.MAX_CONTAINER_ELEMENTS;
         List<DataField> fields = new ArrayList<>();
         StringBuilder json = new StringBuilder("{");
@@ -150,8 +156,10 @@ class JsonKafkaFieldDecoderTest {
                 expected[i] = i;
             }
         }
-        JsonKafkaFieldDecoder decoder = decoder(new RowType(fields));
-        assertThat(decoder.decode(bytes(json + "}"))).containsExactly(expected);
+        JsonKafkaFieldDecoder decoder = decoder(new RowType(fields), nested);
+        Object[] result = decoder.decode(bytes(json + "}"));
+        assertThat(result)
+                .containsExactly(nested ? new Object[] {GenericRow.of(expected)} : expected);
 
         String excessField = json + ",\"field" + maximumFields + "\":";
         for (String value : new String[] {"0}", "["}) {
@@ -331,11 +339,100 @@ class JsonKafkaFieldDecoderTest {
     }
 
     private static JsonKafkaFieldDecoder decoder(RowType rowType) {
+        return decoder(rowType, false);
+    }
+
+    private static JsonKafkaFieldDecoder decoder(RowType rowType, boolean nested) {
+        if (nested) {
+            return new JsonKafkaFieldDecoder(
+                    new KafkaFieldProjection(
+                            DataTypes.ROW(DataTypes.FIELD(KafkaTableSchema.VALUE_COLUMN, rowType)),
+                            Collections.singletonList(0)),
+                    KafkaValueConversionLayout.NESTED);
+        }
         List<Integer> positions = new ArrayList<>();
         for (int i = 0; i < rowType.getFieldCount(); i++) {
             positions.add(i);
         }
         return new JsonKafkaFieldDecoder(new KafkaFieldProjection(rowType, positions));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testRootContractAndEarlyRejectionAreIndependentOfLayout(boolean nested) {
+        JsonKafkaFieldDecoder decoder =
+                decoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("id", DataTypes.INT().copy(false)),
+                                DataTypes.FIELD("optional", DataTypes.STRING())),
+                        nested);
+        for (String name :
+                new String[] {
+                    "_kafka_key",
+                    "_kafka_headers",
+                    "_kafka_metadata",
+                    "_kafka_rescue",
+                    "_kafka_value"
+                }) {
+            assertThatThrownBy(() -> decoder.decode(bytes("{\"" + name + "\":[")))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("reserved field");
+            assertThatThrownBy(
+                            () ->
+                                    decoder(
+                                            DataTypes.ROW(DataTypes.FIELD(name, DataTypes.INT())),
+                                            nested))
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining("Reserved name");
+        }
+        assertThatThrownBy(() -> decoder.decode(bytes("{\"unknown\":[")))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("unknown field");
+        assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":[")))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("expected a JSON scalar");
+        for (byte[] invalid :
+                new byte[][] {
+                    bytes("null"),
+                    bytes("[]"),
+                    bytes("{}"),
+                    bytes("{\"id\":1,\"id\":2}"),
+                    bytes("{\"id\":1} {}"),
+                    {(byte) 0xff}
+                }) {
+            assertThatThrownBy(() -> decoder.decode(invalid))
+                    .isInstanceOf(KafkaRecordEncodingException.class);
+        }
+        Object[] result = decoder.decode(bytes("{\"optional\":null,\"id\":7}"));
+        assertThat(result)
+                .containsExactly(
+                        nested ? new Object[] {GenericRow.of(7, null)} : new Object[] {7, null});
+    }
+
+    @Test
+    void testNestedRootPreservesScalarValuesAndContainerNullability() {
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD("f", DataTypes.FLOAT()),
+                        DataTypes.FIELD("d", DataTypes.DOUBLE()),
+                        DataTypes.FIELD("amount", DataTypes.DECIMAL(38, 10).copy(false)));
+        JsonKafkaFieldDecoder decoder = decoder(business, true);
+        GenericRow row =
+                (GenericRow)
+                        decoder.decode(
+                                        bytes(
+                                                "{\"amount\":1234567890123456789012345678.1234567890,\"d\":-0.0,\"f\":-0.0}"))[
+                                0];
+        assertThat(Float.floatToRawIntBits(row.getFloat(0)))
+                .isEqualTo(Float.floatToRawIntBits(-0.0F));
+        assertThat(Double.doubleToRawLongBits(row.getDouble(1)))
+                .isEqualTo(Double.doubleToRawLongBits(-0.0D));
+        assertThat(row.getDecimal(2, 38, 10).toBigDecimal())
+                .isEqualTo(new BigDecimal("1234567890123456789012345678.1234567890"));
+        assertThat(decoder.decode(null)).containsExactly((Object) null);
+        assertThatThrownBy(() -> decoder((RowType) business.copy(false), true).decode(null))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("NOT NULL field '_kafka_value'");
     }
 
     private static byte[] bytes(String value) {

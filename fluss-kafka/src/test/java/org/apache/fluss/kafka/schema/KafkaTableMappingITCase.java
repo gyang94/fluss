@@ -345,6 +345,7 @@ class KafkaTableMappingITCase {
         assertThat(stored.getCustomProperties()).isEqualTo(descriptor.getCustomProperties());
         assertThat(kafkaProperties(stored))
                 .isEqualTo(Collections.singletonMap("table.kafka.enabled", "true"));
+        // This checks persisted DDL mapping; recursive gateway decoding is a later stage.
         assertThat(new KafkaTopicSchemaResolver().resolve(stored).valueProjection().positions())
                 .containsExactly(1);
         set(path, Collections.singletonMap("table.kafka.convert.key.type", "binary"));

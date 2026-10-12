@@ -18,7 +18,7 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.config.KafkaValueConversionType;
+import org.apache.fluss.kafka.format.KafkaFormatFactoryRegistry;
 import org.apache.fluss.metadata.KafkaTableSchema;
 
 import javax.annotation.concurrent.ThreadSafe;
@@ -36,13 +36,12 @@ final class KafkaTopicWritePlan {
 
     KafkaTopicWritePlan(KafkaTableSchema topicSchema) {
         this.topicSchema = checkNotNull(topicSchema);
-        // Validate supported value formats when compiling the plan.
-        if (topicSchema.valueConversionType() != KafkaValueConversionType.BINARY
-                && topicSchema.valueConversionType() != KafkaValueConversionType.STRING) {
-            throw new KafkaRecordEncodingException(
-                    "Unsupported Kafka value conversion type: "
-                            + topicSchema.valueConversionType());
-        }
+        // Validate supported value formats and projections when compiling the plan.
+        new KafkaFormatFactoryRegistry()
+                .createDecoder(
+                        topicSchema.valueConversionType(),
+                        topicSchema.valueProjection(),
+                        topicSchema.valueConversionLayout());
         this.rowAssembler = new KafkaRowAssembler(topicSchema);
     }
 
