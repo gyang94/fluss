@@ -17,6 +17,7 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.security.auth.ServerAuthenticator;
@@ -26,13 +27,16 @@ import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.codec.LengthFieldBasedFrameDecoder;
 import org.apache.fluss.shaded.netty4.io.netty.handler.codec.LengthFieldPrepender;
 
+import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.message.MetadataRequestData;
 import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.message.SaslAuthenticateRequestData;
 import org.apache.kafka.common.message.SaslHandshakeRequestData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.SimpleRecord;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
@@ -153,6 +157,49 @@ class KafkaServiceDisabledTest {
             assertThat(KafkaServiceController.connection(fixture.channel).pendingRequests())
                     .isZero();
             assertThat(fixture.channel.isActive()).isTrue();
+            fixture.assertNoBusinessOrAuthentication();
+        }
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false, 0", "false, -1", "true, 0", "true, -1"})
+    void testDisabledProduceRejectsCompressedPayloadBeforeRecordValidation(
+            boolean dynamic, short acks) {
+        try (Fixture fixture = new Fixture(dynamic, false)) {
+            MemoryRecords records =
+                    MemoryRecords.withRecords(
+                            Compression.of(CompressionType.GZIP).build(),
+                            new SimpleRecord(new byte[] {1, 2, 3}));
+            // Preserve a decodable request and batch header, but invalidate the compressed data.
+            // The service gate must win before any record validation or decompression is attempted.
+            records.buffer()
+                    .put(
+                            records.sizeInBytes() - 1,
+                            (byte) (records.buffer().get(records.sizeInBytes() - 1) ^ 1));
+            ProduceRequest body = (ProduceRequest) request(ApiKeys.PRODUCE, (short) 9, acks);
+            body.data()
+                    .topicData()
+                    .forEach(
+                            topic ->
+                                    topic.partitionData()
+                                            .forEach(partition -> partition.setRecords(records)));
+            RequestHeader header =
+                    new RequestHeader(ApiKeys.PRODUCE, (short) 9, "disabled-compressed", 456);
+            ByteBuf bytes = frame(header, body);
+            fixture.channel.writeInbound(bytes);
+            // Dynamic disable occurs after the request was decoded and queued.
+            fixture.controller.setEnabled(false);
+            fixture.processAll();
+            if (acks == 0) {
+                assertThat(fixture.channel.isActive()).isFalse();
+                assertThat(fixture.readOutboundBytes()).isEmpty();
+            } else {
+                assertThat(fixture.response(header).errorCounts())
+                        .containsOnlyKeys(Errors.BROKER_NOT_AVAILABLE);
+            }
+            assertThat(bytes.refCnt()).isZero();
+            assertThat(KafkaServiceController.connection(fixture.channel).pendingRequests())
+                    .isZero();
             fixture.assertNoBusinessOrAuthentication();
         }
     }
@@ -572,7 +619,8 @@ class KafkaServiceDisabledTest {
         final KafkaServiceController controller;
         final RequestChannel requests = new RequestChannel(100);
         final TestingTabletGatewayService service = spy(new TestingTabletGatewayService());
-        final KafkaRequestHandler handler = new KafkaRequestHandler(service, service);
+        final KafkaRequestHandler handler =
+                new KafkaRequestHandler(new Configuration(), service, service);
         final AtomicInteger authenticators = new AtomicInteger();
         final EmbeddedChannel channel;
 
