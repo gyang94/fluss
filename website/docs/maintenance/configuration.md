@@ -254,14 +254,14 @@ Kafka protocol compatibility is still in development.
 |--------------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------|
 | kafka.enabled                  | Boolean  | false   | Whether enable Fluss Kafka. Disabled by default. When this option is set to true, the Fluss Kafka will be enabled. |
 | kafka.listener.names           | String   | KAFKA   | The listener names for Kafka wire protocol communication. Support multiple listener names, separated by comma.     |
-| kafka.default.database         | String   | kafka   | Database used for unqualified Kafka topic names. Fully qualified names can access other databases. This option does not create a database. |
+| kafka.default.database         | String   | fluss   | Database used for unqualified Kafka topic names. Fully qualified names can access other databases. This option does not create a database. |
 
 Kafka listeners share `netty.connection.max-idle-time` with native Fluss RPC listeners (see [Netty](#netty)).
 The default is `10min`; connections close when neither reads nor writes occur for the configured duration.
 
 Kafka tables must be created through Fluss or the Flink Fluss catalog. A topic named
 `sales.orders` maps to that table directly; `orders` maps to the same-named table in
-`kafka.default.database`. Databases and tables must already exist. Reverse mapping always uses
+`kafka.default.database` (by default, `fluss.orders`). Databases and tables must already exist. Reverse mapping always uses
 the fully qualified name. All TabletServers must use the same default database. Changing it
 redirects unqualified names, so migrate clients to fully qualified names before changing the
 configuration. The prototype `kafka.database` option is no longer used.
@@ -278,6 +278,12 @@ configuration. The prototype `kafka.database` option is no longer used.
 Binary and string values require a user-declared `_kafka_value BYTES` or `_kafka_value STRING`
 column respectively. Flat JSON targets business columns at the table level; nested JSON targets
 the fields of `_kafka_value ROW<...>`. Both exclude reserved system names from business matching.
+JSON business schemas support nested ROW, ARRAY and MAP values. Every MAP key must be STRING,
+including maps inside other containers. CREATE and ALTER reject unsupported types or a nesting
+depth above 64, counted from each top-level JSON business field at depth zero; ROW fields,
+ARRAY elements and MAP values each add one level. The JSON root and the physical nested
+`_kafka_value ROW` container add no level, so equivalent flat/nested schemas have the same limit.
+Scalar value and nullability checks apply when decoding records.
 Optional `_kafka_key BYTES` and `_kafka_headers MAP<STRING, BYTES>` columns retain keys and headers.
 Duplicate header names use the last value. Optional `_kafka_rescue STRING` must be nullable and
 collects unknown or reserved JSON members; it requires no mapping property. Binary/string

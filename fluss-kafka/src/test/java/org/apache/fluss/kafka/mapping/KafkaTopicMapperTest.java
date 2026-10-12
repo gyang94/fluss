@@ -53,7 +53,9 @@ public class KafkaTopicMapperTest {
 
     @Test
     void testDefaultDatabaseAliases() {
-        assertThat(mapper.toTablePath("orders")).isEqualTo(mapper.toTablePath("kafka.orders"));
+        assertThat(mapper.toTablePath("orders")).isEqualTo(TablePath.of("fluss", "orders"));
+        assertThat(mapper.toTopicName(mapper.toTablePath("orders"))).isEqualTo("fluss.orders");
+        assertThat(mapper.toTablePath("kafka.orders")).isEqualTo(TablePath.of("kafka", "orders"));
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "sales");
         KafkaTopicMapper custom = new KafkaTopicMapper(config);

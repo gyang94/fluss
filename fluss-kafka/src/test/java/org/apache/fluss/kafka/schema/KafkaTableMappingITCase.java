@@ -41,6 +41,8 @@ import org.apache.fluss.utils.json.JsonSerdeUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -119,6 +121,182 @@ class KafkaTableMappingITCase {
         assertThat(info(aliasMapper.toTablePath("orders")).getTableId())
                 .isEqualTo(info(sales).getTableId());
         assertThat(aliasMapper.toTopicName(sales)).isEqualTo("sales.orders");
+    }
+
+    @Test
+    void testDefaultAliasUsesExistingFlussDatabase() throws Exception {
+        KafkaTopicMapper mapper = new KafkaTopicMapper();
+        TablePath path = mapper.toTablePath("default_alias");
+        assertThat(path).isEqualTo(TablePath.of(DEFAULT_DATABASE, "default_alias"));
+        createTable(CLUSTER, path, enabled().build());
+        assertThat(info(mapper.toTablePath("fluss.default_alias")).getTableId())
+                .isEqualTo(info(path).getTableId());
+        assertThat(mapper.toTopicName(path)).isEqualTo("fluss.default_alias");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testJsonCreateAndEnableRejectUnsupportedBusinessSchema(String layout) throws Exception {
+        gateway.createDatabase(newCreateDatabaseRequest("ddl_json", true)).get();
+        DataType invalidMap = DataTypes.MAP(DataTypes.INT(), DataTypes.STRING());
+        int index = 0;
+        for (DataType type :
+                Arrays.asList(
+                        invalidMap,
+                        DataTypes.ARRAY(invalidMap),
+                        DataTypes.ROW(DataTypes.FIELD("attributes", invalidMap)),
+                        DataTypes.MAP(DataTypes.STRING(), DataTypes.ARRAY(invalidMap)))) {
+            TablePath path = TablePath.of("ddl_json", layout + "_invalid_" + index++);
+            TableDescriptor descriptor = jsonTable(layout, type).build();
+            assertThatThrownBy(
+                            () ->
+                                    gateway.createTable(
+                                                    newCreateTableRequest(path, descriptor, false))
+                                            .get())
+                    .hasCauseInstanceOf(InvalidTableException.class)
+                    .hasStackTraceContaining("only supports STRING map keys");
+            assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
+            assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(path)).isZero();
+
+            // The identical schema is legal for an ordinary, explicitly disabled Fluss table.
+            createTable(
+                    CLUSTER,
+                    path,
+                    TableDescriptor.builder(descriptor)
+                            .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                            .build());
+            GetTableInfoResponse before = info(path);
+            assertThatThrownBy(
+                            () ->
+                                    set(
+                                            path,
+                                            Collections.singletonMap(
+                                                    "table.kafka.enabled", "true")))
+                    .hasCauseInstanceOf(InvalidTableException.class)
+                    .hasStackTraceContaining("only supports STRING map keys");
+            assertUnchanged(path, before);
+            assertThat(KafkaTableSchema.isEnabled(stored(path))).isFalse();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testJsonComplexSchemaRoundtripAndEnable(String layout) throws Exception {
+        TablePath path = TablePath.of("ddl_json", layout + "_complex");
+        DataType type =
+                DataTypes.ARRAY(
+                        DataTypes.MAP(
+                                DataTypes.STRING(),
+                                DataTypes.ROW(
+                                        DataTypes.FIELD("amount", DataTypes.DECIMAL(18, 2)),
+                                        DataTypes.FIELD("time", DataTypes.TIMESTAMP_LTZ(3)),
+                                        DataTypes.FIELD("_kafka_key", DataTypes.BYTES()))));
+        TableDescriptor descriptor =
+                jsonTable(layout, type).property(ConfigOptions.TABLE_KAFKA_ENABLED, false).build();
+        createTable(CLUSTER, path, descriptor);
+        GetTableInfoResponse before = info(path);
+        set(path, Collections.singletonMap("table.kafka.enabled", "true"));
+        TableDescriptor actual = stored(path);
+        assertThat(actual.getSchema()).isEqualTo(descriptor.getSchema());
+        assertThat(info(path).getSchemaId()).isEqualTo(before.getSchemaId());
+        Map<String, String> expected = new HashMap<>(kafkaProperties(descriptor));
+        expected.put("table.kafka.enabled", "true");
+        assertThat(kafkaProperties(actual)).isEqualTo(expected);
+        addColumn(path, "_kafka_rescue", DataTypes.STRING());
+        assertThat(info(path).getSchemaId()).isGreaterThan(before.getSchemaId());
+        assertThat(stored(path).getSchema().getRowType().getTypeAt(0))
+                .isEqualTo(descriptor.getSchema().getRowType().getTypeAt(0));
+        assertThat(KafkaTableSchema.resolve(stored(path)).rescuePosition()).isEqualTo(1);
+        assertThat(kafkaProperties(stored(path))).isEqualTo(expected);
+    }
+
+    @Test
+    void testJsonSchemaAlterRejectsUnsupportedNestedMapAtomically() throws Exception {
+        TablePath path = TablePath.of("ddl_json", "alter_business_type");
+        createTable(CLUSTER, path, jsonTable("flat", DataTypes.STRING()).build());
+        DataType invalid =
+                DataTypes.ARRAY(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "attributes",
+                                        DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))));
+        GetTableInfoResponse before = info(path);
+        assertThatThrownBy(() -> addColumn(path, "bad", invalid))
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("only supports STRING map keys");
+        assertUnchanged(path, before);
+        addColumn(
+                path, "good", DataTypes.MAP(DataTypes.STRING(), DataTypes.ARRAY(DataTypes.INT())));
+        assertThat(info(path).getSchemaId()).isGreaterThan(before.getSchemaId());
+        set(path, Collections.singletonMap("table.kafka.enabled", "false"));
+        addColumn(path, "ordinary", invalid);
+        GetTableInfoResponse disabled = info(path);
+        assertThat(stored(path).getSchema().getRowType().getFieldNames()).contains("ordinary");
+        assertThatThrownBy(() -> set(path, Collections.singletonMap("table.kafka.enabled", "true")))
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("only supports STRING map keys");
+        assertUnchanged(path, disabled);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testJsonDepthValidationThroughDdl(String layout) throws Exception {
+        DataType boundary = DataTypes.STRING();
+        for (int i = 0; i < KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; i++) {
+            boundary = DataTypes.ARRAY(boundary);
+        }
+        TablePath valid = TablePath.of("ddl_json", layout + "_depth_boundary");
+        TableDescriptor descriptor = jsonTable(layout, boundary).build();
+        createTable(CLUSTER, valid, descriptor);
+        assertThat(stored(valid).getSchema()).isEqualTo(descriptor.getSchema());
+        TablePath invalid = TablePath.of("ddl_json", layout + "_too_deep");
+        TableDescriptor tooDeep = jsonTable(layout, DataTypes.ARRAY(boundary)).build();
+        assertThatThrownBy(
+                        () ->
+                                gateway.createTable(newCreateTableRequest(invalid, tooDeep, false))
+                                        .get())
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("maximum nesting depth of 64");
+        assertThat(gateway.tableExists(newTableExistsRequest(invalid)).get().isExists()).isFalse();
+        assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(invalid)).isZero();
+        createTable(
+                CLUSTER,
+                invalid,
+                TableDescriptor.builder(tooDeep)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                        .build());
+        GetTableInfoResponse before = info(invalid);
+        assertThatThrownBy(
+                        () -> set(invalid, Collections.singletonMap("table.kafka.enabled", "true")))
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("maximum nesting depth of 64");
+        assertUnchanged(invalid, before);
+    }
+
+    private void assertUnchanged(TablePath path, GetTableInfoResponse before) throws Exception {
+        GetTableInfoResponse after = info(path);
+        assertThat(after.getTableJson()).isEqualTo(before.getTableJson());
+        assertThat(after.getSchemaId()).isEqualTo(before.getSchemaId());
+    }
+
+    private static TableDescriptor.Builder jsonTable(String layout, DataType businessType) {
+        Schema schema =
+                "flat".equals(layout)
+                        ? Schema.newBuilder().column("payload", businessType).build()
+                        : Schema.newBuilder()
+                                .column(
+                                        "_kafka_value",
+                                        DataTypes.ROW(DataTypes.FIELD("payload", businessType)))
+                                .build();
+        TableDescriptor.Builder builder =
+                enabled()
+                        .schema(schema)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json");
+        // Omitted flat layout must remain omitted through CREATE and ALTER.
+        if ("nested".equals(layout)) {
+            builder.property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout);
+        }
+        return builder;
     }
 
     @Test

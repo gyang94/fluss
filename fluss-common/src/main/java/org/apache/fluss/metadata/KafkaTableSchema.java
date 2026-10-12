@@ -22,6 +22,7 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.TableConfig;
 import org.apache.fluss.exception.InvalidTableException;
+import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BytesType;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
@@ -52,6 +53,9 @@ public final class KafkaTableSchema {
     public static final String HEADERS_COLUMN = "_kafka_headers";
     public static final String METADATA_COLUMN = "_kafka_metadata";
     public static final String RESCUE_COLUMN = "_kafka_rescue";
+
+    /** Maximum recursive depth below each top-level JSON business field. */
+    public static final int MAX_JSON_SCHEMA_NESTING_DEPTH = 64;
 
     private static final Set<String> RESERVED_NAMES =
             Collections.unmodifiableSet(
@@ -271,6 +275,20 @@ public final class KafkaTableSchema {
             }
             valuePositions.add(valuePosition);
         }
+        if (valueType == ValueType.PARSE_JSON) {
+            for (int position : valuePositions) {
+                DataType type = rowType.getTypeAt(position);
+                if (valueLayout == ValueLayout.NESTED) {
+                    // The physical value container represents the JSON object root, just like
+                    // the table row in flat layout; it must not add a business nesting level.
+                    for (DataType field : ((RowType) type).getChildren()) {
+                        validateJsonType(field);
+                    }
+                } else {
+                    validateJsonType(type);
+                }
+            }
+        }
         return new KafkaTableSchema(
                 rowType,
                 valueType,
@@ -279,6 +297,68 @@ public final class KafkaTableSchema {
                 keyPosition,
                 headersPosition,
                 rescuePosition);
+    }
+
+    /**
+     * Validates a top-level JSON business field without parser or protocol dependencies. DDL and
+     * decoder construction share this contract. Each business field starts at depth zero; ROW
+     * fields, ARRAY elements and MAP values each advance the depth by one. Nullability and scalar
+     * value constraints are enforced when decoding individual records. The JSON object root
+     * (including the physical nested _kafka_value ROW) is not counted.
+     */
+    public static void validateJsonType(DataType type) {
+        validateJsonType(type, 0);
+    }
+
+    private static void validateJsonType(DataType type, int depth) {
+        if (depth > MAX_JSON_SCHEMA_NESTING_DEPTH) {
+            throw invalid(
+                    "Kafka JSON schema exceeds the maximum nesting depth of "
+                            + MAX_JSON_SCHEMA_NESTING_DEPTH
+                            + ".");
+        }
+        switch (type.getTypeRoot()) {
+            case CHAR:
+            case STRING:
+            case BOOLEAN:
+            case BINARY:
+            case BYTES:
+            case DECIMAL:
+            case TINYINT:
+            case SMALLINT:
+            case INTEGER:
+            case BIGINT:
+            case FLOAT:
+            case DOUBLE:
+            case DATE:
+            case TIME_WITHOUT_TIME_ZONE:
+            case TIMESTAMP_WITHOUT_TIME_ZONE:
+            case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                return;
+            case ARRAY:
+                validateJsonType(((ArrayType) type).getElementType(), depth + 1);
+                return;
+            case MAP:
+                MapType map = (MapType) type;
+                if (!(map.getKeyType() instanceof StringType)) {
+                    throw invalid(
+                            "Kafka JSON format only supports STRING map keys, but found "
+                                    + type.asSummaryString()
+                                    + ".");
+                }
+                validateJsonType(map.getValueType(), depth + 1);
+                return;
+            case ROW:
+                for (DataType field : ((RowType) type).getChildren()) {
+                    validateJsonType(field, depth + 1);
+                }
+                return;
+            default:
+                throw invalid(
+                        "Kafka JSON format does not support Fluss type "
+                                + type.asSummaryString()
+                                + ".");
+        }
     }
 
     private static void validateOptions(TableDescriptor table) {
