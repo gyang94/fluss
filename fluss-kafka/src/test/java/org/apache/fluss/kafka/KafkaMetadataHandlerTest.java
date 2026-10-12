@@ -38,8 +38,11 @@ import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
+import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.message.MetadataRequestData;
 import org.apache.kafka.common.message.MetadataRequestData.MetadataRequestTopic;
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponsePartition;
@@ -51,6 +54,7 @@ import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.RequestHeader;
+import org.apache.kafka.common.utils.LogContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -641,10 +645,13 @@ public class KafkaMetadataHandlerTest {
             MetadataResponseTopic alias = named.data().topics().find("topic");
             MetadataResponseTopic qualified = named.data().topics().find(canonical);
             assertThat(alias.partitions()).isEqualTo(qualified.partitions());
-            assertThat(alias.topicId()).isEqualTo(qualified.topicId());
+            assertThat(alias.topicId())
+                    .isEqualTo(
+                            version >= 10 ? new Uuid(0x466c757373410000L, 777L) : Uuid.ZERO_UUID);
             if (version >= 10) {
-                assertThat(alias.topicId())
+                assertThat(qualified.topicId())
                         .isEqualTo(new Uuid(0x466c757373000000L, 777L))
+                        .isNotEqualTo(alias.topicId())
                         .isNotEqualTo(named.data().topics().find("sales.topic").topicId());
             }
             MetadataResponse all = handle(service, allTopicsRequest(version), version, config);
@@ -683,7 +690,12 @@ public class KafkaMetadataHandlerTest {
             assertThat(response.data().topics().find("missing_db.topic").errorCode())
                     .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
             assertThat(response.data().topics().find("topic").topicId())
-                    .isEqualTo(response.data().topics().find("fluss.topic").topicId());
+                    .isEqualTo(
+                            version >= 10 ? new Uuid(0x466c757373410000L, 777L) : Uuid.ZERO_UUID);
+            if (version >= 10) {
+                assertThat(response.data().topics().find("fluss.topic").topicId())
+                        .isEqualTo(new Uuid(0x466c757373000000L, 777L));
+            }
         }
         assertThat(service.listDatabasesCalls).isZero();
         assertThat(service.listedDatabases)
@@ -783,6 +795,8 @@ public class KafkaMetadataHandlerTest {
                 handle(service, topicsRequest((short) 11, "topic", "fluss.topic"), (short) 11);
         assertThat(enabled.errorCounts()).containsOnlyKeys(Errors.NONE);
         assertThat(enabled.data().topics().find("topic").topicId())
+                .isEqualTo(new Uuid(0x466c757373410000L, 777L));
+        assertThat(enabled.data().topics().find("fluss.topic").topicId())
                 .isEqualTo(new Uuid(0x466c757373000000L, 777L));
         service.putTable("fluss.topic", 777L, disabledInvalid);
         assertThat(handle(service, namedTopicRequest("topic"), (short) 11).errors())
@@ -812,6 +826,82 @@ public class KafkaMetadataHandlerTest {
         service.putTable(database + "." + table, 777L);
         assertThat(handle(service, allTopicsRequest((short) 11), (short) 11, config).errors())
                 .containsEntry(database + "." + table, Errors.INVALID_TOPIC_EXCEPTION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {10, 11})
+    public void testKafkaClientCanCacheCanonicalNameAndAliasTogether(short version) {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        service.putTable("fluss.topic", 777L);
+        Metadata client =
+                new Metadata(0L, 0L, 60000L, new LogContext(), new ClusterResourceListeners());
+        client.updateWithCurrentRequestVersion(
+                handle(service, topicsRequest(version, "fluss.topic"), version), false, 1L);
+        // A producer discovers the alias after already caching the canonical name. Nonzero
+        // duplicate IDs would make Kafka's MetadataSnapshot throw while building topicNames.
+        client.updateWithCurrentRequestVersion(
+                handle(service, topicsRequest(version, "topic"), version), true, 2L);
+        assertThat(client.fetch().partitionsForTopic("topic")).hasSize(2);
+        assertThat(client.fetch().partitionsForTopic("fluss.topic")).hasSize(2);
+        client.updateWithCurrentRequestVersion(
+                handle(service, topicsRequest(version, "topic", "fluss.topic"), version),
+                false,
+                3L);
+        assertThat(client.fetch().partitionsForTopic("topic")).hasSize(2);
+        assertThat(client.fetch().partitionsForTopic("fluss.topic")).hasSize(2);
+        assertThat(client.topicIds()).containsOnlyKeys("topic", "fluss.topic");
+        assertThat(client.topicNames())
+                .containsEntry(new Uuid(0x466c757373000000L, 777L), "fluss.topic")
+                .containsEntry(new Uuid(0x466c757373410000L, 777L), "topic");
+        client.close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {10, 11})
+    public void testKafkaClientRefreshesRecreatedAliasWithLowerLeaderEpoch(short version) {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        service.putTable("fluss.topic", 777L);
+        Metadata client =
+                new Metadata(0L, 0L, 60000L, new LogContext(), new ClusterResourceListeners());
+        MetadataResponse original =
+                handle(service, topicsRequest(version, "topic", "fluss.topic"), version);
+        original.data()
+                .topics()
+                .forEach(
+                        topic ->
+                                topic.partitions()
+                                        .forEach(p -> p.setLeaderId(1).setLeaderEpoch(5)));
+        client.updateWithCurrentRequestVersion(original, false, 1L);
+        for (String name : Arrays.asList("topic", "fluss.topic")) {
+            assertThat(client.fetch().leaderFor(new TopicPartition(name, 0)).id()).isEqualTo(1);
+            assertThat(client.lastSeenLeaderEpoch(new TopicPartition(name, 0))).contains(5);
+        }
+
+        // The client never observes the missing table between deletion and recreation.
+        service.removeTable("fluss.topic");
+        service.putTable("fluss.topic", 778L);
+        MetadataResponse recreated =
+                handle(service, topicsRequest(version, "topic", "fluss.topic"), version);
+        recreated
+                .data()
+                .topics()
+                .forEach(
+                        topic ->
+                                topic.partitions()
+                                        .forEach(p -> p.setLeaderId(2).setLeaderEpoch(0)));
+        client.updateWithCurrentRequestVersion(recreated, false, 2L);
+        for (String name : Arrays.asList("fluss.topic", "topic")) {
+            assertThat(client.fetch().leaderFor(new TopicPartition(name, 0)).id())
+                    .as("Leader after recreating %s", name)
+                    .isEqualTo(2);
+            assertThat(client.lastSeenLeaderEpoch(new TopicPartition(name, 0))).contains(0);
+        }
+        assertThat(client.topicNames())
+                .containsEntry(new Uuid(0x466c757373000000L, 778L), "fluss.topic")
+                .containsEntry(new Uuid(0x466c757373410000L, 778L), "topic")
+                .doesNotContainKeys(
+                        new Uuid(0x466c757373000000L, 777L), new Uuid(0x466c757373410000L, 777L));
+        client.close();
     }
 
     private static MetadataRequest topicsRequest(short version, String... names) {

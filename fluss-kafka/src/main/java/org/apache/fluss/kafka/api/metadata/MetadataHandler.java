@@ -133,7 +133,7 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
         }
     }
 
-    private static MetadataResponse toResponse(short version, KafkaClusterMetadata metadata) {
+    private MetadataResponse toResponse(short version, KafkaClusterMetadata metadata) {
         MetadataResponseData data =
                 new MetadataResponseData()
                         .setThrottleTimeMs(0)
@@ -155,7 +155,15 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
             MetadataResponseData.MetadataResponseTopic responseTopic =
                     new MetadataResponseData.MetadataResponseTopic()
                             .setName(topic.name())
-                            .setTopicId(topic.topicId())
+                            // The backend retains the shared table identity. Distinguish names
+                            // only on the wire so clients can cache both and detect recreation.
+                            .setTopicId(
+                                    topic.name() != null
+                                                    && topic.name().indexOf('.') < 0
+                                                    && topicMapper.isMappedTopicId(topic.topicId())
+                                            ? topicMapper.toAliasTopicId(
+                                                    topicMapper.toTableId(topic.topicId()))
+                                            : topic.topicId())
                             .setErrorCode(toKafkaError(topic.error()).code())
                             .setIsInternal(topic.name() != null && Topic.isInternal(topic.name()))
                             .setTopicAuthorizedOperations(
