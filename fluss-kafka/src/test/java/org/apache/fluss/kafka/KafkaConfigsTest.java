@@ -36,14 +36,14 @@ public class KafkaConfigsTest {
         Map<String, String> map = new HashMap<>();
         map.put(ConfigOptions.KAFKA_ENABLED.key(), "true");
         map.put(ConfigOptions.KAFKA_LISTENER_NAMES.key(), "kafka,kafka_sasl");
-        map.put(ConfigOptions.KAFKA_DEFAULT_DATABASE.key(), "fluss");
+        map.put(ConfigOptions.KAFKA_DEFAULT_DATABASE.key(), "sales");
         Configuration configuration = Configuration.fromMap(map);
 
         assertThat(configuration.getBoolean(ConfigOptions.KAFKA_ENABLED)).isTrue();
         assertThat(configuration.get(ConfigOptions.KAFKA_LISTENER_NAMES))
                 .isEqualTo(Arrays.asList("kafka", "kafka_sasl"));
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_DATABASE))
-                .isEqualTo("fluss");
+                .isEqualTo("sales");
     }
 
     @Test
@@ -53,6 +53,7 @@ public class KafkaConfigsTest {
         assertThat(configuration.get(ConfigOptions.KAFKA_LISTENER_NAMES))
                 .isEqualTo(Collections.singletonList("KAFKA"));
         assertThat(configuration.getString(ConfigOptions.KAFKA_DEFAULT_DATABASE))
-                .isEqualTo("kafka");
+                .isEqualTo("fluss");
+        assertThat(configuration.toMap()).doesNotContainKey("kafka.default.database");
     }
 }

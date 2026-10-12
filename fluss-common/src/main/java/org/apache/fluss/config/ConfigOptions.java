@@ -2982,7 +2982,7 @@ public class ConfigOptions {
     public static final ConfigOption<String> KAFKA_DEFAULT_DATABASE =
             key("kafka.default.database")
                     .stringType()
-                    .defaultValue("kafka")
+                    .defaultValue("fluss")
                     .withDescription(
                             "Default database for unqualified Kafka topic names. Fully qualified names may "
                                     + "access other databases. Databases must already exist; this option does not create them.");
