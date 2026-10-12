@@ -28,7 +28,6 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.cluster.AlterConfig;
 import org.apache.fluss.config.cluster.AlterConfigOpType;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -44,22 +43,36 @@ import org.apache.fluss.types.DataTypes;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.message.MetadataRequestData;
+import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.SimpleRecord;
+import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
+import org.apache.kafka.common.requests.MetadataRequest;
+import org.apache.kafka.common.requests.MetadataResponse;
+import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.RequestUtils;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -67,6 +80,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newAlterTableRequest;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -98,7 +112,10 @@ class KafkaServiceSwitchITCase {
                                                     .build())
                                     .distributedBy(1)
                                     .logFormat(LogFormat.ARROW)
-                                    .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                                    .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                    .property(
+                                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                            "parse_json")
                                     .build(),
                             false)
                     .get();
@@ -184,6 +201,179 @@ class KafkaServiceSwitchITCase {
                 admin.dropTable(path, true).get();
             }
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testTableAndServiceGatesAcrossAliasesOnWarmConnections(boolean tableFirst)
+            throws Exception {
+        TablePath path = TablePath.of("fluss", "service_aliases");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            admin.createDatabase(path.getDatabaseName(), DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(
+                            path,
+                            TableDescriptor.builder()
+                                    .schema(
+                                            Schema.newBuilder()
+                                                    .column("id", DataTypes.INT())
+                                                    .build())
+                                    .distributedBy(1)
+                                    .logFormat(LogFormat.ARROW)
+                                    .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                    .property(
+                                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                            "parse_json")
+                                    .build(),
+                            false)
+                    .get();
+            TableInfo info = admin.getTableInfo(path).get();
+            CLUSTER.waitUntilAllReplicaReady(new TableBucket(info.getTableId(), 0));
+            setEnabled(admin, true);
+            try (Table table = connection.getTable(path);
+                    KafkaProducer<String, String> producer = producer()) {
+                org.apache.kafka.common.Node leader =
+                        producer.partitionsFor(path.toString()).get(0).leader();
+                try (Socket warm = new Socket(leader.host(), leader.port())) {
+                    assertAliasMetadata(warm, path, info.getTableId());
+                    assertGate(warm, path, Errors.NONE, 1);
+                    assertRows(table, 1, 1);
+                    if (tableFirst) {
+                        setTableEnabled(path, false);
+                        assertGate(warm, path, Errors.UNKNOWN_TOPIC_OR_PARTITION, 2);
+                    }
+                    setEnabled(admin, false);
+                    if (!tableFirst) {
+                        setTableEnabled(path, false);
+                    }
+                    assertGate(warm, path, Errors.BROKER_NOT_AVAILABLE, 3);
+                    try (Socket freshDisabled = new Socket(leader.host(), leader.port())) {
+                        assertGate(freshDisabled, path, Errors.BROKER_NOT_AVAILABLE, 4);
+                    }
+                    // Enabling the table cannot bypass a closed cluster service, including caches
+                    // warmed using both names before disable.
+                    setTableEnabled(path, true);
+                    assertGate(warm, path, Errors.BROKER_NOT_AVAILABLE, 5);
+                    setTableEnabled(path, false);
+                    table.newAppend()
+                            .createWriter()
+                            .append(GenericRow.of(99))
+                            .get(10, TimeUnit.SECONDS);
+                    assertRows(table, 1, 1, 99);
+                    setEnabled(admin, true);
+                    assertGate(warm, path, Errors.BROKER_NOT_AVAILABLE, 6);
+                    try (Socket reopened = new Socket(leader.host(), leader.port())) {
+                        assertGate(reopened, path, Errors.UNKNOWN_TOPIC_OR_PARTITION, 7);
+                        setTableEnabled(path, true);
+                        assertAliasMetadata(reopened, path, info.getTableId());
+                        assertGate(reopened, path, Errors.NONE, 8);
+                        assertRows(table, 1, 1, 99, 8, 8);
+                        assertThat(admin.getTableInfo(path).get().getTableId())
+                                .isEqualTo(info.getTableId());
+                    }
+                }
+            } finally {
+                setEnabled(admin, false);
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    private static void setTableEnabled(TablePath path, boolean enabled) throws Exception {
+        CLUSTER.newCoordinatorClient()
+                .alterTable(
+                        newAlterTableRequest(
+                                path,
+                                Collections.singletonMap(
+                                        ConfigOptions.TABLE_KAFKA_ENABLED.key(),
+                                        Boolean.toString(enabled)),
+                                Collections.emptyList(),
+                                Collections.emptyList(),
+                                false))
+                .get();
+    }
+
+    private static MetadataRequest aliasMetadata(TablePath path) {
+        return new MetadataRequest(
+                new MetadataRequestData()
+                        .setTopics(
+                                MetadataRequest.convertToMetadataRequestTopic(
+                                        Arrays.asList(path.getTableName(), path.toString()))),
+                (short) 10);
+    }
+
+    private static void assertAliasMetadata(Socket socket, TablePath path, long tableId)
+            throws Exception {
+        MetadataResponse response = (MetadataResponse) query(socket, aliasMetadata(path));
+        assertThat(response.errorCounts()).containsOnlyKeys(Errors.NONE);
+        assertThat(response.data().topics().find(path.getTableName()).topicId())
+                .isEqualTo(new Uuid(0x466c757373410000L, tableId));
+        assertThat(response.data().topics().find(path.toString()).topicId())
+                .isEqualTo(new Uuid(0x466c757373000000L, tableId))
+                .isNotEqualTo(response.data().topics().find(path.getTableName()).topicId());
+        assertThat(response.data().topics().find(path.getTableName()).partitions())
+                .isEqualTo(response.data().topics().find(path.toString()).partitions());
+    }
+
+    private static void assertGate(Socket socket, TablePath path, Errors expected, int value)
+            throws Exception {
+        MetadataResponse metadata = (MetadataResponse) query(socket, aliasMetadata(path));
+        assertThat(metadata.data().topics())
+                .extracting(topic -> topic.name())
+                .containsExactly(path.getTableName(), path.toString());
+        assertThat(metadata.errorCounts()).containsOnlyKeys(expected);
+        List<ProduceRequestData.TopicProduceData> topics = new ArrayList<>();
+        for (String name : Arrays.asList(path.getTableName(), path.toString())) {
+            topics.add(
+                    new ProduceRequestData.TopicProduceData()
+                            .setName(name)
+                            .setPartitionData(
+                                    Collections.singletonList(
+                                            new ProduceRequestData.PartitionProduceData()
+                                                    .setIndex(0)
+                                                    .setRecords(
+                                                            MemoryRecords.withRecords(
+                                                                    Compression.NONE,
+                                                                    new SimpleRecord(
+                                                                            ("{\"id\":"
+                                                                                            + value
+                                                                                            + "}")
+                                                                                    .getBytes(
+                                                                                            StandardCharsets
+                                                                                                    .UTF_8)))))));
+        }
+        AbstractResponse produce =
+                query(
+                        socket,
+                        new ProduceRequest(
+                                new ProduceRequestData()
+                                        .setAcks((short) -1)
+                                        .setTimeoutMs(10_000)
+                                        .setTopicData(
+                                                new ProduceRequestData.TopicProduceDataCollection(
+                                                        topics.iterator())),
+                                (short) 9));
+        assertThat(produce.errorCounts()).containsOnlyKeys(expected);
+        assertThat(((org.apache.kafka.common.requests.ProduceResponse) produce).data().responses())
+                .extracting(topic -> topic.name())
+                .containsExactlyInAnyOrder(path.getTableName(), path.toString());
+    }
+
+    private static AbstractResponse query(Socket socket, AbstractRequest body) throws Exception {
+        socket.setSoTimeout(15_000);
+        RequestHeader header =
+                new RequestHeader(body.apiKey(), body.version(), "service-alias-test", 87);
+        ByteBuffer encoded = body.serializeWithHeader(header);
+        byte[] bytes = new byte[encoded.remaining()];
+        encoded.get(bytes);
+        DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+        output.writeInt(bytes.length);
+        output.write(bytes);
+        output.flush();
+        DataInputStream input = new DataInputStream(socket.getInputStream());
+        byte[] response = new byte[input.readInt()];
+        input.readFully(response);
+        return AbstractResponse.parseResponse(ByteBuffer.wrap(response), header);
     }
 
     private static void setEnabled(Admin admin, boolean enabled) throws Exception {
