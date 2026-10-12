@@ -40,6 +40,7 @@ import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.message.ProduceRequestData.PartitionProduceData;
 import org.apache.kafka.common.message.ProduceRequestData.TopicProduceData;
 import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceResponse;
+import org.apache.kafka.common.message.ProduceResponseData.TopicProduceResponse;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.CompressionType;
@@ -58,6 +59,7 @@ import org.apache.kafka.common.utils.Crc32C;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -68,6 +70,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /** Protocol tests independent of the Fluss append and record conversion backends. */
 class KafkaProduceProtocolTest {
@@ -108,6 +111,134 @@ class KafkaProduceProtocolTest {
             byte[] key = record.key();
             key[0] = 9;
             assertThat(record.key()).containsExactly((byte) 1);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {3, 4, 5, 6, 7, 8, 9, 10, 11})
+    void testBareAndQualifiedTopicNamesRemainUnchanged(short version) {
+        MemoryRecords nullableValues =
+                MemoryRecords.withRecords(
+                        Compression.NONE,
+                        new SimpleRecord(123L, new byte[] {1}, null),
+                        new SimpleRecord(456L, null, new byte[0]));
+        ProduceRequest request =
+                requestForTopics(
+                        version,
+                        (short) 1,
+                        topic("orders", partition(0, nullableValues)),
+                        topic("fluss.orders", partition(0, records())),
+                        topic("sales.orders", partition(0, records())));
+        ProduceResponse response =
+                dispatch(
+                        request,
+                        command -> {
+                            assertThat(command.topics())
+                                    .extracting(KafkaProduceCommand.TopicWrite::topicName)
+                                    .containsExactly("orders", "fluss.orders", "sales.orders");
+                            for (KafkaProduceCommand.TopicWrite topic : command.topics()) {
+                                assertThat(topic.partitions())
+                                        .extracting(KafkaProduceCommand.PartitionWrite::partitionId)
+                                        .containsExactly(0);
+                            }
+                            List<KafkaProduceCommand.Record> copied =
+                                    command.topics().get(0).partitions().get(0).records();
+                            assertThat(copied).hasSize(2);
+                            // The protocol command preserves null and empty values for the adapter.
+                            assertThat(copied.get(0).value()).isNull();
+                            assertThat(copied.get(1).value()).isEmpty();
+                            List<TopicResult> results =
+                                    new ArrayList<>(successful(command).join().topics());
+                            Collections.reverse(results);
+                            return CompletableFuture.completedFuture(
+                                    new KafkaProduceResult(results));
+                        });
+
+        assertThat(response.data().responses())
+                .extracting(TopicProduceResponse::name)
+                .containsExactly("orders", "fluss.orders", "sales.orders");
+        for (TopicProduceResponse topic : response.data().responses()) {
+            assertThat(topic.partitionResponses())
+                    .extracting(
+                            PartitionProduceResponse::index,
+                            PartitionProduceResponse::errorCode,
+                            PartitionProduceResponse::baseOffset)
+                    .containsExactly(tuple(0, Errors.NONE.code(), 42L));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"orders", "fluss.orders"})
+    void testLocalAndBackendErrorsAreIsolatedByRequestTopicName(String invalidTopic) {
+        String validTopic = invalidTopic.equals("orders") ? "fluss.orders" : "orders";
+        ProduceResponse response =
+                dispatch(
+                        requestForTopics(
+                                (short) 11,
+                                (short) 1,
+                                topic(invalidTopic, partition(0, MemoryRecords.EMPTY)),
+                                topic(validTopic, partition(0, records())),
+                                topic("sales.orders", partition(0, records()))),
+                        command -> {
+                            assertThat(command.topics())
+                                    .extracting(KafkaProduceCommand.TopicWrite::topicName)
+                                    .containsExactly(validTopic, "sales.orders");
+                            return CompletableFuture.completedFuture(
+                                    new KafkaProduceResult(
+                                            Arrays.asList(
+                                                    new TopicResult(
+                                                            "sales.orders",
+                                                            Collections.singletonList(
+                                                                    new PartitionResult(
+                                                                            0,
+                                                                            Errors
+                                                                                    .TOPIC_AUTHORIZATION_FAILED,
+                                                                            -1L,
+                                                                            null))),
+                                                    new TopicResult(
+                                                            validTopic,
+                                                            Collections.singletonList(
+                                                                    new PartitionResult(
+                                                                            0,
+                                                                            Errors.NONE,
+                                                                            42L,
+                                                                            null))))));
+                        });
+
+        assertThat(response.data().responses())
+                .extracting(TopicProduceResponse::name)
+                .containsExactly(invalidTopic, validTopic, "sales.orders");
+        assertTopicError(response, invalidTopic, Errors.INVALID_RECORD);
+        assertTopicError(response, validTopic, Errors.NONE);
+        assertTopicError(response, "sales.orders", Errors.TOPIC_AUTHORIZATION_FAILED);
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {3, 4, 5, 6, 7, 8, 9, 10, 11})
+    void testRequestAndBackendFailuresPreserveTopicNames(short version) {
+        for (boolean invalidAcks : Arrays.asList(false, true)) {
+            ProduceResponse response =
+                    dispatch(
+                            requestForTopics(
+                                    version,
+                                    invalidAcks ? (short) 2 : (short) 1,
+                                    topic("orders", partition(0, records())),
+                                    topic("fluss.orders", partition(0, records())),
+                                    topic("sales.orders", partition(0, records()))),
+                            command -> {
+                                assertThat(invalidAcks).isFalse();
+                                CompletableFuture<KafkaProduceResult> failed =
+                                        new CompletableFuture<>();
+                                failed.completeExceptionally(new TimeoutException("append failed"));
+                                return failed;
+                            });
+            assertThat(response.data().responses())
+                    .extracting(TopicProduceResponse::name)
+                    .containsExactlyInAnyOrder("orders", "fluss.orders", "sales.orders");
+            Errors error = invalidAcks ? Errors.INVALID_REQUIRED_ACKS : Errors.REQUEST_TIMED_OUT;
+            for (String name : Arrays.asList("orders", "fluss.orders", "sales.orders")) {
+                assertTopicError(response, name, error);
+            }
         }
     }
 
@@ -621,16 +752,23 @@ class KafkaProduceProtocolTest {
 
     private static ProduceRequest request(
             short version, short acks, PartitionProduceData... partitions) {
-        TopicProduceData topic =
-                new TopicProduceData().setName("topic").setPartitionData(Arrays.asList(partitions));
+        return requestForTopics(version, acks, topic("topic", partitions));
+    }
+
+    private static ProduceRequest requestForTopics(
+            short version, short acks, TopicProduceData... topics) {
         return new ProduceRequest(
                 new ProduceRequestData()
                         .setAcks(acks)
                         .setTimeoutMs(4321)
                         .setTopicData(
                                 new ProduceRequestData.TopicProduceDataCollection(
-                                        Collections.singletonList(topic).iterator())),
+                                        Arrays.asList(topics).iterator())),
                 version);
+    }
+
+    private static TopicProduceData topic(String name, PartitionProduceData... partitions) {
+        return new TopicProduceData().setName(name).setPartitionData(Arrays.asList(partitions));
     }
 
     private static PartitionProduceData partition(int index, MemoryRecords records) {
@@ -673,6 +811,12 @@ class KafkaProduceProtocolTest {
         assertThat(response.data().responses().find("topic").partitionResponses())
                 .extracting(PartitionProduceResponse::errorCode)
                 .containsExactly(Arrays.stream(errors).map(Errors::code).toArray(Short[]::new));
+    }
+
+    private static void assertTopicError(ProduceResponse response, String topic, Errors error) {
+        assertThat(response.data().responses().find(topic).partitionResponses())
+                .extracting(PartitionProduceResponse::index, PartitionProduceResponse::errorCode)
+                .containsExactly(tuple(0, error.code()));
     }
 
     private static void updateBatchChecksum(MemoryRecords records) {
