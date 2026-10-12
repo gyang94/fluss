@@ -45,7 +45,6 @@ class KafkaProtocolPluginITCase {
         conf.set(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS, 1);
         conf.set(ConfigOptions.NETTY_SERVER_NUM_NETWORK_THREADS, 1);
         conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ofSeconds(1));
-        conf.setString("kafka.connection.max-idle-time", "1 min");
         MetricGroup metricGroup = NOPMetricsGroup.newInstance();
         try (NettyServer server =
                         new NettyServer(

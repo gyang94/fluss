@@ -54,11 +54,9 @@ class KafkaProtocolPluginTest {
 
     @ParameterizedTest
     @ValueSource(longs = {0, 7})
-    void testConfiguredNettyIdleTimeoutOverridesLegacyKafkaOption(long timeoutSeconds)
-            throws Exception {
+    void testConfiguredNettyIdleTimeout(long timeoutSeconds) throws Exception {
         Configuration conf = new Configuration();
         conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ofSeconds(timeoutSeconds));
-        conf.setString("kafka.connection.max-idle-time", "2 s");
         EmbeddedChannel channel = createChannel(conf);
         try {
             IdleStateHandler idleHandler = channel.pipeline().get(IdleStateHandler.class);
