@@ -68,7 +68,12 @@ import java.util.concurrent.CompletionException;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Implements non-idempotent Kafka Produce versions 3 through 11. */
+/**
+ * Implements non-idempotent Kafka Produce versions 3 through 11.
+ *
+ * <p>Topic names cross the backend boundary unchanged. The backend resolves bare and qualified
+ * names and returns results keyed by the original request names.
+ */
 @Internal
 public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
 
