@@ -60,7 +60,7 @@ public final class KafkaProduceResult {
             this.partitions = immutableCopy(partitions);
         }
 
-        /** Returns the Kafka topic name. */
+        /** Returns the original request topic name, rather than a resolved table path. */
         public String topicName() {
             return topicName;
         }
