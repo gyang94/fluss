@@ -35,10 +35,12 @@ public interface KafkaRecordTranscoder {
     }
 
     /** Transcodes one requested partition using an already prepared plan. */
-    default BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan) throws Exception {
+    default BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan)
+            throws Exception {
         return transcode(partitionId, records, plan.tableInfo());
     }
 
     /** Transcodes records from the requested Kafka partition using the target table schema. */
-    BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo) throws Exception;
+    BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
+            throws Exception;
 }
