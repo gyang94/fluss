@@ -42,6 +42,7 @@ import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.shaded.netty4.io.netty.channel.Channel;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
+import org.apache.fluss.shaded.netty4.io.netty.util.DefaultAttributeMap;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.concurrent.FutureUtils;
@@ -82,6 +83,7 @@ import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -111,6 +113,9 @@ public class KafkaMetadataHandlerTest {
         verify(authenticator).close();
         InetAddress clientAddress = InetAddress.getByAddress(new byte[] {(byte) 192, 0, 2, 3});
         Channel channel = mock(Channel.class);
+        DefaultAttributeMap channelAttributes = new DefaultAttributeMap();
+        when(channel.attr(any()))
+                .thenAnswer(invocation -> channelAttributes.attr(invocation.getArgument(0)));
         ChannelHandlerContext channelContext = mock(ChannelHandlerContext.class);
         when(channelContext.channel()).thenReturn(channel);
         when(channelContext.alloc()).thenReturn(ByteBufAllocator.DEFAULT);

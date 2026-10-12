@@ -248,6 +248,7 @@ class GatewayKafkaProduceBackendTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         service,
+                        mapper(),
                         (records, table) -> {
                             enabled.set(false);
                             return transcoder.transcode(records, table);
@@ -280,7 +281,7 @@ class GatewayKafkaProduceBackendTest {
             assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
             GatewayKafkaProduceBackend backend =
                     new GatewayKafkaProduceBackend(
-                            service, service, new ArrowKafkaRecordTranscoder(), executor);
+                            service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
             CompletableFuture<KafkaProduceResult> result = backend.write(guardedCommand(enabled));
             enabled.set(false);
             release.countDown();
