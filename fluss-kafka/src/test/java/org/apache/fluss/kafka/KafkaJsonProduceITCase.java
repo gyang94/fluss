@@ -26,6 +26,7 @@ import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.KafkaTableSchema;
@@ -35,9 +36,12 @@ import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
+import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -238,24 +242,32 @@ class KafkaJsonProduceITCase {
                 TablePath.of(DATABASE, "json_complex_rejections_" + layout + "_" + withRescue);
         int metadataPosition = layout.equals("nested") ? 3 : COMPLEX_TYPE.getFieldCount() + 2;
         List<String> invalidValues =
-                Arrays.asList(
-                        "{\"id\":1,\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
-                        "{\"id\":1,\"customer\":{\"name\":[]}}",
-                        "{\"id\":1,\"customer\":{\"name\":true}}",
-                        "{\"id\":1,\"customer\":{\"name\":1}}",
-                        "{\"id\":1,\"customer\":[]}",
-                        "{\"id\":1,\"float_values\":[1,\"bad\"]}",
-                        "{\"id\":1,\"double_values\":[1,\"bad\"]}",
-                        "{\"id\":1,\"float_values\":{}}",
-                        "{\"id\":1,\"float_attributes\":[]}",
-                        "{\"id\":1,\"double_attributes\":{\"bad\":\"bad\"}}",
-                        "{\"id\":1,\"items\":[{\"float_value\":\"bad\"}]}",
-                        "{\"id\":1,\"items\":[{\"unknown\":1}]}",
-                        "{\"id\":1,\"attributes\":{\"bad\":{\"amount\":\"bad\"}}}",
-                        "{\"id\":1,\"attributes\":{\"bad\":{\"unknown\":1}}}",
-                        // The escaped surrogate must not be encoded as '?' and overwrite that key.
-                        "{\"id\":1,\"float_attributes\":{\"?\":1,\"\\ud800\":2}}",
-                        "{\"id\":1,\"double_attributes\":{\"?\":1,\"\\udc00\":2}}");
+                new ArrayList<>(
+                        Arrays.asList(
+                                "{\"id\":1,\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
+                                "{\"id\":1,\"customer\":{\"name\":[]}}",
+                                "{\"id\":1,\"customer\":{\"name\":true}}",
+                                "{\"id\":1,\"customer\":{\"name\":1}}",
+                                "{\"id\":1,\"customer\":[]}",
+                                "{\"id\":1,\"float_values\":[1,\"bad\"]}",
+                                "{\"id\":1,\"double_values\":[1,\"bad\"]}",
+                                "{\"id\":1,\"float_values\":{}}",
+                                "{\"id\":1,\"float_attributes\":[]}",
+                                "{\"id\":1,\"double_attributes\":{\"bad\":\"bad\"}}",
+                                "{\"id\":1,\"items\":[{\"float_value\":\"bad\"}]}",
+                                "{\"id\":1,\"items\":[{\"unknown\":1}]}",
+                                "{\"id\":1,\"attributes\":{\"bad\":{\"amount\":\"bad\"}}}",
+                                "{\"id\":1,\"attributes\":{\"bad\":{\"unknown\":1}}}",
+                                // The escaped surrogate must not be encoded as '?' and overwrite
+                                // that key.
+                                "{\"id\":1,\"float_attributes\":{\"?\":1,\"\\ud800\":2}}",
+                                "{\"id\":1,\"double_attributes\":{\"?\":1,\"\\udc00\":2}}"));
+        if (withRescue) {
+            invalidValues.removeIf(value -> value.contains("\"unknown\""));
+        }
+        invalidValues.add("{\"id\":1,\"measurements\":{\"float_value\":1e40}}");
+        invalidValues.add(
+                "{\"id\":1,\"measurements\":{\"float_value\":0,\"double_value\":0,\"rounded_float\":0,\"amount\":1.12345678901}}");
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
             create(admin, path, descriptor(COMPLEX_TYPE, layout, true, withRescue, 2));
@@ -559,24 +571,43 @@ class KafkaJsonProduceITCase {
                                 "{",
                                 "null",
                                 "{\"id\":\"bad\"}",
-                                "{\"id\":1,\"unknown\":2}",
+                                "{\"id\":[]}",
                                 "{\"id\":1} {}",
                                 "{\"id\":1,\"id\":2}"));
-        for (String reserved :
-                new String[] {
-                    KafkaTableSchema.KEY_COLUMN,
-                    KafkaTableSchema.HEADERS_COLUMN,
-                    KafkaTableSchema.METADATA_COLUMN,
-                    KafkaTableSchema.RESCUE_COLUMN,
-                    KafkaTableSchema.VALUE_COLUMN
-                }) {
-            // This also rejects the erroneous nested payload wrapper {"_kafka_value":{...}}.
-            String value =
-                    reserved.equals(KafkaTableSchema.METADATA_COLUMN)
-                            ? "{\"timestamp\":0,\"timestamp_type\":1,\"partition\":99}"
-                            : "{\"id\":2}";
-            invalidValues.add("{\"id\":1,\"" + reserved + "\":" + value + "}");
+        if (!withRescue) {
+            invalidValues.add("{\"id\":1,\"unknown\":2}");
+            for (String reserved :
+                    new String[] {
+                        KafkaTableSchema.KEY_COLUMN,
+                        KafkaTableSchema.HEADERS_COLUMN,
+                        KafkaTableSchema.METADATA_COLUMN,
+                        KafkaTableSchema.RESCUE_COLUMN,
+                        KafkaTableSchema.VALUE_COLUMN
+                    }) {
+                // This also rejects the erroneous nested payload wrapper {"_kafka_value":{...}}.
+                String value =
+                        reserved.equals(KafkaTableSchema.METADATA_COLUMN)
+                                ? "{\"timestamp\":0,\"timestamp_type\":1,\"partition\":99}"
+                                : "{\"id\":2}";
+                invalidValues.add("{\"id\":1,\"" + reserved + "\":" + value + "}");
+            }
         }
+        invalidValues.add("{\"id\":2147483648}");
+        invalidValues.add("{\"id\":1,\"_kafka_rescue\":\"\\ud800\"}");
+        invalidValues.add("{\"id\":1,\"extra\":{\"x\":1,\"x\":2}}");
+        StringBuilder oversized = new StringBuilder("{\"id\":1,\"extra\":[");
+        for (int i = 0; i < 10000; i++) {
+            if (i > 0) {
+                oversized.append(',');
+            }
+            oversized.append('0');
+        }
+        invalidValues.add(oversized.append(",0]}").toString());
+        String deep = "0";
+        for (int i = 0; i < 67; i++) {
+            deep = "[" + deep + "]";
+        }
+        invalidValues.add("{\"id\":1,\"extra\":" + deep + "}");
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
             create(admin, path, descriptor(valueType, layout, true, withRescue, 2));
@@ -610,7 +641,7 @@ class KafkaJsonProduceITCase {
                     assertThat(accepted.errorCode()).isEqualTo(Errors.NONE.code());
                     assertThat(accepted.baseOffset()).isEqualTo(index);
                 }
-                // Even when the schema declares rescue, unsupported capture must not lose data.
+                // Known-field and JSON validation failures remain atomic with rescue enabled.
                 // A later successful write must be the first actual append to the rejected bucket.
                 assertThat(
                                 producer.send(
@@ -796,6 +827,185 @@ class KafkaJsonProduceITCase {
         }
         assertThat(metadata.getInt(1)).isEqualTo(timestampType);
         assertThat(metadata.getInt(2)).isEqualTo(partition);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "flat,false,false",
+        "flat,false,true",
+        "flat,true,false",
+        "flat,true,true",
+        "nested,false,false",
+        "nested,false,true",
+        "nested,true,false",
+        "nested,true,true"
+    })
+    void testRescueRoundTripWithReorderedSystemColumns(
+            String layout, boolean withSystemColumns, boolean rescueFirst) throws Exception {
+        TablePath path =
+                TablePath.of(
+                        DATABASE,
+                        "json_rescue_" + layout + "_" + withSystemColumns + "_" + rescueFirst);
+        TableDescriptor descriptor =
+                reorderedRescueDescriptor(layout, withSystemColumns, rescueFirst);
+        KafkaTableSchema contract = KafkaTableSchema.resolve(descriptor);
+        ObjectMapper mapper = new ObjectMapper();
+        List<String> payloads = new ArrayList<>();
+        List<JsonNode> expected = new ArrayList<>();
+        String extra = "{\"values\":[1,null,2]}";
+        String[] rescueValues = {"null", "123", "\"text\"", "{\"a\":[1,null]}"};
+        String[] zeros = {"-0", "-0.0", "-0e0", "-0"};
+        for (int i = 0; i < rescueValues.length; i++) {
+            String json =
+                    complexJson(i, zeros[i])
+                            .replace(
+                                    "\"amount\":12345678901234567890.1234567890}",
+                                    "\"amount\":12345678901234567890.1234567890,\"extra\":"
+                                            + extra
+                                            + "}");
+            String collisions =
+                    "\"_kafka_key\":{\"id\":2},\"_kafka_headers\":null,"
+                            + "\"_kafka_metadata\":{\"id\":2},\"_kafka_value\":{\"id\":2},"
+                            + "\"_kafka_rescue\":"
+                            + rescueValues[i];
+            payloads.add(json.substring(0, json.length() - 1) + "," + collisions + "}");
+            expected.add(
+                    mapper.readTree(
+                            "{"
+                                    + collisions
+                                    + ",\"measurements\":{\"extra\":"
+                                    + extra
+                                    + "},\"items\":[{\"extra\":"
+                                    + extra
+                                    + "}],\"attributes\":{\"dynamic\":{\"extra\":"
+                                    + extra
+                                    + "}}}"));
+        }
+        payloads.add(complexJson(4, "-0e0"));
+        expected.add(null);
+        // These were rejection cases in the inherited no-capture implementation.
+        payloads.add("{\"id\":1,\"unknown\":2}");
+        expected.add(mapper.readTree("{\"unknown\":2}"));
+        payloads.add("{\"id\":1,\"customer\":{\"name\":\"Alice\",\"unknown\":1}}");
+        expected.add(mapper.readTree("{\"customer\":{\"unknown\":1}}"));
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                assertThat(producer.partitionsFor(path.toString())).hasSize(1);
+                for (int i = 0; i < payloads.size(); i++) {
+                    assertThat(
+                                    producer.send(
+                                                    new ProducerRecord<>(
+                                                            path.toString(),
+                                                            0,
+                                                            123L,
+                                                            KEY,
+                                                            bytes(payloads.get(i)),
+                                                            Arrays.asList(
+                                                                    new RecordHeader(
+                                                                            "source",
+                                                                            new byte[] {1, 2}),
+                                                                    new RecordHeader(
+                                                                            "nullable", null))))
+                                            .get(30, TimeUnit.SECONDS)
+                                            .offset())
+                            .isEqualTo(i);
+                }
+                read(
+                        connection,
+                        path,
+                        0,
+                        payloads.size(),
+                        (physical, index) -> {
+                            InternalRow value = jsonBusinessRow(physical, contract);
+                            assertThat(value.getInt(0)).isEqualTo(index < 5 ? index : 1);
+                            if (index < 5) {
+                                InternalRow customer =
+                                        value.getRow(1, CUSTOMER_TYPE.getFieldCount());
+                                assertThat(customer.getString(0).toString()).isEqualTo("Alice");
+                                for (int field = 1;
+                                        field < CUSTOMER_TYPE.getFieldCount();
+                                        field++) {
+                                    assertThat(customer.getInt(field)).isEqualTo(field);
+                                }
+                                assertNumbers(value.getRow(2, NUMBER_TYPE.getFieldCount()));
+                                assertNumbers(
+                                        value.getArray(7).getRow(0, NUMBER_TYPE.getFieldCount()));
+                                assertNumbers(
+                                        value.getMap(8)
+                                                .valueArray()
+                                                .getRow(0, NUMBER_TYPE.getFieldCount()));
+                            }
+                            if (expected.get(index) == null) {
+                                assertThat(physical.isNullAt(contract.rescuePosition())).isTrue();
+                            } else {
+                                try {
+                                    assertThat(
+                                                    mapper.readTree(
+                                                            physical.getString(
+                                                                            contract
+                                                                                    .rescuePosition())
+                                                                    .toString()))
+                                            .isEqualTo(expected.get(index));
+                                } catch (java.io.IOException e) {
+                                    throw new AssertionError(e);
+                                }
+                            }
+                            if (withSystemColumns) {
+                                assertThat(physical.getBytes(contract.keyPosition()))
+                                        .isEqualTo(KEY);
+                                assertHeaders(physical.getMap(contract.headersPosition()), true);
+                            }
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    private static InternalRow jsonBusinessRow(InternalRow row, KafkaTableSchema contract) {
+        if (contract.valueConversionLayout() == KafkaValueConversionLayout.NESTED) {
+            return row.getRow(
+                    contract.valueProjection().positionAt(0), COMPLEX_TYPE.getFieldCount());
+        }
+        GenericRow business = new GenericRow(COMPLEX_TYPE.getFieldCount());
+        for (int i = 0; i < business.getFieldCount(); i++) {
+            business.setField(
+                    i,
+                    InternalRow.createFieldGetter(
+                                    COMPLEX_TYPE.getTypeAt(i),
+                                    contract.valueProjection().positionAt(i))
+                            .getFieldOrNull(row));
+        }
+        return business;
+    }
+
+    private static TableDescriptor reorderedRescueDescriptor(
+            String layout, boolean withSystemColumns, boolean rescueFirst) {
+        List<Schema.Column> columns =
+                new ArrayList<>(
+                        descriptor(COMPLEX_TYPE, layout, withSystemColumns, false, 1)
+                                .getSchema()
+                                .getColumns());
+        Schema.Builder schema = Schema.newBuilder();
+        int rescuePosition = rescueFirst ? 0 : columns.size() / 2 + columns.size() % 2;
+        for (int i = 0; i <= columns.size(); i++) {
+            if (i == rescuePosition) {
+                schema.column(KafkaTableSchema.RESCUE_COLUMN, DataTypes.STRING());
+            }
+            if (i < columns.size()) {
+                schema.column(columns.get(i).getName(), columns.get(i).getDataType());
+            }
+        }
+        return TableDescriptor.builder()
+                .schema(schema.build())
+                .distributedBy(1)
+                .logFormat(LogFormat.ARROW)
+                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), layout)
+                .build();
     }
 
     private static void assertNegativeZero(float value) {
