@@ -19,7 +19,10 @@ package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
+
+import javax.annotation.Nullable;
 
 /** Creates a decoder for one Kafka value format and Fluss field projection. */
 @Internal
@@ -30,4 +33,10 @@ public interface KafkaFormatFactory {
 
     /** Creates and validates a decoder for the projection. */
     KafkaFieldDecoder createDecoder(KafkaFieldProjection projection);
+
+    /** Creates a decoder with the JSON layout, or no layout for binary/string values. */
+    default KafkaFieldDecoder createDecoder(
+            KafkaFieldProjection projection, @Nullable ValueLayout layout) {
+        return createDecoder(projection);
+    }
 }

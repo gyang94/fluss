@@ -17,13 +17,22 @@
 
 package org.apache.fluss.kafka.schema;
 
-import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
+import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
+import org.apache.fluss.types.RowType;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,63 +42,183 @@ class KafkaJsonSchemaTest {
     private final KafkaTopicSchemaResolver resolver = new KafkaTopicSchemaResolver();
 
     @Test
-    void testJsonProjectsValuesAroundKeyAndMetadataColumns() {
-        KafkaTopicSchema schema =
-                resolver.resolve(
-                        descriptor()
-                                .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "string")
-                                .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "key")
-                                .customProperty(
-                                        KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
-                                .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "time")
-                                .build());
-        assertThat(schema.keyProjection().positions()).containsExactly(1);
+    void testFlatJsonProjectsOnlyBusinessColumnsAroundOptionalSystemColumns() {
+        TableDescriptor descriptor =
+                descriptor(
+                                Schema.newBuilder()
+                                        .column("id", DataTypes.INT().copy(false))
+                                        .column("_kafka_key", DataTypes.BYTES())
+                                        .column(
+                                                "_kafka_headers",
+                                                DataTypes.MAP(
+                                                        DataTypes.STRING(), DataTypes.BYTES()))
+                                        .column("amount", DataTypes.DECIMAL(8, 2))
+                                        .column("_kafka_rescue", DataTypes.STRING())
+                                        .build())
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE, "binary")
+                        .build();
+        KafkaTableSchema schema = resolver.resolve(descriptor);
+        assertThat(schema).isEqualTo(KafkaTableSchema.resolve(descriptor));
+        assertThat(schema.valueType()).isEqualTo(ValueType.PARSE_JSON);
+        assertThat(schema.valueLayout()).isEqualTo(ValueLayout.FLAT);
         assertThat(schema.valueProjection().positions()).containsExactly(0, 3);
-        assertThat(schema.timestampPosition()).isEqualTo(2);
+        assertThat(schema.keyPosition()).isEqualTo(1);
+        assertThat(schema.headersPosition()).isEqualTo(2);
+        assertThat(schema.rescuePosition()).isEqualTo(4);
+        assertThat(schema.rowType()).isEqualTo(descriptor.getSchema().getRowType());
     }
 
     @Test
-    void testRejectsJsonKeysAndUnsupportedFieldTypes() {
-        assertThatThrownBy(
-                        () ->
-                                resolver.resolve(
-                                        descriptor()
-                                                .customProperty(
-                                                        KafkaDataFormat.KEY_FORMAT_CONFIG, "json")
-                                                .build()))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("only supported for record values");
-        assertThatThrownBy(
-                        () ->
-                                resolver.resolve(
-                                        TableDescriptor.builder()
-                                                .schema(
-                                                        Schema.newBuilder()
-                                                                .column(
-                                                                        "items",
-                                                                        DataTypes.ARRAY(
-                                                                                DataTypes.INT()))
-                                                                .build())
-                                                .distributedBy(1)
-                                                .logFormat(LogFormat.ARROW)
-                                                .customProperty(
-                                                        KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
-                                                .build()))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("does not support");
+    void testNestedJsonProjectsItsPhysicalValueContainer() {
+        RowType value =
+                DataTypes.ROW(
+                        DataTypes.FIELD("id", DataTypes.INT().copy(false)),
+                        DataTypes.FIELD("name", DataTypes.STRING()));
+        KafkaTableSchema schema =
+                resolver.resolve(
+                        descriptor(
+                                        Schema.newBuilder()
+                                                .column("_kafka_key", DataTypes.BYTES())
+                                                .column("_kafka_value", value)
+                                                .column("_kafka_rescue", DataTypes.STRING())
+                                                .build())
+                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, "nested")
+                                .build());
+        assertThat(schema.valueLayout()).isEqualTo(ValueLayout.NESTED);
+        assertThat(schema.valueProjection().positions()).containsExactly(1);
+        assertThat(schema.valueProjection().dataTypeAt(0)).isEqualTo(value);
+        assertThat(schema.keyPosition()).isZero();
+        assertThat(schema.rescuePosition()).isEqualTo(2);
     }
 
-    private static TableDescriptor.Builder descriptor() {
+    @Test
+    void testJsonContractRequiresExplicitEnablementAndRejectsPrototypeOptions() {
+        TableDescriptor.Builder table =
+                descriptor(Schema.newBuilder().column("id", DataTypes.INT()).build());
+        TableDescriptor disabled = table.property(ConfigOptions.TABLE_KAFKA_ENABLED, false).build();
+        assertThat(resolver.isEnabled(disabled)).isFalse();
+        assertThatThrownBy(() -> resolver.resolve(disabled))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("disabled");
+        for (String option :
+                Arrays.asList(
+                        "kafka.value.format",
+                        "kafka.key.fields",
+                        "table.kafka.convert.value.type")) {
+            assertThatThrownBy(
+                            () ->
+                                    resolver.resolve(
+                                            descriptor(disabled.getSchema())
+                                                    .customProperty(option, "json")
+                                                    .build()))
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining("custom property");
+        }
+        assertThatThrownBy(
+                        () ->
+                                resolver.resolve(
+                                        descriptor(disabled.getSchema())
+                                                .property(
+                                                        ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE,
+                                                        "string")
+                                                .build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("only supports binary");
+    }
+
+    @Test
+    void testNestedJsonRejectsUnmappedTopLevelBusinessColumns() {
+        assertThatThrownBy(
+                        () ->
+                                resolver.resolve(
+                                        descriptor(
+                                                        Schema.newBuilder()
+                                                                .column(
+                                                                        "_kafka_value",
+                                                                        DataTypes.ROW(
+                                                                                DataTypes.FIELD(
+                                                                                        "id",
+                                                                                        DataTypes
+                                                                                                .INT())))
+                                                                .column("other", DataTypes.STRING())
+                                                                .build())
+                                                .property(
+                                                        ConfigOptions
+                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                                        "nested")
+                                                .build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("no value mapping");
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "_kafka_key",
+                "_kafka_headers",
+                "_kafka_metadata",
+                "_kafka_rescue",
+                "_kafka_value"
+            })
+    void testNestedJsonRejectsReservedRootBusinessNames(String name) {
+        assertThatThrownBy(
+                        () ->
+                                resolver.resolve(
+                                        descriptor(
+                                                        Schema.newBuilder()
+                                                                .column(
+                                                                        "_kafka_value",
+                                                                        DataTypes.ROW(
+                                                                                DataTypes.FIELD(
+                                                                                        name,
+                                                                                        DataTypes
+                                                                                                .STRING())))
+                                                                .build())
+                                                .property(
+                                                        ConfigOptions
+                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                                        "nested")
+                                                .build()))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("Reserved name");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testComplexBusinessFieldsRemainUnavailableUntilRecursiveConversion(boolean nested) {
+        for (DataType type :
+                Arrays.asList(
+                        DataTypes.ARRAY(DataTypes.INT()),
+                        DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                        DataTypes.ROW(DataTypes.FIELD("child", DataTypes.INT())))) {
+            Schema schema =
+                    nested
+                            ? Schema.newBuilder()
+                                    .column(
+                                            "_kafka_value",
+                                            DataTypes.ROW(DataTypes.FIELD("items", type)))
+                                    .build()
+                            : Schema.newBuilder().column("items", type).build();
+            TableDescriptor table =
+                    descriptor(schema)
+                            .property(
+                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                    nested ? "nested" : "flat")
+                            .build();
+            // The persisted contract is valid, but this gateway stage must report INVALID_TOPIC
+            // before accepting records for a decoder that it does not yet implement.
+            assertThat(KafkaTableSchema.resolve(table).valueType()).isEqualTo(ValueType.PARSE_JSON);
+            assertThatThrownBy(() -> resolver.resolve(table))
+                    .isInstanceOf(KafkaTopicSchemaException.class);
+        }
+    }
+
+    private static TableDescriptor.Builder descriptor(Schema schema) {
         return TableDescriptor.builder()
-                .schema(
-                        Schema.newBuilder()
-                                .column("id", DataTypes.INT().copy(false))
-                                .column("key", DataTypes.STRING())
-                                .column("time", DataTypes.TIMESTAMP(3).copy(false))
-                                .column("amount", DataTypes.DECIMAL(8, 2))
-                                .build())
+                .schema(schema)
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
-                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json");
+                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json");
     }
 }
