@@ -17,12 +17,14 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.kafka.api.metadata.MetadataHandler;
 import org.apache.fluss.kafka.api.versions.ApiVersionsHandler;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
@@ -39,15 +41,19 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     private final KafkaRequestDispatcher dispatcher;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
-    public KafkaRequestHandler(RpcGatewayService service, TabletServerGateway gateway) {
+    public KafkaRequestHandler(
+            Configuration conf, RpcGatewayService service, TabletServerGateway gateway) {
         checkNotNull(service);
         checkNotNull(gateway);
+        KafkaTopicMapper topicMapper = new KafkaTopicMapper(checkNotNull(conf));
         this.registry =
                 new KafkaApiRegistry(
                         Arrays.asList(
                                 new ApiVersionsHandler(this::apiRegistry),
                                 new MetadataHandler(
-                                        new GatewayKafkaMetadataBackend(service, gateway))));
+                                        new GatewayKafkaMetadataBackend(
+                                                service, gateway, topicMapper),
+                                        topicMapper)));
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
 
