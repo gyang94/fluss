@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package org.apache.fluss.kafka.schema;
+package org.apache.fluss.metadata;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.types.DataType;

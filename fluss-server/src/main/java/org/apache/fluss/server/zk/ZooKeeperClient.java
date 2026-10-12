@@ -1315,6 +1315,36 @@ public class ZooKeeperClient implements AutoCloseable {
         return schemaId;
     }
 
+    /**
+     * Publishes a schema and advances the table registration version in one fenced transaction.
+     * Property ALTER validates against a schema snapshot and compares the table version, so schema
+     * ALTER must participate in the same CAS to prevent enabling an incompatible Kafka contract.
+     */
+    public void registerSchemaAndBumpTableVersion(
+            TablePath tablePath,
+            Schema schema,
+            int schemaId,
+            VersionedData<TableRegistration> expectedTable,
+            int expectedCoordinatorEpochZkVersion)
+            throws Exception {
+        List<CuratorOp> ops = new ArrayList<>();
+        ops.add(
+                zkClient.transactionOp()
+                        .setData()
+                        .withVersion(expectedTable.zkVersion())
+                        .forPath(
+                                TableZNode.path(tablePath),
+                                TableZNode.encode(expectedTable.data())));
+        ops.add(
+                zkClient.transactionOp()
+                        .create()
+                        .withMode(CreateMode.PERSISTENT)
+                        .forPath(
+                                SchemaZNode.path(tablePath, schemaId), SchemaZNode.encode(schema)));
+        zkClient.transaction()
+                .forOperations(wrapRequestsWithEpochCheck(ops, expectedCoordinatorEpochZkVersion));
+    }
+
     /** Get the specific schema by schema id in ZK metadata. */
     public Optional<SchemaInfo> getSchemaById(TablePath tablePath, int schemaId) throws Exception {
         Optional<byte[]> bytes = getOrEmpty(SchemaZNode.path(tablePath, schemaId));

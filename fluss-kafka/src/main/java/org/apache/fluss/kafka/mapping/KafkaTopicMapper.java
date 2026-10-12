@@ -18,6 +18,9 @@
 package org.apache.fluss.kafka.mapping;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.TablePath;
 
 import org.apache.kafka.common.Uuid;
@@ -26,21 +29,43 @@ import org.apache.kafka.common.internals.Topic;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 
-/** Maps fully qualified Kafka topic identities to Fluss tables. */
+/** Maps canonical Kafka topic names and default-database aliases to Fluss tables. */
 @Internal
 public final class KafkaTopicMapper {
 
     // ASCII "Fluss" followed by zero bytes. A dedicated namespace avoids Kafka-reserved UUIDs.
     private static final long TOPIC_ID_NAMESPACE = 0x466c757373000000L;
 
-    /** Maps a Kafka topic in database.table form to its Fluss table path. */
+    private final String defaultDatabase;
+
+    /** Creates a mapper using the default database configuration. */
+    public KafkaTopicMapper() {
+        this(new Configuration());
+    }
+
+    /** Creates a mapper using the server's default database; it never creates databases. */
+    public KafkaTopicMapper(Configuration config) {
+        this.defaultDatabase = config.get(ConfigOptions.KAFKA_DEFAULT_DATABASE);
+        TablePath.validateDatabaseName(defaultDatabase);
+    }
+
+    /** Maps a canonical topic or an unqualified alias to a table path, without fallback lookup. */
     public TablePath toTablePath(String topicName) {
         if (!isValidTopic(topicName)) {
             throw new InvalidTopicException(
-                    "Kafka topic must be a valid database.table name: " + topicName);
+                    "Kafka topic must be a valid table or database.table name: " + topicName);
         }
         int separator = topicName.indexOf('.');
-        return TablePath.of(topicName.substring(0, separator), topicName.substring(separator + 1));
+        TablePath path =
+                separator < 0
+                        ? TablePath.of(defaultDatabase, topicName)
+                        : TablePath.of(
+                                topicName.substring(0, separator),
+                                topicName.substring(separator + 1));
+        if (!isMappedTable(path)) {
+            throw new InvalidTopicException("Canonical Kafka topic name is invalid: " + path);
+        }
+        return path;
     }
 
     /** Returns the fully qualified Kafka name of a representable Fluss table. */
@@ -55,7 +80,7 @@ public final class KafkaTopicMapper {
 
     /** Returns whether a Fluss user table has a valid, fully qualified Kafka topic name. */
     public boolean isMappedTable(TablePath tablePath) {
-        return tablePath != null && tablePath.isValid() && isValidTopic(tablePath.toString());
+        return KafkaTableSchema.isValidTablePath(tablePath);
     }
 
     /** Returns whether a name uniquely represents a user table in a Fluss database. */
@@ -64,14 +89,16 @@ public final class KafkaTopicMapper {
             return false;
         }
         int separator = topicName.indexOf('.');
-        if (separator <= 0 || separator != topicName.lastIndexOf('.')) {
+        if (separator < 0) {
+            return TablePath.detectInvalidName(topicName) == null
+                    && TablePath.validatePrefix(topicName) == null;
+        }
+        if (separator == 0 || separator != topicName.lastIndexOf('.')) {
             return false;
         }
-        String database = topicName.substring(0, separator);
-        String table = topicName.substring(separator + 1);
-        return TablePath.of(database, table).isValid()
-                && TablePath.validatePrefix(database) == null
-                && TablePath.validatePrefix(table) == null;
+        return KafkaTableSchema.isValidTablePath(
+                TablePath.of(
+                        topicName.substring(0, separator), topicName.substring(separator + 1)));
     }
 
     /** Maps a Fluss table ID to a stable Kafka topic ID. */
