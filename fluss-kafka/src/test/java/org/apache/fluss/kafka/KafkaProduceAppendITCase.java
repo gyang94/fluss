@@ -30,6 +30,7 @@ import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalRow;
@@ -40,6 +41,7 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
@@ -51,14 +53,18 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Exercises native DDL, Kafka discovery and Produce, replication, and native Fluss readback. */
 class KafkaProduceAppendITCase {
@@ -346,6 +352,188 @@ class KafkaProduceAppendITCase {
         }
     }
 
+    @Test
+    void testIdempotentProducerFailsFastAsUnsupported() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "produce_idempotent");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor("raw"), false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            Map<String, Object> config = producerConfig("all", 16384);
+            config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+            long start = System.nanoTime();
+            try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(config)) {
+                assertThatThrownBy(
+                                () ->
+                                        producer.send(
+                                                        new ProducerRecord<>(
+                                                                path.toString(), KEY, VALUE))
+                                                .get(30, TimeUnit.SECONDS))
+                        .hasRootCauseInstanceOf(UnsupportedVersionException.class)
+                        .hasRootCauseMessage("The node does not support INIT_PRODUCER_ID");
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+            assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start))
+                    .isLessThan(10_000L);
+        }
+    }
+
+    @Test
+    void testConcurrentProducersPreservePerKeyOrder() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "produce_concurrent");
+        int producers = 8;
+        int recordsPerProducer = 2000;
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("body", DataTypes.BYTES())
+                                        .column("message_key", DataTypes.BYTES())
+                                        .build())
+                        .distributedBy(3)
+                        .logFormat(LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, "raw")
+                        .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "message_key")
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                        .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor, false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            ExecutorService executor = Executors.newFixedThreadPool(producers);
+            try {
+                List<Future<?>> tasks = new ArrayList<>();
+                for (int p = 0; p < producers; p++) {
+                    byte[] key = ("producer-" + p).getBytes(StandardCharsets.UTF_8);
+                    String prefix = "producer-" + p + "#";
+                    tasks.add(
+                            executor.submit(
+                                    () -> {
+                                        sendSequence(path, key, prefix, recordsPerProducer);
+                                        return null;
+                                    }));
+                }
+                for (Future<?> task : tasks) {
+                    task.get(120, TimeUnit.SECONDS);
+                }
+
+                List<InternalRow> rows =
+                        readRows(connection, path, 3, producers * recordsPerProducer);
+                assertThat(rows).hasSize(producers * recordsPerProducer);
+                Map<String, List<Integer>> sequences = new LinkedHashMap<>();
+                for (InternalRow row : rows) {
+                    String[] value = new String(row.getBytes(0), StandardCharsets.UTF_8).split("#");
+                    sequences
+                            .computeIfAbsent(value[0], k -> new ArrayList<>())
+                            .add(Integer.parseInt(value[1]));
+                }
+                List<Integer> expected = new ArrayList<>();
+                for (int i = 0; i < recordsPerProducer; i++) {
+                    expected.add(i);
+                }
+                assertThat(sequences).hasSize(producers);
+                for (Map.Entry<String, List<Integer>> entry : sequences.entrySet()) {
+                    assertThat(entry.getValue())
+                            .as("stored sequence of %s", entry.getKey())
+                            .containsExactlyElementsOf(expected);
+                }
+            } finally {
+                executor.shutdownNow();
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    /**
+     * Adding a nullable column to a raw-format table currently makes every later Produce fail with
+     * "Kafka value format raw requires exactly one Fluss field" (INVALID_TOPIC). This test asserts
+     * the expected behavior and fails on the current implementation.
+     */
+    @Test
+    void testAddColumnDoesNotBreakKafkaWrites() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "produce_add_column");
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(Schema.newBuilder().column("body", DataTypes.BYTES()).build())
+                        .distributedBy(1)
+                        .logFormat(LogFormat.ARROW)
+                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor, false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            try (KafkaProducer<byte[], byte[]> producer = producer("all")) {
+                assertThat(
+                                producer.send(new ProducerRecord<>(path.toString(), VALUE))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+
+                admin.alterTable(
+                                path,
+                                Collections.singletonList(
+                                        TableChange.addColumn(
+                                                "added_later",
+                                                DataTypes.STRING(),
+                                                null,
+                                                TableChange.ColumnPosition.last())),
+                                false)
+                        .get();
+                CLUSTER.waitUntilAllGatewayHasSameMetadata();
+
+                assertThat(
+                                producer.send(new ProducerRecord<>(path.toString(), VALUE))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isEqualTo(1L);
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    private static void sendSequence(TablePath path, byte[] key, String prefix, int count)
+            throws Exception {
+        Map<String, Object> config = producerConfig("all", 16384);
+        // Without idempotence, Kafka only guarantees per-partition order with one request in
+        // flight: a retried batch could otherwise land after the batch sent behind it.
+        config.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 1);
+        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(config)) {
+            List<Future<RecordMetadata>> writes = new ArrayList<>();
+            for (int i = 0; i < count; i++) {
+                byte[] value = (prefix + i).getBytes(StandardCharsets.UTF_8);
+                writes.add(producer.send(new ProducerRecord<>(path.toString(), key, value)));
+            }
+            for (Future<RecordMetadata> write : writes) {
+                write.get(60, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static List<InternalRow> readRows(
+            Connection connection, TablePath path, int buckets, int expected) throws Exception {
+        List<InternalRow> rows = new ArrayList<>();
+        try (Table table = connection.getTable(path);
+                LogScanner scanner = table.newScan().createLogScanner()) {
+            for (int bucket = 0; bucket < buckets; bucket++) {
+                scanner.subscribeFromBeginning(bucket);
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(expected == 0 ? 3 : 30);
+            while (System.nanoTime() < deadline && (expected == 0 || rows.size() < expected)) {
+                for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                    rows.add(record.getRow());
+                }
+            }
+        }
+        return rows;
+    }
+
     private static void assertReadback(
             Connection connection, TablePath path, String format, byte[] expectedValue)
             throws Exception {
@@ -410,6 +598,10 @@ class KafkaProduceAppendITCase {
     }
 
     private static KafkaProducer<byte[], byte[]> producer(String acks, int batchSize) {
+        return new KafkaProducer<>(producerConfig(acks, batchSize));
+    }
+
+    private static Map<String, Object> producerConfig(String acks, int batchSize) {
         ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
         Map<String, Object> config = new HashMap<>();
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, node.host() + ":" + node.port());
@@ -422,7 +614,7 @@ class KafkaProduceAppendITCase {
         config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 30000);
         config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 10000);
         config.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 30000);
-        return new KafkaProducer<>(config);
+        return config;
     }
 
     private static Configuration clusterConfig() {
