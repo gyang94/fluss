@@ -164,7 +164,7 @@ class KafkaSaslTokenDecoderTest {
                     Collections.singletonMap("writer", "writer-secret"));
             PlainSaslServerConfigManager manager = new PlainSaslServerConfigManager(conf);
             TestingTabletGatewayService service = new TestingTabletGatewayService();
-            handler = new KafkaRequestHandler(service, service);
+            handler = new KafkaRequestHandler(conf, service);
             channel =
                     new EmbeddedChannel(
                             new LengthFieldPrepender(4),
