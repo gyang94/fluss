@@ -28,6 +28,10 @@ public interface KafkaFieldDecoder {
     /**
      * Decodes Kafka value bytes into internal Fluss field values.
      *
+     * <p>A JSON decoder created from a table schema with a declared {@code _kafka_rescue} appends
+     * that column's nullable STRING value after the ordered value projection. Binary/string
+     * decoders return only the value projection.
+     *
      * <p>The input is borrowed and must not be modified. Returned values may borrow its storage;
      * callers must encode them synchronously before the input can be reused.
      */

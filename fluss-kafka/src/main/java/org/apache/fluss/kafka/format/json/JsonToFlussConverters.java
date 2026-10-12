@@ -429,7 +429,7 @@ final class JsonToFlussConverters {
         return value;
     }
 
-    private static void validateUnicode(String value, String path, DataType dataType) {
+    static void validateUnicode(String value, String path, DataType dataType) {
         // Jackson can retain unpaired JSON escapes in Java strings. Reject them before
         // BinaryString's UTF-8 encoding silently replaces them with a question mark.
         for (int i = 0; i < value.length(); i++) {

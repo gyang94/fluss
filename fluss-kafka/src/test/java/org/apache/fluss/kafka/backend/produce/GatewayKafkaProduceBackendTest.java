@@ -983,11 +983,11 @@ class GatewayKafkaProduceBackendTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testJsonConversionRejectsWholeBadPartitionAndPreservesOtherPartitions(boolean nested)
-            throws Exception {
+    void testJsonConversionHonorsRescueAndPartitionAtomicity(boolean nested) throws Exception {
         List<String> invalidValues =
-                new ArrayList<>(
-                        Arrays.asList("{", "[]", "{\"id\":\"bad\"}", "{\"id\":1,\"unknown\":2}"));
+                new ArrayList<>(Arrays.asList("{", "[]", "{\"id\":\"bad\"}", "{} {}"));
+        List<String> rescuableValues =
+                new ArrayList<>(Collections.singletonList("{\"id\":1,\"unknown\":2}"));
         for (String reserved :
                 Arrays.asList(
                         "_kafka_key",
@@ -995,11 +995,18 @@ class GatewayKafkaProduceBackendTest {
                         "_kafka_metadata",
                         "_kafka_rescue",
                         "_kafka_value")) {
-            invalidValues.add("{\"id\":1,\"" + reserved + "\":null}");
+            rescuableValues.add("{\"id\":1,\"" + reserved + "\":null}");
         }
+        invalidValues.addAll(rescuableValues);
         for (boolean rescue : new boolean[] {false, true}) {
             for (String invalid : invalidValues) {
+                boolean captured = rescue && rescuableValues.contains(invalid);
                 TestingProduceService service = new TestingProduceService();
+                if (captured) {
+                    ProduceLogResponse response = success(0);
+                    response.addAllBucketsResps(success(1).getBucketsRespsList());
+                    service.pendingAppend = CompletableFuture.completedFuture(response);
+                }
                 service.pendingMetadata =
                         CompletableFuture.completedFuture(
                                 metadata(false)
@@ -1024,12 +1031,17 @@ class GatewayKafkaProduceBackendTest {
                                 .join();
                 assertErrors(
                         result,
-                        Errors.INVALID_RECORD,
+                        captured ? Errors.NONE : Errors.INVALID_RECORD,
                         Errors.NONE,
                         Errors.UNKNOWN_TOPIC_OR_PARTITION);
                 assertThat(service.appends).hasSize(1);
-                assertThat(service.append.getBucketsReqsList()).hasSize(1);
-                assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
+                assertThat(service.append.getBucketsReqsList()).hasSize(captured ? 2 : 1);
+                assertThat(service.append.getBucketsReqsList().get(0).getBucketId())
+                        .isEqualTo(captured ? 0 : 1);
+                if (captured) {
+                    assertThat(result.topics().get(0).partitions().get(0).baseOffset())
+                            .isEqualTo(17L);
+                }
                 assertThat(result.topics().get(0).partitions().get(1).baseOffset()).isEqualTo(17L);
             }
         }
