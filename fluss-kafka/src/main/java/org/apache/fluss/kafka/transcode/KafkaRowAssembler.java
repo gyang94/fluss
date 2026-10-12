@@ -19,25 +19,29 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
-import org.apache.fluss.kafka.schema.KafkaFieldProjection;
-import org.apache.fluss.kafka.schema.KafkaTopicSchema;
+import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
-import org.apache.fluss.row.GenericArray;
+import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
-import org.apache.fluss.row.TimestampNtz;
+import org.apache.fluss.types.MapType;
 
+import javax.annotation.Nullable;
+
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Assembles decoded Kafka key, value, and metadata into a physical Fluss row. */
+/** Assembles decoded values, raw keys and headers using the shared fixed-column contract. */
 @Internal
 public final class KafkaRowAssembler {
 
-    private final KafkaTopicSchema topicSchema;
+    private final KafkaTableSchema topicSchema;
 
     /** Creates an assembler for the resolved topic schema. */
-    public KafkaRowAssembler(KafkaTopicSchema topicSchema) {
+    public KafkaRowAssembler(KafkaTableSchema topicSchema) {
         this.topicSchema = checkNotNull(topicSchema);
     }
 
@@ -48,25 +52,24 @@ public final class KafkaRowAssembler {
      * after conversion.
      */
     public GenericRow assemble(
-            Object[] keyValues, Object[] valueValues, long timestamp, List<RecordHeader> headers) {
+            Object[] valueValues, @Nullable byte[] key, List<RecordHeader> headers) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
-        setProjectedFields(row, topicSchema.keyProjection(), keyValues);
         setProjectedFields(row, topicSchema.valueProjection(), valueValues);
-        if (topicSchema.timestampPosition() >= 0) {
-            int position = topicSchema.timestampPosition();
-            if (timestamp == -1L) {
-                if (!topicSchema.rowType().getTypeAt(position).isNullable()) {
-                    throw new KafkaRecordEncodingException(
-                            "Missing Kafka timestamp cannot populate a NOT NULL timestamp column.");
-                }
-            } else {
-                // Epoch milliseconds define UTC calendar fields, independently of the JVM zone.
-                row.setField(position, TimestampNtz.fromMillis(timestamp));
+        if (topicSchema.keyPosition() >= 0) {
+            int position = topicSchema.keyPosition();
+            if (key == null && !topicSchema.rowType().getTypeAt(position).isNullable()) {
+                throw new KafkaRecordEncodingException(
+                        "Null Kafka key cannot populate NOT NULL _kafka_key.");
             }
+            row.setField(position, key);
         }
         if (topicSchema.headersPosition() >= 0) {
-            row.setField(topicSchema.headersPosition(), toHeaders(headers));
+            int position = topicSchema.headersPosition();
+            row.setField(
+                    position,
+                    toHeaders(headers, (MapType) topicSchema.rowType().getTypeAt(position)));
         }
+        // A declared _kafka_rescue stays null for binary/string; omitted columns do not exist.
         return row;
     }
 
@@ -92,12 +95,22 @@ public final class KafkaRowAssembler {
         }
     }
 
-    private static GenericArray toHeaders(List<RecordHeader> headers) {
-        Object[] rows = new Object[headers.size()];
-        for (int i = 0; i < headers.size(); i++) {
-            RecordHeader header = headers.get(i);
-            rows[i] = GenericRow.of(BinaryString.fromString(header.name()), header.borrowedValue());
+    private static GenericMap toHeaders(List<RecordHeader> headers, MapType type) {
+        Map<BinaryString, byte[]> values = new LinkedHashMap<>();
+        for (RecordHeader header : headers) {
+            values.put(BinaryString.fromString(header.name()), header.borrowedValue());
         }
-        return new GenericArray(rows);
+        // Validate the final map: an overwritten null must not reject a non-null last value.
+        for (Map.Entry<BinaryString, byte[]> entry : values.entrySet()) {
+            if (entry.getKey() == null && !type.getKeyType().isNullable()) {
+                throw new KafkaRecordEncodingException(
+                        "Null Kafka header name cannot populate NOT NULL _kafka_headers map keys.");
+            }
+            if (entry.getValue() == null && !type.getValueType().isNullable()) {
+                throw new KafkaRecordEncodingException(
+                        "Null Kafka header value cannot populate NOT NULL _kafka_headers map values.");
+            }
+        }
+        return new GenericMap(values);
     }
 }
