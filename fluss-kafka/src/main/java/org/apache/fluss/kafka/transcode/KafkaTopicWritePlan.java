@@ -19,13 +19,16 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 import org.apache.fluss.metadata.TableInfo;
 
 import javax.annotation.concurrent.ThreadSafe;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Immutable binary/string conversion plan; mutable Arrow resources are owned by each conversion. */
+/**
+ * Immutable binary/string conversion plan; mutable Arrow resources are owned by each conversion.
+ */
 @Internal
 @ThreadSafe
 public final class KafkaTopicWritePlan {
@@ -36,6 +39,12 @@ public final class KafkaTopicWritePlan {
     KafkaTopicWritePlan(TableInfo tableInfo, KafkaTableSchema topicSchema) {
         this.tableInfo = checkNotNull(tableInfo);
         this.topicSchema = checkNotNull(topicSchema);
+        // Validate support during preparation as filtered partitions may never call transcode.
+        if (topicSchema.valueType() != ValueType.BINARY
+                && topicSchema.valueType() != ValueType.STRING) {
+            throw new KafkaRecordEncodingException(
+                    "Unsupported Kafka value conversion type: " + topicSchema.valueType());
+        }
         this.rowAssembler = new KafkaRowAssembler(topicSchema);
     }
 
