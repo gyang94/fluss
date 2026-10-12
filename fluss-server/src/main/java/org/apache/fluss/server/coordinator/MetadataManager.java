@@ -39,6 +39,7 @@ import org.apache.fluss.metadata.DataLakeFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.DatabaseInfo;
 import org.apache.fluss.metadata.DatabaseSummary;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LakeTableUtil;
 import org.apache.fluss.metadata.MergeEngineType;
 import org.apache.fluss.metadata.ResolvedPartitionSpec;
@@ -58,6 +59,7 @@ import org.apache.fluss.server.zk.data.PartitionAssignment;
 import org.apache.fluss.server.zk.data.PartitionRegistration;
 import org.apache.fluss.server.zk.data.TableAssignment;
 import org.apache.fluss.server.zk.data.TableRegistration;
+import org.apache.fluss.server.zk.data.ZkVersion;
 import org.apache.fluss.shaded.zookeeper3.org.apache.zookeeper.KeeperException;
 import org.apache.fluss.utils.function.RunnableWithException;
 import org.apache.fluss.utils.function.ThrowingRunnable;
@@ -129,6 +131,12 @@ public class MetadataManager {
                 tableDescriptor,
                 maxBucketNum,
                 lakeCatalogDynamicLoader.getLakeCatalogContainer().getDataLakeFormat());
+    }
+
+    /** Validates a descriptor and its Kafka topic identity before persistence. */
+    public void validateTableDescriptor(TablePath tablePath, TableDescriptor tableDescriptor) {
+        validateTableDescriptor(tableDescriptor);
+        KafkaTableSchema.validateTablePath(tablePath, tableDescriptor);
     }
 
     public void createDatabase(
@@ -458,8 +466,25 @@ public class MetadataManager {
             boolean ignoreIfNotExists,
             FlussPrincipal flussPrincipal)
             throws TableNotExistException, TableNotPartitionedException {
-        try {
+        alterTableSchema(
+                tablePath,
+                schemaChanges,
+                ignoreIfNotExists,
+                flussPrincipal,
+                ZkVersion.MATCH_ANY_VERSION.getVersion());
+    }
 
+    /** Alters schema with a table-version and coordinator-epoch fence against concurrent ALTER. */
+    public void alterTableSchema(
+            TablePath tablePath,
+            List<TableChange> schemaChanges,
+            boolean ignoreIfNotExists,
+            FlussPrincipal flussPrincipal,
+            int coordinatorZkVersion)
+            throws TableNotExistException, TableNotPartitionedException {
+        try {
+            ZooKeeperClient.VersionedData<TableRegistration> versionedTable =
+                    getTableRegistrationWithVersion(tablePath);
             TableInfo table = getTable(tablePath);
             TableDescriptor tableDescriptor = table.toTableDescriptor();
 
@@ -480,7 +505,12 @@ public class MetadataManager {
 
                 // Update Fluss schema (ZK) after Lake sync succeeds
                 if (!newSchema.equals(table.getSchema())) {
-                    zookeeperClient.registerSchema(tablePath, newSchema, table.getSchemaId() + 1);
+                    zookeeperClient.registerSchemaAndBumpTableVersion(
+                            tablePath,
+                            newSchema,
+                            table.getSchemaId() + 1,
+                            versionedTable,
+                            coordinatorZkVersion);
                 } else {
                     LOG.info(
                             "Skipping schema evolution for table {} because the column(s) to add {} already exist.",
@@ -852,7 +882,7 @@ public class MetadataManager {
             }
 
             // reuse the same validate logic with the createTable() method
-            validateTableDescriptor(newDescriptor);
+            validateTableDescriptor(tablePath, newDescriptor);
 
             beforeUpdate.accept(tableInfo, newDescriptor);
 
