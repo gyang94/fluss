@@ -18,12 +18,14 @@
 package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaTopicWritePlan;
@@ -66,7 +68,8 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     private final RpcGatewayService service;
     private final TabletServerGateway gateway;
-    private final KafkaTopicMapper topicMapper = new KafkaTopicMapper();
+    private final KafkaTopicMapper topicMapper;
+    private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
     private final KafkaRecordTranscoder transcoder;
     private final KafkaTableInfoCache tableInfoCache = new KafkaTableInfoCache();
     private final @Nullable KafkaProduceConversionExecutor conversionExecutor;
@@ -75,18 +78,21 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
+            KafkaTopicMapper topicMapper,
             KafkaRecordTranscoder transcoder) {
-        this(service, gateway, transcoder, null);
+        this(service, gateway, topicMapper, transcoder, null);
     }
 
     /** Creates a backend that submits work to a caller-owned bounded conversion executor. */
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
+            KafkaTopicMapper topicMapper,
             KafkaRecordTranscoder transcoder,
             @Nullable KafkaProduceConversionExecutor conversionExecutor) {
         this.service = checkNotNull(service);
         this.gateway = checkNotNull(gateway);
+        this.topicMapper = checkNotNull(topicMapper);
         this.transcoder = checkNotNull(transcoder);
         this.conversionExecutor = conversionExecutor;
     }
@@ -157,6 +163,11 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private CompletableFuture<TopicResult> produceTopic(
             KafkaProduceCommand command, TopicWrite topic, TableInfo tableInfo) {
         // Admission must match Metadata, including when the schema changes between requests.
+        // Even a cached snapshot is selected only after fetching the authoritative descriptor.
+        if (!schemaResolver.isEnabled(tableInfo.toTableDescriptor())) {
+            throw new TableNotExistException(
+                    "Table " + tableInfo.getTablePath() + " is not enabled for Kafka.");
+        }
         KafkaTopicWritePlan writePlan = transcoder.prepare(tableInfo);
         ProduceLogRequest request =
                 new ProduceLogRequest()
@@ -309,7 +320,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                                         || cause instanceof InvalidTopicException
                                 ? Errors.INVALID_TOPIC_EXCEPTION
                                 : cause instanceof KafkaRecordEncodingException
-                                        ? Errors.CORRUPT_MESSAGE
+                                        ? Errors.INVALID_RECORD
                                         : cause instanceof IllegalArgumentException
                                                 ? Errors.INVALID_REQUEST
                                                 : toKafkaError(
@@ -323,6 +334,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             case NONE:
                 return Errors.NONE;
             case TABLE_NOT_EXIST:
+            case DATABASE_NOT_EXIST:
             case UNKNOWN_TABLE_OR_BUCKET_EXCEPTION:
                 return Errors.UNKNOWN_TOPIC_OR_PARTITION;
             case NOT_LEADER_OR_FOLLOWER:

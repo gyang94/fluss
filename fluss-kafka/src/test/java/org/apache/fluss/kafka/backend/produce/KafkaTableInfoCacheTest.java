@@ -255,12 +255,16 @@ class KafkaTableInfoCacheTest {
     private static TableDescriptor descriptor(String version) {
         TableDescriptor.Builder builder =
                 TableDescriptor.builder()
-                        .schema(Schema.newBuilder().column("value", DataTypes.BYTES()).build())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .build())
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
-                        .customProperty("kafka.value.format", "raw");
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary");
         if ("v2".equals(version)) {
-            builder.customProperty("application.version", "changed");
+            builder.property(ConfigOptions.TABLE_KAFKA_ENABLED, false);
         }
         return builder.build();
     }

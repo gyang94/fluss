@@ -69,6 +69,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                         new GatewayKafkaProduceBackend(
                                 service,
                                 gateway,
+                                topicMapper,
                                 new ArrowKafkaRecordTranscoder(),
                                 conversionExecutor)));
         registry.freeze();

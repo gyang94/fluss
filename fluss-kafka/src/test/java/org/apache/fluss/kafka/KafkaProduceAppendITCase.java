@@ -26,7 +26,6 @@ import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -40,17 +39,37 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.compress.Compression;
+import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.message.ProduceRequestData;
+import org.apache.kafka.common.message.ProduceRequestData.PartitionProduceData;
+import org.apache.kafka.common.message.ProduceRequestData.TopicProduceData;
+import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceResponse;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.SimpleRecord;
+import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.ProduceRequest;
+import org.apache.kafka.common.requests.ProduceResponse;
+import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -58,11 +77,13 @@ import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static org.apache.fluss.server.testutils.RpcMessageTestUtils.createTable;
+import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newAlterTableRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Exercises native DDL, Kafka discovery and Produce, replication, and native Fluss readback. */
 class KafkaProduceAppendITCase {
-    private static final String DATABASE = "kafka";
+    private static final String DATABASE = "produce_default";
     private static final byte[] KEY = "key".getBytes(StandardCharsets.UTF_8);
     private static final byte[] VALUE = "value".getBytes(StandardCharsets.UTF_8);
 
@@ -75,7 +96,7 @@ class KafkaProduceAppendITCase {
                     .build();
 
     @ParameterizedTest
-    @ValueSource(strings = {"raw", "string"})
+    @ValueSource(strings = {"binary", "string"})
     void testPrecreatedTableRoundTripForAllAckModes(String format) throws Exception {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
@@ -98,7 +119,18 @@ class KafkaProduceAppendITCase {
                                             new RecordHeader("source", VALUE),
                                             new RecordHeader("source", null)));
                     RecordMetadata first = producer.send(record).get(30, TimeUnit.SECONDS);
-                    RecordMetadata second = producer.send(record).get(30, TimeUnit.SECONDS);
+                    RecordMetadata second =
+                            producer.send(
+                                            new ProducerRecord<>(
+                                                    path.getTableName(),
+                                                    0,
+                                                    123L,
+                                                    KEY,
+                                                    VALUE,
+                                                    record.headers()))
+                                    .get(30, TimeUnit.SECONDS);
+                    assertThat(first.topic()).isEqualTo(topic);
+                    assertThat(second.topic()).isEqualTo(path.getTableName());
                     if (!acks.equals("0")) {
                         assertThat(first.offset()).isZero();
                         assertThat(second.offset()).isEqualTo(1L);
@@ -119,7 +151,7 @@ class KafkaProduceAppendITCase {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
             admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            admin.createTable(path, descriptor("raw"), false).get();
+            admin.createTable(path, descriptor("binary"), false).get();
             CLUSTER.waitUntilAllGatewayHasSameMetadata();
             try (KafkaProducer<byte[], byte[]> producer = producer("all", 0)) {
                 ProducerRecord<byte[], byte[]> filtered =
@@ -141,7 +173,7 @@ class KafkaProduceAppendITCase {
                         .isEqualTo(-1L);
                 assertThat(producer.send(retained).get(30, TimeUnit.SECONDS).offset())
                         .isEqualTo(1L);
-                assertReadback(connection, path, "raw", VALUE);
+                assertReadback(connection, path, "binary", VALUE);
             } finally {
                 admin.dropTable(path, true).get();
             }
@@ -161,7 +193,7 @@ class KafkaProduceAppendITCase {
                 for (TablePath path : tables.keySet()) {
                     admin.createDatabase(path.getDatabaseName(), DatabaseDescriptor.EMPTY, true)
                             .get();
-                    admin.createTable(path, descriptor("raw"), false).get();
+                    admin.createTable(path, descriptor("binary"), false).get();
                 }
                 CLUSTER.waitUntilAllGatewayHasSameMetadata();
                 try (KafkaProducer<byte[], byte[]> producer = producer("all")) {
@@ -184,7 +216,7 @@ class KafkaProduceAppendITCase {
                                 .isEqualTo(1L);
                     }
                     for (Map.Entry<TablePath, byte[]> entry : tables.entrySet()) {
-                        assertReadback(connection, entry.getKey(), "raw", entry.getValue());
+                        assertReadback(connection, entry.getKey(), "binary", entry.getValue());
                     }
                 }
             } finally {
@@ -201,7 +233,7 @@ class KafkaProduceAppendITCase {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
             admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            admin.createTable(path, descriptor("raw"), false).get();
+            admin.createTable(path, descriptor("binary"), false).get();
             CLUSTER.waitUntilAllGatewayHasSameMetadata();
             try (KafkaProducer<byte[], byte[]> producer = producer("all", 0)) {
                 assertThat(producer.partitionsFor(path.toString())).hasSize(1);
@@ -227,8 +259,6 @@ class KafkaProduceAppendITCase {
                     while (count < values.size() && System.nanoTime() < deadline) {
                         for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
                             assertThat(record.getRow().getBytes(0)).isEqualTo(values.get(count));
-                            assertThat(record.getRow().getTimestampNtz(1, 3).getMillisecond())
-                                    .isEqualTo(count);
                             count++;
                         }
                     }
@@ -240,62 +270,244 @@ class KafkaProduceAppendITCase {
         }
     }
 
+    @Test
+    void testAliasesShareOffsetsAndObservePersistedEnablementOnOneConnection() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "produce_enablement");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+            admin.createTable(path, descriptor("binary"), false).get();
+            CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            try (KafkaProducer<byte[], byte[]> producer = producer("all", 0)) {
+                Node leader = producer.partitionsFor(path.toString()).get(0).leader();
+                try (Socket socket = new Socket(leader.host(), leader.port())) {
+                    String[] names = {path.getTableName(), path.toString()};
+                    assertProduceOffsets(query(socket, names), names, 0L, 1L);
+                    setEnabled(path, false);
+                    assertProduceErrors(
+                            query(socket, names), names, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                    setEnabled(path, true);
+                    assertProduceOffsets(query(socket, names), names, 2L, 3L);
+                    CLUSTER.newCoordinatorClient()
+                            .alterTable(
+                                    newAlterTableRequest(
+                                            path,
+                                            Collections.emptyMap(),
+                                            Collections.singletonList(
+                                                    ConfigOptions.TABLE_KAFKA_ENABLED.key()),
+                                            Collections.emptyList(),
+                                            false))
+                            .get();
+                    assertProduceErrors(
+                            query(socket, names), names, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                    assertReadback(connection, path, "binary", VALUE, 4);
+                    admin.dropTable(path, true).get();
+                    assertProduceErrors(
+                            query(socket, names), names, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                }
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
+    void testMissingDefaultDatabaseDoesNotFallbackOrCreateDatabase() throws Exception {
+        Configuration config = clusterConfig();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "produce_missing_db");
+        config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 1);
+        config.set(ConfigOptions.LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER, 1);
+        FlussClusterExtension cluster =
+                FlussClusterExtension.builder()
+                        .setNumOfTabletServers(1)
+                        .setClusterConf(config)
+                        .setTabletServerListeners("FLUSS://localhost:0,KAFKA://localhost:0")
+                        .build();
+        cluster.start();
+        try (Connection connection = ConnectionFactory.createConnection(cluster.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
+            TablePath existing = TablePath.of("fluss", "events");
+            long tableId = createTable(cluster, existing, descriptor("binary"));
+            cluster.waitUntilTableReady(tableId);
+            ServerNode node = cluster.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port())) {
+                String[] missing = {
+                    "events",
+                    "produce_missing_db.events",
+                    "another_missing_db.events",
+                    "fluss.missing"
+                };
+                assertProduceErrors(
+                        query(socket, missing), missing, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                assertProduceOffsets(
+                        query(socket, existing.toString()), new String[] {existing.toString()}, 0L);
+                assertProduceOffsets(
+                        query(socket, existing.toString()), new String[] {existing.toString()}, 1L);
+                assertReadback(connection, existing, "binary", VALUE);
+                assertThat(admin.databaseExists("produce_missing_db").get()).isFalse();
+                assertThat(admin.databaseExists("another_missing_db").get()).isFalse();
+            }
+        } finally {
+            cluster.close();
+        }
+    }
+
+    private static void setEnabled(TablePath path, boolean enabled) throws Exception {
+        CLUSTER.newCoordinatorClient()
+                .alterTable(
+                        newAlterTableRequest(
+                                path,
+                                Collections.singletonMap(
+                                        ConfigOptions.TABLE_KAFKA_ENABLED.key(),
+                                        Boolean.toString(enabled)),
+                                Collections.emptyList(),
+                                Collections.emptyList(),
+                                false))
+                .get();
+    }
+
+    private static ProduceResponse query(Socket socket, String... names) throws Exception {
+        List<TopicProduceData> topics = new ArrayList<>();
+        for (String name : names) {
+            topics.add(
+                    new TopicProduceData()
+                            .setName(name)
+                            .setPartitionData(
+                                    Collections.singletonList(
+                                            new PartitionProduceData()
+                                                    .setIndex(0)
+                                                    .setRecords(
+                                                            MemoryRecords.withRecords(
+                                                                    Compression.NONE,
+                                                                    new SimpleRecord(
+                                                                            123L,
+                                                                            KEY,
+                                                                            VALUE,
+                                                                            new Header[] {
+                                                                                new RecordHeader(
+                                                                                        "source",
+                                                                                        VALUE),
+                                                                                new RecordHeader(
+                                                                                        "source",
+                                                                                        null)
+                                                                            }))))));
+        }
+        ProduceRequest request =
+                new ProduceRequest(
+                        new ProduceRequestData()
+                                .setAcks((short) -1)
+                                .setTimeoutMs(10000)
+                                .setTopicData(
+                                        new ProduceRequestData.TopicProduceDataCollection(
+                                                topics.iterator())),
+                        (short) 9);
+        RequestHeader header =
+                new RequestHeader(ApiKeys.PRODUCE, request.version(), "produce-test", 1);
+        ByteBuffer encoded = request.serializeWithHeader(header);
+        byte[] bytes = new byte[encoded.remaining()];
+        encoded.get(bytes);
+        socket.setSoTimeout(15000);
+        DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+        output.writeInt(bytes.length);
+        output.write(bytes);
+        output.flush();
+        DataInputStream input = new DataInputStream(socket.getInputStream());
+        byte[] response = new byte[input.readInt()];
+        input.readFully(response);
+        return (ProduceResponse) AbstractResponse.parseResponse(ByteBuffer.wrap(response), header);
+    }
+
+    private static void assertProduceOffsets(
+            ProduceResponse response, String[] names, long... offsets) {
+        assertProduceErrors(response, names, Errors.NONE);
+        for (int i = 0; i < names.length; i++) {
+            assertThat(
+                            response.data()
+                                    .responses()
+                                    .find(names[i])
+                                    .partitionResponses()
+                                    .get(0)
+                                    .baseOffset())
+                    .isEqualTo(offsets[i]);
+        }
+    }
+
+    private static void assertProduceErrors(
+            ProduceResponse response, String[] names, Errors error) {
+        assertThat(response.data().responses())
+                .extracting(topic -> topic.name())
+                .containsExactly(names);
+        for (String name : names) {
+            List<PartitionProduceResponse> partitions =
+                    response.data().responses().find(name).partitionResponses();
+            assertThat(partitions).hasSize(1);
+            assertThat(partitions.get(0).index()).isZero();
+            assertThat(partitions.get(0).errorCode()).isEqualTo(error.code());
+            if (error != Errors.NONE) {
+                assertThat(partitions.get(0).baseOffset()).isEqualTo(-1L);
+            }
+        }
+    }
+
     private static void assertReadback(
             Connection connection, TablePath path, String format, byte[] expectedValue)
+            throws Exception {
+        assertReadback(connection, path, format, expectedValue, 2);
+    }
+
+    private static void assertReadback(
+            Connection connection,
+            TablePath path,
+            String format,
+            byte[] expectedValue,
+            int expectedCount)
             throws Exception {
         try (Table table = connection.getTable(path);
                 LogScanner scanner = table.newScan().createLogScanner()) {
             scanner.subscribeFromBeginning(0);
             int count = 0;
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            while (count < 2 && System.nanoTime() < deadline) {
+            while (count < expectedCount && System.nanoTime() < deadline) {
                 ScanRecords records = scanner.poll(Duration.ofSeconds(1));
                 for (ScanRecord record : records) {
                     InternalRow row = record.getRow();
-                    if (format.equals("raw")) {
+                    if (format.equals("binary")) {
                         assertThat(row.getBytes(0)).isEqualTo(expectedValue);
-                        assertThat(row.getBytes(3)).isEqualTo(KEY);
                     } else {
                         assertThat(row.getString(0).toString())
                                 .isEqualTo(new String(expectedValue, StandardCharsets.UTF_8));
-                        assertThat(row.getString(3).toString()).isEqualTo("key");
                     }
-                    assertThat(row.getTimestampNtz(1, 3).getMillisecond()).isEqualTo(123L);
-                    assertThat(row.getArray(2).size()).isEqualTo(2);
-                    assertThat(row.getArray(2).getRow(0, 2).getString(0).toString())
+                    assertThat(row.getBytes(3)).isEqualTo(KEY);
+                    assertThat(row.getMap(1).size()).isEqualTo(1);
+                    assertThat(row.getMap(1).keyArray().getString(0).toString())
                             .isEqualTo("source");
-                    assertThat(row.getArray(2).getRow(1, 2).isNullAt(1)).isTrue();
+                    assertThat(row.getMap(1).valueArray().isNullAt(0)).isTrue();
+                    assertThat(row.isNullAt(2)).isTrue();
                     count++;
                 }
             }
-            assertThat(count).isEqualTo(2);
+            assertThat(count).isEqualTo(expectedCount);
         }
     }
 
     private static TableDescriptor descriptor(String format) {
-        boolean raw = format.equals("raw");
+        boolean binary = format.equals("binary");
         return TableDescriptor.builder()
                 .schema(
                         Schema.newBuilder()
-                                .column("body", raw ? DataTypes.BYTES() : DataTypes.STRING())
-                                .column("received_at", DataTypes.TIMESTAMP(3).copy(false))
                                 .column(
-                                        "attributes",
-                                        DataTypes.ARRAY(
-                                                DataTypes.ROW(
-                                                        DataTypes.FIELD("name", DataTypes.STRING()),
-                                                        DataTypes.FIELD(
-                                                                "value", DataTypes.BYTES()))))
-                                .column("message_key", raw ? DataTypes.BYTES() : DataTypes.STRING())
+                                        "_kafka_value",
+                                        binary ? DataTypes.BYTES() : DataTypes.STRING())
+                                .column(
+                                        "_kafka_headers",
+                                        DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()))
+                                .column("_kafka_rescue", DataTypes.STRING())
+                                .column("_kafka_key", DataTypes.BYTES())
                                 .build())
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
-                .customProperty(KafkaDataFormat.KEY_FORMAT_CONFIG, format)
-                .customProperty(KafkaDataFormat.KEY_FIELDS_CONFIG, "message_key")
-                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, format)
-                .customProperty(KafkaDataFormat.VALUE_FIELDS_INCLUDE_CONFIG, "EXCEPT_KEY")
-                .customProperty(KafkaDataFormat.TIMESTAMP_COLUMN_CONFIG, "received_at")
-                .customProperty(KafkaDataFormat.HEADERS_COLUMN_CONFIG, "attributes")
+                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, format)
                 .build();
     }
 
@@ -322,6 +534,7 @@ class KafkaProduceAppendITCase {
     private static Configuration clusterConfig() {
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_ENABLED, true);
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, DATABASE);
         config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 3);
         config.set(ConfigOptions.LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER, 2);
         return config;

@@ -17,13 +17,16 @@
 
 package org.apache.fluss.kafka.backend.produce;
 
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.AuthorizationException;
+import org.apache.fluss.exception.DatabaseNotExistException;
 import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaTopicWritePlan;
@@ -89,7 +92,7 @@ class GatewayKafkaProduceBackendTest {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 2);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
         PartitionWrite partition =
                 recordsKind.equals("non-null")
                         ? good(0)
@@ -142,6 +145,7 @@ class GatewayKafkaProduceBackendTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         service,
+                        mapper(),
                         (records, table) -> {
                             seen.addAll(records);
                             return transcoder.transcode(records, table);
@@ -207,7 +211,8 @@ class GatewayKafkaProduceBackendTest {
         PartitionWrite malformed =
                 new PartitionWrite(
                         0,
-                        Collections.singletonList(
+                        Arrays.asList(
+                                good(0).records().get(0),
                                 new Record(
                                         1L,
                                         null,
@@ -220,8 +225,7 @@ class GatewayKafkaProduceBackendTest {
                                         (short) 1,
                                         topic("kafka.topic", malformed, good(1), good(8))))
                         .join();
-        assertErrors(
-                result, Errors.CORRUPT_MESSAGE, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+        assertErrors(result, Errors.INVALID_RECORD, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
         assertThat(service.append.getBucketsReqsList()).hasSize(1);
         assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
         assertThat(service.drains).isEqualTo(1);
@@ -267,13 +271,15 @@ class GatewayKafkaProduceBackendTest {
             org.apache.fluss.rpc.protocol.Errors.NOT_ENOUGH_REPLICAS_EXCEPTION,
             org.apache.fluss.rpc.protocol.Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND_EXCEPTION,
             org.apache.fluss.rpc.protocol.Errors.REQUEST_TIME_OUT,
-            org.apache.fluss.rpc.protocol.Errors.NOT_LEADER_OR_FOLLOWER
+            org.apache.fluss.rpc.protocol.Errors.NOT_LEADER_OR_FOLLOWER,
+            org.apache.fluss.rpc.protocol.Errors.CORRUPT_RECORD_EXCEPTION
         };
         Errors[] kafkaErrors = {
             Errors.NOT_ENOUGH_REPLICAS,
             Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND,
             Errors.REQUEST_TIMED_OUT,
-            Errors.NOT_LEADER_OR_FOLLOWER
+            Errors.NOT_LEADER_OR_FOLLOWER,
+            Errors.CORRUPT_MESSAGE
         };
         for (int i = 0; i < flussErrors.length; i++) {
             TestingProduceService service = new TestingProduceService();
@@ -322,6 +328,7 @@ class GatewayKafkaProduceBackendTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         service,
+                        mapper(),
                         (records, tableInfo) -> {
                             transcodedPaths.add(tableInfo.getTablePath());
                             return transcoder.transcode(records, tableInfo);
@@ -359,7 +366,7 @@ class GatewayKafkaProduceBackendTest {
                         .write(
                                 command(
                                         (short) 1,
-                                        topic("topic", good(0)),
+                                        topic(".", good(0)),
                                         topic("kafka.topic.extra", good(0)),
                                         topic("kafka.__internal", good(0)),
                                         topic("kafka.topic", good(0))))
@@ -405,7 +412,7 @@ class GatewayKafkaProduceBackendTest {
                     }
                 };
         GatewayKafkaProduceBackend backend =
-                new GatewayKafkaProduceBackend(service, service, transcoder);
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
         backend.write(command((short) 1, topic("kafka.topic", good(0), good(1)))).join();
         backend.write(command((short) 1, topic("kafka.topic", good(0)))).join();
         assertThat(service.metadataPaths).hasSize(2);
@@ -439,7 +446,7 @@ class GatewayKafkaProduceBackendTest {
         service.appended = new CountDownLatch(2);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
         try {
             CompletableFuture<KafkaProduceResult> first =
                     backend.write(command((short) -1, topic("kafka.topic", good(0))));
@@ -482,6 +489,7 @@ class GatewayKafkaProduceBackendTest {
                 new GatewayKafkaProduceBackend(
                         service,
                         service,
+                        mapper(),
                         (records, table) -> {
                             snapshots.add(table);
                             return transcoder.transcode(records, table);
@@ -491,15 +499,31 @@ class GatewayKafkaProduceBackendTest {
         try {
             assertErrors(backend.write(command).get(10, TimeUnit.SECONDS), Errors.NONE);
             assertErrors(backend.write(command).get(10, TimeUnit.SECONDS), Errors.NONE);
+            TableDescriptor changedSchema =
+                    TableDescriptor.builder()
+                            .schema(
+                                    Schema.newBuilder()
+                                            .column("_kafka_value", DataTypes.BYTES())
+                                            .build())
+                            .distributedBy(3)
+                            .logFormat(LogFormat.ARROW)
+                            .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                            .build();
             service.pendingMetadata =
                     CompletableFuture.completedFuture(
-                            metadata(false).setTableId(84L).setSchemaId(2).setBucketCountEpoch(7L));
+                            metadata(false)
+                                    .setTableId(84L)
+                                    .setSchemaId(2)
+                                    .setBucketCountEpoch(7L)
+                                    .setTableJson(changedSchema.toJsonBytes()));
             assertErrors(backend.write(command).get(10, TimeUnit.SECONDS), Errors.NONE);
             assertThat(snapshots).hasSize(3);
             assertThat(snapshots.get(1)).isSameAs(snapshots.get(0));
             assertThat(snapshots.get(2)).isNotSameAs(snapshots.get(0));
             assertThat(snapshots.get(2).getTableId()).isEqualTo(84L);
             assertThat(snapshots.get(2).getSchemaId()).isEqualTo(2);
+            assertThat(snapshots.get(2).getRowType().getTypeAt(0)).isEqualTo(DataTypes.BYTES());
             assertThat(snapshots.get(2).getBucketCountEpoch()).isEqualTo(7L);
             assertThat(service.appends)
                     .extracting(ProduceLogRequest::getTableId)
@@ -524,7 +548,7 @@ class GatewayKafkaProduceBackendTest {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 1);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
         try {
             CompletableFuture<KafkaProduceResult> result =
                     backend.write(command((short) -1, topic("kafka.topic", good(0))));
@@ -551,7 +575,7 @@ class GatewayKafkaProduceBackendTest {
         service.metadataEntered = new CountDownLatch(1);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
         KafkaProduceCommand command = command((short) 1, topic("kafka.topic", good(0)));
         try {
             CompletableFuture<KafkaProduceResult> running = backend.write(command);
@@ -572,8 +596,282 @@ class GatewayKafkaProduceBackendTest {
         }
     }
 
+    @Test
+    void testAliasesSharePlansAndAuthorizationButRetainRequestNames() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        RecordingTranscoder transcoder = new RecordingTranscoder();
+        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 4);
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder, executor);
+        try {
+            KafkaProduceResult result =
+                    backend.write(
+                                    command(
+                                            (short) 1,
+                                            topic("topic", good(0)),
+                                            topic("kafka.topic", good(0))))
+                            .get(10, TimeUnit.SECONDS);
+            assertThat(result.topics())
+                    .extracting(KafkaProduceResult.TopicResult::topicName)
+                    .containsExactly("topic", "kafka.topic");
+            assertThat(result.topics())
+                    .allSatisfy(
+                            topic ->
+                                    assertThat(topic.partitions().get(0).error())
+                                            .isEqualTo(Errors.NONE));
+            assertThat(service.metadataPaths)
+                    .containsExactly(
+                            TablePath.of("kafka", "topic"), TablePath.of("kafka", "topic"));
+            assertThat(service.appends)
+                    .extracting(ProduceLogRequest::getTableId)
+                    .containsExactly(42L, 42L);
+            assertThat(service.writeChecks).isEqualTo(2);
+            assertThat(transcoder.prepared).hasSize(2);
+            assertThat(transcoder.prepared.get(0)).isSameAs(transcoder.prepared.get(1));
+        } finally {
+            executor.closeAsync().get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDisabledAndResetFlagsRejectBothNamesBeforePrepare(boolean allNull) throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        RecordingTranscoder transcoder = new RecordingTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
+        PartitionWrite partition = allNull ? nullValue(0) : good(0);
+        assertErrors(
+                backend.write(command((short) 1, topic("topic", partition))).join(), Errors.NONE);
+        for (boolean reset : new boolean[] {false, true}) {
+            TableDescriptor enabled = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+            java.util.Map<String, String> properties =
+                    new java.util.HashMap<>(enabled.getProperties());
+            if (reset) {
+                properties.remove(ConfigOptions.TABLE_KAFKA_ENABLED.key());
+            } else {
+                properties.put(ConfigOptions.TABLE_KAFKA_ENABLED.key(), "false");
+            }
+            service.pendingMetadata =
+                    CompletableFuture.completedFuture(
+                            metadata(false)
+                                    .setTableJson(
+                                            enabled.withProperties(properties).toJsonBytes()));
+            int prepared = transcoder.prepared.size();
+            int appended = service.appends.size();
+            int authorized = service.writeChecks;
+            for (String name : Arrays.asList("topic", "kafka.topic")) {
+                assertErrors(
+                        backend.write(command((short) 1, topic(name, partition))).join(),
+                        Errors.UNKNOWN_TOPIC_OR_PARTITION);
+            }
+            assertThat(transcoder.prepared).hasSize(prepared);
+            assertThat(service.appends).hasSize(appended);
+            assertThat(service.writeChecks).isEqualTo(authorized);
+            service.pendingMetadata = CompletableFuture.completedFuture(metadata(false));
+            assertErrors(
+                    backend.write(command((short) 1, topic("kafka.topic", partition))).join(),
+                    Errors.NONE);
+            assertThat(transcoder.prepared.get(prepared))
+                    .isNotSameAs(transcoder.prepared.get(prepared - 1));
+        }
+        assertThat(service.metadataPaths).hasSize(7);
+    }
+
+    @Test
+    void testPropertyOnlyChangesRejectInvalidContractsAndRecompileRecoveredPlan() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        RecordingTranscoder transcoder = new RecordingTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
+        assertErrors(
+                backend.write(command((short) 1, topic("topic", good(0)))).join(), Errors.NONE);
+        TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+        for (TableDescriptor invalid :
+                Arrays.asList(
+                        TableDescriptor.builder(original)
+                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                                .build(),
+                        TableDescriptor.builder(original)
+                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, "nested")
+                                .build(),
+                        TableDescriptor.builder(original)
+                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE, "string")
+                                .build())) {
+            service.pendingMetadata =
+                    CompletableFuture.completedFuture(
+                            metadata(false).setTableJson(invalid.toJsonBytes()));
+            for (String name : Arrays.asList("topic", "kafka.topic")) {
+                assertErrors(
+                        backend.write(command((short) 1, topic(name, nullValue(0)))).join(),
+                        Errors.INVALID_TOPIC_EXCEPTION);
+            }
+        }
+        assertThat(service.appends).hasSize(1);
+        assertThat(transcoder.prepared).hasSize(1);
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false)
+                                .setTableJson(
+                                        TableDescriptor.builder(original)
+                                                .property(
+                                                        ConfigOptions
+                                                                .TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                                        "STRING")
+                                                .build()
+                                                .toJsonBytes()));
+        assertErrors(
+                backend.write(command((short) 1, topic("kafka.topic", good(0)))).join(),
+                Errors.NONE);
+        assertThat(transcoder.prepared).hasSize(2);
+        assertThat(transcoder.prepared.get(1)).isNotSameAs(transcoder.prepared.get(0));
+        assertThat(transcoder.prepared.get(1).tableInfo().getSchemaId()).isEqualTo(1);
+        assertThat(service.appends).hasSize(2);
+        assertThat(service.metadataPaths).hasSize(8);
+    }
+
+    @Test
+    void testMissingDefaultAndExplicitDatabasesDoNotFallback() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "missing_db");
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(
+                        service,
+                        service,
+                        new KafkaTopicMapper(config),
+                        new ArrowKafkaRecordTranscoder());
+        KafkaProduceResult result =
+                backend.write(
+                                command(
+                                        (short) 1,
+                                        topic("topic", good(0)),
+                                        topic("missing_db.topic", good(0)),
+                                        topic("other.topic", good(0))))
+                        .join();
+        assertThat(result.topics())
+                .extracting(topic -> topic.partitions().get(0).error())
+                .containsExactly(
+                        Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                        Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                        Errors.NONE);
+        assertThat(service.metadataPaths)
+                .containsExactly(
+                        TablePath.of("missing_db", "topic"),
+                        TablePath.of("missing_db", "topic"),
+                        TablePath.of("other", "topic"));
+        assertThat(service.appends).extracting(ProduceLogRequest::getTableId).containsExactly(43L);
+    }
+
+    @Test
+    void testRecordNullabilityFailureDoesNotAppendValidPrefix() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false)
+                                .setTableJson(
+                                        TableDescriptor.builder(original)
+                                                .schema(
+                                                        Schema.newBuilder()
+                                                                .column(
+                                                                        "_kafka_value",
+                                                                        DataTypes.STRING())
+                                                                .column(
+                                                                        "_kafka_key",
+                                                                        DataTypes.BYTES()
+                                                                                .copy(false))
+                                                                .build())
+                                                .build()
+                                                .toJsonBytes()));
+        Record valid = new Record(1L, new byte[] {1}, new byte[] {65}, Collections.emptyList());
+        assertErrors(
+                backend(service)
+                        .write(
+                                command(
+                                        (short) 1,
+                                        topic(
+                                                "topic",
+                                                new PartitionWrite(
+                                                        0,
+                                                        Arrays.asList(
+                                                                valid, good(0).records().get(0))))))
+                        .join(),
+                Errors.INVALID_RECORD);
+        assertThat(service.appends).isEmpty();
+        assertThat(service.drains).isZero();
+    }
+
+    @Test
+    void testMetadataOffsetsAndJsonCannotBeActivatedByFilteredRecords() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+        TableDescriptor unsupportedMetadata =
+                TableDescriptor.builder(original)
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.STRING())
+                                        .column(
+                                                "_kafka_metadata",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "timestamp",
+                                                                DataTypes.TIMESTAMP_LTZ(3)),
+                                                        DataTypes.FIELD(
+                                                                "timestamp_type", DataTypes.INT()),
+                                                        DataTypes.FIELD(
+                                                                "partition", DataTypes.INT()),
+                                                        DataTypes.FIELD(
+                                                                "offset", DataTypes.BIGINT())))
+                                        .build())
+                        .build();
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false).setTableJson(unsupportedMetadata.toJsonBytes()));
+        GatewayKafkaProduceBackend backend = backend(service);
+        assertErrors(
+                backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
+                Errors.INVALID_TOPIC_EXCEPTION);
+        TableDescriptor json =
+                TableDescriptor.builder(original)
+                        .schema(Schema.newBuilder().column("business", DataTypes.STRING()).build())
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .build();
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(metadata(false).setTableJson(json.toJsonBytes()));
+        assertErrors(
+                backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
+                Errors.INVALID_RECORD);
+        assertThat(service.appends).isEmpty();
+        assertThat(service.writeChecks).isZero();
+    }
+
+    private static final class RecordingTranscoder implements KafkaRecordTranscoder {
+        private final ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        private final List<KafkaTopicWritePlan> prepared = new ArrayList<>();
+
+        @Override
+        public KafkaTopicWritePlan prepare(TableInfo table) {
+            KafkaTopicWritePlan plan = arrow.prepare(table);
+            prepared.add(plan);
+            return plan;
+        }
+
+        @Override
+        public BytesView transcode(List<Record> records, TableInfo table) throws Exception {
+            return arrow.transcode(records, table);
+        }
+    }
+
+    private static KafkaTopicMapper mapper() {
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "kafka");
+        return new KafkaTopicMapper(config);
+    }
+
     private static GatewayKafkaProduceBackend backend(TestingProduceService service) {
-        return new GatewayKafkaProduceBackend(service, service, new ArrowKafkaRecordTranscoder());
+        return new GatewayKafkaProduceBackend(
+                service, service, mapper(), new ArrowKafkaRecordTranscoder());
     }
 
     private static KafkaProduceCommand command(short acks, TopicWrite... topics) throws Exception {
@@ -595,11 +893,15 @@ class GatewayKafkaProduceBackendTest {
     private static GetTableInfoResponse metadata(boolean invalid) {
         TableDescriptor.Builder descriptor =
                 TableDescriptor.builder()
-                        .schema(Schema.newBuilder().column("value", DataTypes.STRING()).build())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.STRING())
+                                        .build())
                         .distributedBy(3)
-                        .logFormat(LogFormat.ARROW);
+                        .logFormat(LogFormat.ARROW)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true);
         if (!invalid) {
-            descriptor.customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "string");
+            descriptor.property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "string");
         }
         return new GetTableInfoResponse()
                 .setTableId(42L)
@@ -653,6 +955,9 @@ class GatewayKafkaProduceBackendTest {
             if (metadataEntered != null) {
                 metadataEntered.countDown();
             }
+            if (database.equals("missing_db")) {
+                throw new DatabaseNotExistException("missing_db");
+            }
             if (name.equals("missing")) {
                 if (!asyncMissing) {
                     throw new TableNotExistException("missing");
@@ -699,7 +1004,6 @@ class GatewayKafkaProduceBackendTest {
 
         @Override
         public void tryCompleteActions() {
-            assertThat(append).isNotNull();
             drains++;
             if (appended != null) {
                 appended.countDown();

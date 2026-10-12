@@ -18,9 +18,8 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.config.ConfigOptions;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
-import org.apache.fluss.kafka.schema.KafkaTopicSchema;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -212,13 +211,12 @@ class KafkaCompiledWritePlanCacheTest {
                                 () ->
                                         plan.rowAssembler()
                                                 .assemble(
-                                                        new Object[0],
                                                         new Object[] {
                                                             Integer.toString(id)
                                                                     .getBytes(
                                                                             StandardCharsets.UTF_8)
                                                         },
-                                                        id,
+                                                        null,
                                                         new ArrayList<>())
                                                 .getField(0)));
             }
@@ -248,7 +246,7 @@ class KafkaCompiledWritePlanCacheTest {
     }
 
     private static KafkaTopicWritePlan compile(TableInfo tableInfo) {
-        KafkaTopicSchema schema =
+        KafkaTableSchema schema =
                 new KafkaTopicSchemaResolver().resolve(tableInfo.toTableDescriptor());
         return new KafkaTopicWritePlan(tableInfo, schema);
     }
@@ -257,11 +255,18 @@ class KafkaCompiledWritePlanCacheTest {
             String tableName, long tableId, int schemaId, String propertyValue) {
         TableDescriptor descriptor =
                 TableDescriptor.builder()
-                        .schema(Schema.newBuilder().column("payload", DataTypes.BYTES()).build())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .column("_kafka_key", DataTypes.BYTES())
+                                        .build())
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
-                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
-                        .customProperty("application.version", propertyValue)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE,
+                                propertyValue.equals("v1") ? "binary" : "BINARY")
                         .build();
         return TableInfo.of(
                 TablePath.of("kafka", tableName), tableId, schemaId, descriptor, null, 1L, 1L);
