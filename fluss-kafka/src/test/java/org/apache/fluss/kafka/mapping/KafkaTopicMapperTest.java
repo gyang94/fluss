@@ -17,6 +17,8 @@
 
 package org.apache.fluss.kafka.mapping;
 
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.TablePath;
 
 import org.apache.kafka.common.Uuid;
@@ -49,11 +51,41 @@ public class KafkaTopicMapperTest {
         }
     }
 
+    @Test
+    void testDefaultDatabaseAliases() {
+        assertThat(mapper.toTablePath("orders")).isEqualTo(mapper.toTablePath("kafka.orders"));
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "sales");
+        KafkaTopicMapper custom = new KafkaTopicMapper(config);
+        assertThat(custom.toTablePath("orders")).isEqualTo(TablePath.of("sales", "orders"));
+        assertThat(custom.toTablePath("warehouse.orders"))
+                .isEqualTo(TablePath.of("warehouse", "orders"));
+        assertThat(custom.toTopicName(custom.toTablePath("orders"))).isEqualTo("sales.orders");
+        config.setString("kafka.database", "legacy");
+        assertThat(new KafkaTopicMapper(config).toTablePath("orders"))
+                .isEqualTo(TablePath.of("sales", "orders"));
+    }
+
+    @Test
+    void testInvalidDefaultDatabaseAndCanonicalAliasLength() {
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "bad.name");
+        assertThatThrownBy(() -> new KafkaTopicMapper(config)).hasMessageContaining("invalid");
+        config.set(
+                ConfigOptions.KAFKA_DEFAULT_DATABASE,
+                String.join("", Collections.nCopies(128, "d")));
+        KafkaTopicMapper longDatabase = new KafkaTopicMapper(config);
+        assertThatThrownBy(
+                        () ->
+                                longDatabase.toTablePath(
+                                        String.join("", Collections.nCopies(128, "t"))))
+                .isInstanceOf(InvalidTopicException.class);
+    }
+
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(
             strings = {
-                "orders",
                 ".orders",
                 "sales.",
                 "sales.orders.extra",

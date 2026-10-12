@@ -507,7 +507,7 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
 
         // validate table descriptor before creating table in lake or fluss metadata,
         // to avoid orphaned lake tables when validation fails
-        metadataManager.validateTableDescriptor(tableDescriptor);
+        metadataManager.validateTableDescriptor(tablePath, tableDescriptor);
 
         // the distribution and bucket count must be set now
         //noinspection OptionalGetWithoutIsPresent
@@ -615,7 +615,8 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                     tablePath,
                     alterSchemaChanges,
                     request.isIgnoreIfNotExists(),
-                    currentSession().getPrincipal());
+                    currentSession().getPrincipal(),
+                    coordinatorZkVersionSupplier.get());
         }
 
         if (hasConfigChanges) {
