@@ -208,10 +208,15 @@ public class KafkaMetadataITCase {
                                     assertThat(partition.isrNodes())
                                             .containsExactlyInAnyOrder(0, 1);
                                 });
-                assertThat(alias.topicId()).isEqualTo(canonical.topicId());
+                assertThat(alias.topicId())
+                        .isEqualTo(
+                                version >= 10
+                                        ? new Uuid(0x466c757373410000L, tableId)
+                                        : Uuid.ZERO_UUID);
                 if (version >= 10) {
-                    assertThat(alias.topicId())
+                    assertThat(canonical.topicId())
                             .isEqualTo(new Uuid(0x466c757373000000L, tableId))
+                            .isNotEqualTo(alias.topicId())
                             .isNotEqualTo(response.data().topics().find("sales.events").topicId());
                 }
                 assertThat(response.data().topics().find("missing_db.events").errorCode())
@@ -355,9 +360,15 @@ public class KafkaMetadataITCase {
                                         .topics()
                                         .find("custom_default.events")
                                         .partitions());
+                assertThat(alias.topicId())
+                        .isEqualTo(
+                                version >= 10
+                                        ? new Uuid(0x466c757373410000L, customId)
+                                        : Uuid.ZERO_UUID);
                 if (version >= 10) {
-                    assertThat(alias.topicId())
+                    assertThat(response.data().topics().find("custom_default.events").topicId())
                             .isEqualTo(new Uuid(0x466c757373000000L, customId))
+                            .isNotEqualTo(alias.topicId())
                             .isNotEqualTo(response.data().topics().find("fluss.events").topicId());
                 }
                 assertThat(query(node, allTopics(version)).data().topics())
@@ -403,7 +414,11 @@ public class KafkaMetadataITCase {
                 assertThat(topic.topicId())
                         .isEqualTo(
                                 enabled && version >= 10
-                                        ? new Uuid(0x466c757373000000L, tableId)
+                                        ? new Uuid(
+                                                name.indexOf('.') >= 0
+                                                        ? 0x466c757373000000L
+                                                        : 0x466c757373410000L,
+                                                tableId)
                                         : Uuid.ZERO_UUID);
             }
             assertThat(response.data().topics().find("sales.unset").errorCode())
