@@ -32,6 +32,7 @@ import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InvalidRequestException;
+import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.message.MetadataRequestData.MetadataRequestTopic;
 import org.apache.kafka.common.message.MetadataResponseData;
@@ -64,10 +65,12 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
                     true);
 
     private final KafkaMetadataBackend backend;
+    private final KafkaTopicMapper topicMapper;
 
     /** Creates a Metadata handler. */
-    public MetadataHandler(KafkaMetadataBackend backend) {
+    public MetadataHandler(KafkaMetadataBackend backend, KafkaTopicMapper topicMapper) {
         this.backend = checkNotNull(backend);
+        this.topicMapper = checkNotNull(topicMapper);
     }
 
     @Override
@@ -86,7 +89,7 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
                     throw new InvalidRequestException(
                             "Topic name must be set because topic ID lookup is not supported by "
                                     + "Metadata versions 10 and 11.");
-                } else if (!KafkaTopicMapper.isValidTopic(topic.name())) {
+                } else if (!isValidTopic(topic.name())) {
                     invalidTopics.add(
                             new KafkaClusterMetadata.Topic(
                                     topic.name(),
@@ -117,6 +120,17 @@ public final class MetadataHandler implements KafkaApiHandler<MetadataRequest> {
                                     request.version(),
                                     new KafkaClusterMetadata(metadata.brokers(), topics));
                         });
+    }
+
+    private boolean isValidTopic(String name) {
+        try {
+            // Validate the resolved path too: a bare name's canonical form includes the configured
+            // default database and must fit the same Kafka name limit as an explicit name.
+            topicMapper.toTablePath(name);
+            return true;
+        } catch (InvalidTopicException e) {
+            return false;
+        }
     }
 
     private static MetadataResponse toResponse(short version, KafkaClusterMetadata metadata) {

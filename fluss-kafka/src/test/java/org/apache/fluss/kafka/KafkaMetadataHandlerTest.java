@@ -17,9 +17,10 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.DatabaseNotExistException;
 import org.apache.fluss.exception.TableNotExistException;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -347,14 +348,17 @@ public class KafkaMetadataHandlerTest {
                 "kafka.no_mapping",
                 125L,
                 TableDescriptor.builder()
-                        .schema(Schema.newBuilder().column("body", DataTypes.BYTES()).build())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .build())
                         .distributedBy(2)
                         .build());
         service.putTable(
                 "kafka.bad_format",
                 126L,
                 TableDescriptor.builder(defaultDescriptor())
-                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "json")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "unimplemented")
                         .build());
         service.putTable(
                 "kafka.primary_key",
@@ -362,14 +366,14 @@ public class KafkaMetadataHandlerTest {
                 TableDescriptor.builder(defaultDescriptor())
                         .schema(
                                 Schema.newBuilder()
-                                        .column("body", DataTypes.BYTES().copy(false))
-                                        .primaryKey("body")
+                                        .column("_kafka_value", DataTypes.BYTES().copy(false))
+                                        .primaryKey("_kafka_value")
                                         .build())
                         .build());
         service.putTable(
                 "kafka.partitioned",
                 128L,
-                TableDescriptor.builder(defaultDescriptor()).partitionedBy("body").build());
+                TableDescriptor.builder(defaultDescriptor()).partitionedBy("_kafka_value").build());
         service.putTable(
                 "kafka.indexed",
                 129L,
@@ -377,17 +381,24 @@ public class KafkaMetadataHandlerTest {
         service.putTable("kafka.invalid topic", 130L);
         List<String> invalidMappings =
                 Arrays.asList(
-                        "kafka.no_mapping",
                         "kafka.bad_format",
                         "kafka.primary_key",
                         "kafka.partitioned",
-                        "kafka.indexed");
+                        "kafka.indexed",
+                        "kafka.invalid topic");
         for (short version = 0; version <= 11; version++) {
             MetadataResponse all = handle(service, allTopicsRequest(version), version);
+            List<String> exposed = new ArrayList<>(invalidMappings);
+            exposed.addAll(Arrays.asList("kafka.other", "kafka.topic"));
             assertThat(all.data().topics())
                     .extracting(MetadataResponseTopic::name)
-                    .containsExactly("kafka.other", "kafka.topic");
+                    .containsExactlyInAnyOrderElementsOf(exposed);
+            for (String name : invalidMappings) {
+                assertThat(all.data().topics().find(name).errorCode())
+                        .isEqualTo(Errors.INVALID_TOPIC_EXCEPTION.code());
+            }
             List<String> requested = new ArrayList<>(invalidMappings);
+            requested.add("kafka.no_mapping");
             requested.add("kafka.topic");
             requested.add("kafka.missing");
             MetadataResponse named =
@@ -409,6 +420,8 @@ public class KafkaMetadataHandlerTest {
                     .isEqualTo(Errors.NONE.code());
             assertThat(named.data().topics().find("kafka.missing").errorCode())
                     .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+            assertThat(named.data().topics().find("kafka.no_mapping").errorCode())
+                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
         }
     }
 
@@ -419,7 +432,7 @@ public class KafkaMetadataHandlerTest {
                 "kafka.topic",
                 123L,
                 TableDescriptor.builder(defaultDescriptor())
-                        .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "string")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "string")
                         .build());
         MetadataResponse invalid = handle(service, namedTopicRequest("kafka.topic"), (short) 11);
         assertThat(invalid.data().topics().find("kafka.topic").errorCode())
@@ -462,9 +475,9 @@ public class KafkaMetadataHandlerTest {
     }
 
     @Test
-    public void testRejectUnqualifiedAndMalformedNamesWithoutHidingValidTopics() {
+    public void testRejectMalformedNamesWithoutHidingValidTopics() {
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
-        List<String> invalidNames = Arrays.asList("topic", ".topic", "kafka.", "kafka.topic.extra");
+        List<String> invalidNames = Arrays.asList(".topic", "kafka.", "kafka.topic.extra");
         List<String> names = new ArrayList<>(invalidNames);
         names.add("kafka.topic");
         MetadataResponse response =
@@ -603,12 +616,220 @@ public class KafkaMetadataHandlerTest {
                 .isEqualTo(Errors.UNKNOWN_SERVER_ERROR.code());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"fluss", "custom_db"})
+    public void testAliasesPreserveRequestedNamesAndShareIdentity(String defaultDatabase) {
+        Configuration config = new Configuration();
+        if (!"fluss".equals(defaultDatabase)) {
+            config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, defaultDatabase);
+        }
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        String canonical = defaultDatabase + ".topic";
+        service.putTable(canonical, 777L);
+        service.putTable("sales.topic", 778L);
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse named =
+                    handle(
+                            service,
+                            topicsRequest(version, "topic", canonical, "sales.topic"),
+                            version,
+                            config);
+            assertThat(named.data().topics())
+                    .extracting(MetadataResponseTopic::name)
+                    .containsExactly("topic", canonical, "sales.topic");
+            assertThat(named.errorCounts()).containsOnlyKeys(Errors.NONE);
+            MetadataResponseTopic alias = named.data().topics().find("topic");
+            MetadataResponseTopic qualified = named.data().topics().find(canonical);
+            assertThat(alias.partitions()).isEqualTo(qualified.partitions());
+            assertThat(alias.topicId()).isEqualTo(qualified.topicId());
+            if (version >= 10) {
+                assertThat(alias.topicId())
+                        .isEqualTo(new Uuid(0x466c757373000000L, 777L))
+                        .isNotEqualTo(named.data().topics().find("sales.topic").topicId());
+            }
+            MetadataResponse all = handle(service, allTopicsRequest(version), version, config);
+            assertThat(all.data().topics())
+                    .extracting(MetadataResponseTopic::name)
+                    .contains(canonical, "sales.topic")
+                    .doesNotContain("topic")
+                    .doesNotHaveDuplicates();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testAliasSurvivesMissingDatabaseRetry(boolean failedFuture) {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        service.putTable("fluss.topic", 777L);
+        service.failListTablesAsFuture = failedFuture;
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse response =
+                    handle(
+                            service,
+                            topicsRequest(
+                                    version,
+                                    "topic",
+                                    "missing_db.topic",
+                                    "fluss.topic",
+                                    "kafka.topic"),
+                            version);
+            assertThat(response.brokers()).hasSize(2);
+            assertThat(response.data().topics()).hasSize(4);
+            for (String name : Arrays.asList("topic", "fluss.topic", "kafka.topic")) {
+                assertThat(response.data().topics().find(name).errorCode())
+                        .isEqualTo(Errors.NONE.code());
+                assertThat(response.data().topics().find(name).partitions()).hasSize(2);
+            }
+            assertThat(response.data().topics().find("missing_db.topic").errorCode())
+                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+            assertThat(response.data().topics().find("topic").topicId())
+                    .isEqualTo(response.data().topics().find("fluss.topic").topicId());
+        }
+        assertThat(service.listDatabasesCalls).isZero();
+        assertThat(service.listedDatabases)
+                .containsExactlyInAnyOrder("fluss", "kafka", "missing_db");
+    }
+
+    @Test
+    public void testMissingDefaultDatabaseNeverSearchesOtherDatabases() {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "missing_default");
+        MetadataResponse response =
+                handle(
+                        service,
+                        topicsRequest((short) 11, "topic", "kafka.topic"),
+                        (short) 11,
+                        config);
+        assertThat(response.data().topics().find("topic").errorCode())
+                .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+        assertThat(response.data().topics().find("kafka.topic").errorCode())
+                .isEqualTo(Errors.NONE.code());
+        assertThat(service.listDatabasesCalls).isZero();
+        assertThat(service.requestedTables)
+                .containsExactlyInAnyOrder("missing_default.topic", "kafka.topic");
+        assertThat(service.listedDatabases).containsExactlyInAnyOrder("missing_default", "kafka");
+    }
+
+    @Test
+    public void testAliasAuthorizationDoesNotFallbackToSameNamedVisibleTable() {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        service.putTable("fluss.topic", 777L);
+        service.hiddenTopics.add("fluss.topic");
+        service.putTable("sales.topic", 778L);
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse response =
+                    handle(
+                            service,
+                            topicsRequest(
+                                    version,
+                                    "topic",
+                                    "fluss.topic",
+                                    "sales.topic",
+                                    "missing_db.topic"),
+                            version);
+            for (String hidden : Arrays.asList("topic", "fluss.topic")) {
+                MetadataResponseTopic topic = response.data().topics().find(hidden);
+                assertThat(topic.errorCode()).isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+                assertThat(topic.topicId()).isEqualTo(Uuid.ZERO_UUID);
+                assertThat(topic.partitions()).isEmpty();
+            }
+            assertThat(response.data().topics().find("sales.topic").errorCode())
+                    .isEqualTo(Errors.NONE.code());
+            MetadataResponse all = handle(service, allTopicsRequest(version), version);
+            assertThat(all.data().topics())
+                    .extracting(MetadataResponseTopic::name)
+                    .contains("sales.topic")
+                    .doesNotContain("topic", "fluss.topic");
+        }
+        assertThat(service.requestedTables).doesNotContain("sales.other");
+    }
+
+    @Test
+    public void testPersistedEnablementControlsBothAliasesAndDiscovery() {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        TableDescriptor missingFlag =
+                TableDescriptor.builder()
+                        .schema(defaultDescriptor().getSchema())
+                        .distributedBy(2)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                        .build();
+        TableDescriptor disabledInvalid =
+                TableDescriptor.builder(defaultDescriptor())
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "unimplemented")
+                        .build();
+        for (TableDescriptor disabled : Arrays.asList(missingFlag, disabledInvalid)) {
+            service.putTable("fluss.topic", 777L, disabled);
+            for (short version = 0; version <= 11; version++) {
+                MetadataResponse named =
+                        handle(service, topicsRequest(version, "topic", "fluss.topic"), version);
+                assertThat(named.errors())
+                        .containsEntry("topic", Errors.UNKNOWN_TOPIC_OR_PARTITION)
+                        .containsEntry("fluss.topic", Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                assertThat(named.data().topics())
+                        .allSatisfy(
+                                topic -> {
+                                    assertThat(topic.topicId()).isEqualTo(Uuid.ZERO_UUID);
+                                    assertThat(topic.partitions()).isEmpty();
+                                });
+                assertThat(handle(service, allTopicsRequest(version), version).data().topics())
+                        .extracting(MetadataResponseTopic::name)
+                        .doesNotContain("topic", "fluss.topic");
+            }
+        }
+        service.putTable("fluss.topic", 777L);
+        MetadataResponse enabled =
+                handle(service, topicsRequest((short) 11, "topic", "fluss.topic"), (short) 11);
+        assertThat(enabled.errorCounts()).containsOnlyKeys(Errors.NONE);
+        assertThat(enabled.data().topics().find("topic").topicId())
+                .isEqualTo(new Uuid(0x466c757373000000L, 777L));
+        service.putTable("fluss.topic", 777L, disabledInvalid);
+        assertThat(handle(service, namedTopicRequest("topic"), (short) 11).errors())
+                .containsEntry("topic", Errors.UNKNOWN_TOPIC_OR_PARTITION);
+    }
+
+    @Test
+    public void testResolvedAliasNameLimitDoesNotHideValidTopic() {
+        String database = String.join("", Collections.nCopies(125, "d"));
+        String table = String.join("", Collections.nCopies(125, "t"));
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, database);
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        MetadataResponse response =
+                handle(
+                        service,
+                        topicsRequest((short) 11, table, "kafka.topic"),
+                        (short) 11,
+                        config);
+        assertThat(response.errors()).containsEntry(table, Errors.INVALID_TOPIC_EXCEPTION);
+        assertThat(response.data().topics().find("kafka.topic").errorCode())
+                .isEqualTo(Errors.NONE.code());
+        assertThat(service.requestedTables).containsExactly("kafka.topic");
+
+        // A historical enabled table with an unrepresentable canonical name must be visible as
+        // an error during discovery rather than silently classified as disabled.
+        service.putTable(database + "." + table, 777L);
+        assertThat(handle(service, allTopicsRequest((short) 11), (short) 11, config).errors())
+                .containsEntry(database + "." + table, Errors.INVALID_TOPIC_EXCEPTION);
+    }
+
+    private static MetadataRequest topicsRequest(short version, String... names) {
+        return new MetadataRequest(
+                new MetadataRequestData()
+                        .setTopics(
+                                MetadataRequest.convertToMetadataRequestTopic(
+                                        Arrays.asList(names))),
+                version);
+    }
+
     private static TableDescriptor defaultDescriptor() {
         return TableDescriptor.builder()
-                .schema(Schema.newBuilder().column("body", DataTypes.BYTES()).build())
+                .schema(Schema.newBuilder().column("_kafka_value", DataTypes.BYTES()).build())
                 .distributedBy(2)
                 .logFormat(LogFormat.ARROW)
-                .customProperty(KafkaDataFormat.VALUE_FORMAT_CONFIG, "raw")
+                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
                 .build();
     }
 
@@ -631,7 +852,15 @@ public class KafkaMetadataHandlerTest {
 
     private static MetadataResponse handle(
             TestingMetadataGatewayService service, MetadataRequest requestBody, short version) {
-        KafkaRequestHandler handler = new KafkaRequestHandler(service, service);
+        return handle(service, requestBody, version, new Configuration());
+    }
+
+    private static MetadataResponse handle(
+            TestingMetadataGatewayService service,
+            MetadataRequest requestBody,
+            short version,
+            Configuration config) {
+        KafkaRequestHandler handler = new KafkaRequestHandler(config, service, service);
         ByteBuf requestBuffer = ByteBufAllocator.DEFAULT.buffer();
         KafkaRequest request;
         try {
@@ -667,6 +896,9 @@ public class KafkaMetadataHandlerTest {
         private final Map<String, Long> tables = new LinkedHashMap<>();
         private final Map<String, TableDescriptor> descriptors = new LinkedHashMap<>();
         private int gatewayCalls;
+        private int listDatabasesCalls;
+        private final Set<String> requestedTables = new LinkedHashSet<>();
+        private final Set<String> listedDatabases = new LinkedHashSet<>();
         private String lastListenerName;
         private boolean topicLeaderAvailable = true;
         private int[] topicIsr = new int[] {1, 2};
@@ -686,6 +918,7 @@ public class KafkaMetadataHandlerTest {
         public CompletableFuture<ListDatabasesResponse> listDatabases(
                 ListDatabasesRequest request) {
             gatewayCalls++;
+            listDatabasesCalls++;
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             return CompletableFuture.completedFuture(
                     new ListDatabasesResponse().addAllDatabaseNames(databases));
@@ -696,6 +929,7 @@ public class KafkaMetadataHandlerTest {
             gatewayCalls++;
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             String database = request.getDatabaseName();
+            listedDatabases.add(database);
             if (database.equals(deleteDatabaseBeforeListing)) {
                 databases.remove(database);
                 tables.keySet().removeIf(name -> name.startsWith(database + "."));
@@ -739,6 +973,7 @@ public class KafkaMetadataHandlerTest {
             List<PbTableMetadata> topics = new ArrayList<>();
             for (PbTablePath tablePath : request.getTablePathsList()) {
                 String topicName = tablePath.getDatabaseName() + "." + tablePath.getTableName();
+                requestedTables.add(topicName);
                 // Native Metadata and listTables omit tables without DESCRIBE permission.
                 if (hiddenTopics.contains(topicName)) {
                     continue;
