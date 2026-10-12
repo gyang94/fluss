@@ -68,6 +68,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                         new GatewayKafkaProduceBackend(
                                                 service,
                                                 (TabletServerGateway) service,
+                                                topicMapper,
                                                 new ArrowKafkaRecordTranscoder(),
                                                 conversionExecutor))));
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
