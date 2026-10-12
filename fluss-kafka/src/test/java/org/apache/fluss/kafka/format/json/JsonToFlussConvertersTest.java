@@ -23,6 +23,9 @@ import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.Decimal;
+import org.apache.fluss.row.GenericArray;
+import org.apache.fluss.row.GenericMap;
+import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
@@ -43,12 +46,13 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.Collections;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Verifies strict scalar conversion without transport or Arrow dependencies. */
+/** Verifies strict schema-aware conversion without transport or Arrow dependencies. */
 class JsonToFlussConvertersTest {
     private static final ObjectMapper MAPPER =
             new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
@@ -161,6 +165,14 @@ class JsonToFlussConvertersTest {
                     .hasMessageContaining("$.field")
                     .hasMessageContaining("surrogate");
         }
+        assertThatThrownBy(
+                        () ->
+                                convert(
+                                        DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
+                                        "{\"?\":1,\"" + escaped + "\":2}"))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("$.field")
+                .hasMessageContaining("surrogate");
     }
 
     @Test
@@ -293,18 +305,20 @@ class JsonToFlussConvertersTest {
     }
 
     @Test
-    void testComplexTypesRemainUnsupportedAtThisStage() {
-        for (DataType type :
-                new DataType[] {
-                    DataTypes.ARRAY(DataTypes.INT()),
-                    DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()),
-                    DataTypes.ROW(DataTypes.INT())
-                }) {
+    void testComplexTypesUseThePublicSchemaContract() throws Exception {
+        DataType array = DataTypes.ARRAY(DataTypes.INT());
+        DataType map = DataTypes.MAP(DataTypes.STRING(), DataTypes.INT());
+        DataType row = DataTypes.ROW(DataTypes.FIELD("value", DataTypes.INT()));
+        for (DataType type : new DataType[] {array, map, row}) {
             KafkaTableSchema.validateJsonType(type);
-            assertThatThrownBy(() -> JsonToFlussConverters.create(type))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining("does not support");
+            assertThat(JsonToFlussConverters.create(type)).isNotNull();
         }
+        assertThat(convert(array, "[1,null]")).isEqualTo(new GenericArray(new Object[] {1, null}));
+        assertThat(convert(map, "{\"key\":1}"))
+                .isEqualTo(
+                        new GenericMap(
+                                Collections.singletonMap(BinaryString.fromString("key"), 1)));
+        assertThat(convert(row, "{\"value\":1}")).isEqualTo(GenericRow.of(1));
     }
 
     @ParameterizedTest
@@ -345,9 +359,7 @@ class JsonToFlussConvertersTest {
         // The top-level business field starts at zero; each child consumes one level.
         DataType atLimit = type;
         KafkaTableSchema.validateJsonType(atLimit);
-        assertThatThrownBy(() -> JsonToFlussConverters.create(atLimit))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("does not support");
+        assertThat(JsonToFlussConverters.create(atLimit)).isNotNull();
 
         DataType tooDeep = DataTypes.ROW(atLimit);
         String message =

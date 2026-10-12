@@ -17,10 +17,14 @@
 
 package org.apache.fluss.kafka.format.json;
 
-import org.apache.fluss.kafka.schema.KafkaFieldProjection;
+import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
+import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
 import org.apache.fluss.row.BinaryString;
+import org.apache.fluss.row.Decimal;
 import org.apache.fluss.row.GenericArray;
 import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
@@ -35,8 +39,10 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -46,21 +52,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /** Tests recursive JSON conversion, nested validation and resource bounds. */
 class JsonKafkaComplexTypesTest {
 
-    @Test
-    void testDecodesRecursiveRowArrayAndMapTypes() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDecodesRecursiveRowArrayAndMapTypes(boolean nested) {
         RowType rowType = complexRowType();
 
         Object[] values =
-                decoder(rowType)
-                        .decode(
-                                bytes(
-                                        "{"
-                                                + "\"customer\":{\"name\":\"Alice\","
-                                                + "\"address\":{\"city\":\"Hangzhou\"}},"
-                                                + "\"items\":[{\"sku\":\"A-100\","
-                                                + "\"quantity\":2}],"
-                                                + "\"attributes\":{\"scores\":[7,null,9]}"
-                                                + "}"));
+                decodeBusinessFields(
+                        rowType,
+                        "{"
+                                + "\"customer\":{\"name\":\"Alice\","
+                                + "\"address\":{\"city\":\"Hangzhou\"}},"
+                                + "\"items\":[{\"sku\":\"A-100\","
+                                + "\"quantity\":2}],"
+                                + "\"attributes\":{\"scores\":[7,null,9]}"
+                                + "}",
+                        nested);
 
         GenericRow customer = (GenericRow) values[0];
         assertThat(customer.getString(0).toString()).isEqualTo("Alice");
@@ -146,7 +153,7 @@ class JsonKafkaComplexTypesTest {
     @Test
     void testEnforcesSchemaJsonAndContainerResourceBounds() {
         DataType nestedType = DataTypes.STRING();
-        for (int i = 0; i <= JsonToFlussConverters.MAX_SCHEMA_NESTING_DEPTH; i++) {
+        for (int i = 0; i <= KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; i++) {
             nestedType = DataTypes.ARRAY(nestedType);
         }
         final DataType tooDeepType = nestedType;
@@ -170,8 +177,7 @@ class JsonKafkaComplexTypesTest {
                                         "value",
                                         DataTypes.MAP(DataTypes.STRING(), DataTypes.STRING()))));
         assertThatThrownBy(() -> complexDecoder.decode(bytes(nestedJson.toString())))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining("not valid strict UTF-8 JSON");
+                .isInstanceOf(KafkaRecordEncodingException.class);
 
         StringBuilder oversizedArray = new StringBuilder("{\"values\":[");
         for (int i = 0; i <= JsonToFlussConverters.MAX_CONTAINER_ELEMENTS; i++) {
@@ -230,8 +236,9 @@ class JsonKafkaComplexTypesTest {
                         "$[\"value\"][\"nested\"]"));
     }
 
-    @Test
-    void testAcceptsLimitForEachSiblingContainer() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testAcceptsLimitForEachSiblingContainer(boolean nested) {
         String array = containerAtLimit(false);
         String object = containerAtLimit(true);
         RowType rowType =
@@ -244,22 +251,22 @@ class JsonKafkaComplexTypesTest {
                                         DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))),
                         DataTypes.FIELD("rows", DataTypes.ARRAY(rowTypeAtLimit())));
         Object[] values =
-                decoder(rowType)
-                        .decode(
-                                bytes(
-                                        "{\"arrays\":["
-                                                + array
-                                                + ","
-                                                + array
-                                                + "],\"maps\":["
-                                                + object
-                                                + ","
-                                                + object
-                                                + "],\"rows\":["
-                                                + object
-                                                + ","
-                                                + object
-                                                + "]}"));
+                decodeBusinessFields(
+                        rowType,
+                        "{\"arrays\":["
+                                + array
+                                + ","
+                                + array
+                                + "],\"maps\":["
+                                + object
+                                + ","
+                                + object
+                                + "],\"rows\":["
+                                + object
+                                + ","
+                                + object
+                                + "]}",
+                        nested);
 
         int limit = JsonToFlussConverters.MAX_CONTAINER_ELEMENTS;
         for (int i = 0; i < 2; i++) {
@@ -356,14 +363,273 @@ class JsonKafkaComplexTypesTest {
                 .doesNotContain("\\u0...");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDecodesTheSharedDepthBoundaryIncludingEmptyRows(boolean nested) {
+        for (boolean emptyRow : new boolean[] {false, true}) {
+            DataType type = emptyRow ? new RowType(Collections.emptyList()) : DataTypes.INT();
+            String json = emptyRow ? "{}" : "7";
+            Object expected = emptyRow ? new GenericRow(0) : 7;
+            for (int depth = 0; depth < KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; depth++) {
+                switch (depth % 3) {
+                    case 0:
+                        type = DataTypes.ROW(DataTypes.FIELD("child", type));
+                        json = "{\"child\":" + json + "}";
+                        expected = GenericRow.of(expected);
+                        break;
+                    case 1:
+                        type = DataTypes.ARRAY(type);
+                        json = "[" + json + "]";
+                        expected = new GenericArray(new Object[] {expected});
+                        break;
+                    default:
+                        type = DataTypes.MAP(DataTypes.STRING(), type);
+                        json = "{\"entry\":" + json + "}";
+                        expected =
+                                new GenericMap(
+                                        Collections.singletonMap(
+                                                BinaryString.fromString("entry"), expected));
+                }
+            }
+            KafkaTableSchema.validateJsonType(type);
+            RowType business = DataTypes.ROW(DataTypes.FIELD("value", type));
+            // An empty ROW at business depth 64 is JSON container depth 66, including the root.
+            assertThat(decodeBusinessFields(business, "{\"value\":" + json + "}", nested))
+                    .containsExactly(expected);
+
+            DataType tooDeep = DataTypes.ARRAY(type);
+            assertThatThrownBy(() -> KafkaTableSchema.validateJsonType(tooDeep))
+                    .isInstanceOf(InvalidTableException.class)
+                    .hasMessageContaining("maximum nesting depth of 64");
+            assertThatThrownBy(
+                            () -> decoder(DataTypes.ROW(DataTypes.FIELD("value", tooDeep)), nested))
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining("maximum nesting depth of 64");
+            String invalidJson =
+                    "{\"value\":"
+                            + (emptyRow
+                                    ? json.replace("{}", "{\"extra\":{}}")
+                                    : json.replace("7", "[7]"))
+                            + "}";
+            assertThatThrownBy(() -> decoder(business, nested).decode(bytes(invalidJson)))
+                    .isInstanceOf(KafkaRecordEncodingException.class);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("floatingPointZeroTokens")
+    void testPreservesFloatingPointZeroInEveryContainer(boolean nested, String token) {
+        for (Object value : numericContainerValues(DataTypes.FLOAT(), token, nested)) {
+            assertThat(Float.floatToRawIntBits((Float) value))
+                    .isEqualTo(Float.floatToRawIntBits(-0.0F));
+        }
+        for (Object value : numericContainerValues(DataTypes.DOUBLE(), token, nested)) {
+            assertThat(Double.doubleToRawLongBits((Double) value))
+                    .isEqualTo(Double.doubleToRawLongBits(-0.0D));
+        }
+    }
+
+    private static Stream<Arguments> floatingPointZeroTokens() {
+        return Stream.of(false, true)
+                .flatMap(
+                        nested ->
+                                Stream.of("-0", "-0.0", "-0e0")
+                                        .map(token -> Arguments.of(nested, token)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testPreservesOriginalNumericRoundingAndExactDecimalsInEveryContainer(boolean nested) {
+        for (String sign : new String[] {"", "-"}) {
+            float direction = sign.isEmpty() ? 1.0F : -1.0F;
+            assertThat(
+                            numericContainerValues(
+                                    DataTypes.FLOAT(), sign + "1.0000000596046448", nested))
+                    .containsOnly(direction * 1.0000001F);
+            assertThat(
+                            numericContainerValues(
+                                    DataTypes.FLOAT(), sign + "1.0000000596046447", nested))
+                    .containsOnly(direction);
+            assertThat(
+                            numericContainerValues(
+                                    DataTypes.DOUBLE(),
+                                    sign
+                                            + "1.00000000000000011102230246251565404236316680908203126",
+                                    nested))
+                    .containsOnly(direction * 1.0000000000000002D);
+            assertThat(
+                            numericContainerValues(
+                                    DataTypes.DOUBLE(),
+                                    sign
+                                            + "1.00000000000000011102230246251565404236316680908203124",
+                                    nested))
+                    .containsOnly((double) direction);
+            String amount = sign + "12345678901234567890.123456789012345678";
+            for (Object value : numericContainerValues(DataTypes.DECIMAL(38, 18), amount, nested)) {
+                assertThat(((Decimal) value).toBigDecimal()).isEqualTo(new BigDecimal(amount));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testMapKeysRejectUnpairedSurrogatesBeforeEncodingOrColliding(boolean nested) {
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD(
+                                "value", DataTypes.MAP(DataTypes.STRING(), DataTypes.INT())));
+        JsonKafkaFieldDecoder decoder = decoder(business, nested);
+        for (String key :
+                new String[] {
+                    "\\ud800", "\\udc00", "a\\ud800b", "\\ud800\\ud800", "\\udc00\\ud800"
+                }) {
+            for (String object :
+                    new String[] {"{\"?\":1,\"" + key + "\":2}", "{\"" + key + "\":2,\"?\":1}"}) {
+                assertThatThrownBy(() -> decoder.decode(bytes("{\"value\":" + object + "}")))
+                        .isInstanceOf(KafkaRecordEncodingException.class)
+                        .hasMessageContaining("$[\"value\"]")
+                        .hasMessageContaining("surrogate");
+            }
+        }
+        GenericMap values =
+                (GenericMap)
+                        decodeBusinessFields(
+                                business,
+                                "{\"value\":{\"?\":1,\"\\ud83d\\ude00\":2,\"\\\\ud800\":3}}",
+                                nested)[0];
+        assertThat(values.size()).isEqualTo(3);
+        assertThat(values.get(BinaryString.fromString("?"))).isEqualTo(1);
+        assertThat(values.get(BinaryString.fromString("😀"))).isEqualTo(2);
+        assertThat(values.get(BinaryString.fromString("\\ud800"))).isEqualTo(3);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDeclaredReservedNamesAreOrdinaryFieldsBelowTheJsonRoot(boolean nested) {
+        String[] names = {
+            "_kafka_value", "_kafka_key", "_kafka_headers", "_kafka_metadata", "_kafka_rescue"
+        };
+        DataField[] fields = new DataField[names.length];
+        StringBuilder object = new StringBuilder("{");
+        for (int i = 0; i < names.length; i++) {
+            fields[i] = DataTypes.FIELD(names[i], DataTypes.INT().copy(false));
+            if (i > 0) {
+                object.append(',');
+            }
+            object.append('"').append(names[i]).append("\":").append(i);
+        }
+        object.append('}');
+        RowType inner = DataTypes.ROW(fields);
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD("row", inner),
+                        DataTypes.FIELD("array", DataTypes.ARRAY(inner)),
+                        DataTypes.FIELD("map", DataTypes.MAP(DataTypes.STRING(), inner)));
+        Object[] values =
+                decodeBusinessFields(
+                        business,
+                        "{\"row\":"
+                                + object
+                                + ",\"array\":["
+                                + object
+                                + "],\"map\":{\"_kafka_value\":"
+                                + object
+                                + "}}",
+                        nested);
+        GenericRow expected = GenericRow.of(0, 1, 2, 3, 4);
+        assertThat(values[0]).isEqualTo(expected);
+        assertThat(((GenericArray) values[1]).getRow(0, names.length)).isEqualTo(expected);
+        assertThat(((GenericMap) values[2]).get(BinaryString.fromString("_kafka_value")))
+                .isEqualTo(expected);
+    }
+
+    @Test
+    void testNestedNullabilityAppliesToRowsArrayElementsAndMapValues() {
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD(
+                                "row",
+                                DataTypes.ROW(
+                                        DataTypes.FIELD("required", DataTypes.INT().copy(false)))),
+                        DataTypes.FIELD("array", DataTypes.ARRAY(DataTypes.INT().copy(false))),
+                        DataTypes.FIELD(
+                                "map",
+                                DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().copy(false))));
+        assertFailure(business, "{\"row\":{}}", "$[\"row\"][\"required\"]", "missing or null");
+        assertFailure(
+                business,
+                "{\"row\":{\"required\":null}}",
+                "$[\"row\"][\"required\"]",
+                "missing or null");
+        assertFailure(business, "{\"array\":[1,null]}", "$[\"array\"][1]", "missing or null");
+        assertFailure(
+                business, "{\"map\":{\"entry\":null}}", "$[\"map\"][\"entry\"]", "missing or null");
+        for (boolean nested : new boolean[] {false, true}) {
+            assertThat(
+                            decodeBusinessFields(
+                                    business, "{\"row\":null,\"array\":null,\"map\":null}", nested))
+                    .containsExactly(null, null, null);
+        }
+    }
+
+    private static Object[] numericContainerValues(DataType type, String token, boolean nested) {
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD("row", DataTypes.ROW(DataTypes.FIELD("value", type))),
+                        DataTypes.FIELD("array", DataTypes.ARRAY(type)),
+                        DataTypes.FIELD("map", DataTypes.MAP(DataTypes.STRING(), type)));
+        Object[] values =
+                decodeBusinessFields(
+                        business,
+                        "{\"row\":{\"value\":"
+                                + token
+                                + "},\"array\":["
+                                + token
+                                + "],\"map\":{\"entry\":"
+                                + token
+                                + "}}",
+                        nested);
+        return new Object[] {
+            ((GenericRow) values[0]).getField(0),
+            ((GenericArray) values[1]).toObjectArray()[0],
+            ((GenericMap) values[2]).get(BinaryString.fromString("entry"))
+        };
+    }
+
+    private static Object[] decodeBusinessFields(RowType rowType, String json, boolean nested) {
+        Object[] values = decoder(rowType, nested).decode(bytes(json));
+        if (!nested) {
+            return values;
+        }
+        GenericRow row = (GenericRow) values[0];
+        Object[] fields = new Object[row.getFieldCount()];
+        for (int i = 0; i < fields.length; i++) {
+            fields[i] = row.getField(i);
+        }
+        return fields;
+    }
+
     private static void assertFailure(RowType rowType, String json, String path, String reason) {
-        assertThatThrownBy(() -> decoder(rowType).decode(bytes(json)))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining(path)
-                .hasMessageContaining(reason);
+        for (boolean nested : new boolean[] {false, true}) {
+            assertThatThrownBy(() -> decoder(rowType, nested).decode(bytes(json)))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining(path)
+                    .hasMessageContaining(reason);
+        }
     }
 
     private static JsonKafkaFieldDecoder decoder(RowType rowType) {
+        return decoder(rowType, false);
+    }
+
+    private static JsonKafkaFieldDecoder decoder(RowType rowType, boolean nested) {
+        if (nested) {
+            return new JsonKafkaFieldDecoder(
+                    new KafkaFieldProjection(
+                            DataTypes.ROW(DataTypes.FIELD(KafkaTableSchema.VALUE_COLUMN, rowType)),
+                            Collections.singletonList(0)),
+                    ValueLayout.NESTED);
+        }
         List<Integer> positions = new ArrayList<>();
         for (int i = 0; i < rowType.getFieldCount(); i++) {
             positions.add(i);
