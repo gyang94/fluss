@@ -187,7 +187,7 @@ class KafkaJsonSchemaTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testComplexBusinessFieldsRemainUnavailableUntilRecursiveConversion(boolean nested) {
+    void testComplexBusinessFieldsUseTheSharedContractInBothLayouts(boolean nested) {
         for (DataType type :
                 Arrays.asList(
                         DataTypes.ARRAY(DataTypes.INT()),
@@ -207,12 +207,9 @@ class KafkaJsonSchemaTest {
                                     ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
                                     nested ? "nested" : "flat")
                             .build();
-            // The persisted contract is valid, but this gateway stage must report INVALID_TOPIC
-            // before accepting records for a decoder that it does not yet implement.
-            assertThat(KafkaTableSchema.resolve(table).valueConversionType())
+            assertThat(resolver.resolve(table)).isEqualTo(KafkaTableSchema.resolve(table));
+            assertThat(resolver.resolve(table).valueConversionType())
                     .isEqualTo(KafkaValueConversionType.PARSE_JSON);
-            assertThatThrownBy(() -> resolver.resolve(table))
-                    .isInstanceOf(KafkaTopicSchemaException.class);
         }
     }
 

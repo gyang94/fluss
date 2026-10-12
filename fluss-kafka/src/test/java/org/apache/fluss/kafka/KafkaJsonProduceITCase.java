@@ -106,6 +106,39 @@ class KafkaJsonProduceITCase {
                     .field("rounded_float", DataTypes.FLOAT())
                     .build();
 
+    private static final RowType NUMBER_TYPE =
+            RowType.builder()
+                    .field("float_value", DataTypes.FLOAT().copy(false))
+                    .field("double_value", DataTypes.DOUBLE().copy(false))
+                    .field("rounded_float", DataTypes.FLOAT().copy(false))
+                    .field("amount", DataTypes.DECIMAL(30, 10).copy(false))
+                    .build();
+    private static final RowType CUSTOMER_TYPE =
+            RowType.builder()
+                    .field("name", DataTypes.STRING().copy(false))
+                    .field(KafkaTableSchema.KEY_COLUMN, DataTypes.INT())
+                    .field(KafkaTableSchema.VALUE_COLUMN, DataTypes.INT())
+                    .field(KafkaTableSchema.HEADERS_COLUMN, DataTypes.INT())
+                    .field(KafkaTableSchema.METADATA_COLUMN, DataTypes.INT())
+                    .field(KafkaTableSchema.RESCUE_COLUMN, DataTypes.INT())
+                    .build();
+    private static final RowType COMPLEX_TYPE =
+            RowType.builder()
+                    .field("id", DataTypes.INT().copy(false))
+                    .field("customer", CUSTOMER_TYPE)
+                    .field("measurements", NUMBER_TYPE)
+                    .field("float_values", DataTypes.ARRAY(DataTypes.FLOAT().copy(false)))
+                    .field("double_values", DataTypes.ARRAY(DataTypes.DOUBLE().copy(false)))
+                    .field(
+                            "float_attributes",
+                            DataTypes.MAP(DataTypes.STRING(), DataTypes.FLOAT().copy(false)))
+                    .field(
+                            "double_attributes",
+                            DataTypes.MAP(DataTypes.STRING(), DataTypes.DOUBLE().copy(false)))
+                    .field("items", DataTypes.ARRAY(NUMBER_TYPE.copy(false)))
+                    .field("attributes", DataTypes.MAP(DataTypes.STRING(), NUMBER_TYPE.copy(false)))
+                    .build();
+
     @RegisterExtension
     static final FlussClusterExtension CLUSTER =
             FlussClusterExtension.builder()
@@ -114,63 +147,165 @@ class KafkaJsonProduceITCase {
                     .setTabletServerListeners("FLUSS://localhost:0,KAFKA://localhost:0")
                     .build();
 
-    @Test
-    void testNestedJsonRoundTrip() throws Exception {
-        TableDescriptor descriptor =
-                descriptor(
-                                Schema.newBuilder()
-                                        .column(
-                                                "customer",
-                                                DataTypes.ROW(
-                                                        DataTypes.FIELD(
-                                                                "name",
-                                                                DataTypes.STRING().copy(false))))
-                                        .column(
-                                                "items",
-                                                DataTypes.ARRAY(DataTypes.INT().copy(false)))
-                                        .column(
-                                                "attributes",
-                                                DataTypes.MAP(
-                                                        DataTypes.STRING(),
-                                                        DataTypes.ROW(
-                                                                DataTypes.FIELD(
-                                                                        "count", DataTypes.INT()))))
-                                        .build())
-                        .build();
+    @ParameterizedTest
+    @CsvSource({"flat", "nested"})
+    void testComplexJsonRoundTripPreservesNumericValues(String layout) throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_complex_" + layout);
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            TablePath path = TablePath.of(DATABASE, "json_complex");
-            create(admin, path, descriptor);
+            create(admin, path, descriptor(COMPLEX_TYPE, layout, true, false, 1));
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
                 assertThat(producer.partitionsFor(path.toString())).hasSize(1);
-                assertThatThrownBy(
-                                () ->
-                                        producer.send(
-                                                        record(
-                                                                path,
-                                                                "{\"customer\":{\"name\":\"Alice\",\"extra\":1}}"))
-                                                .get(30, TimeUnit.SECONDS))
-                        .hasCauseInstanceOf(InvalidRecordException.class);
+                String[] negativeZeros = {"-0", "-0.0", "-0e0"};
+                for (int index = 0; index < negativeZeros.length; index++) {
+                    assertThat(
+                                    producer.send(
+                                                    new ProducerRecord<>(
+                                                            path.toString(),
+                                                            0,
+                                                            KEY,
+                                                            bytes(
+                                                                    complexJson(
+                                                                            index,
+                                                                            negativeZeros[index]))))
+                                            .get(30, TimeUnit.SECONDS)
+                                            .offset())
+                            .isEqualTo(index);
+                }
+                read(
+                        connection,
+                        path,
+                        0,
+                        negativeZeros.length,
+                        (row, index) -> {
+                            assertThat(row.getBytes(0)).isEqualTo(KEY);
+                            InternalRow value =
+                                    layout.equals("nested")
+                                            ? row.getRow(1, COMPLEX_TYPE.getFieldCount())
+                                            : row;
+                            int offset = layout.equals("nested") ? 0 : 1;
+                            assertThat(value.getInt(offset)).isEqualTo(index);
+                            InternalRow customer =
+                                    value.getRow(offset + 1, CUSTOMER_TYPE.getFieldCount());
+                            assertThat(customer.getString(0).toString()).isEqualTo("Alice");
+                            // Reserved system names are ordinary declared business fields below
+                            // root.
+                            for (int field = 1; field < CUSTOMER_TYPE.getFieldCount(); field++) {
+                                assertThat(customer.getInt(field)).isEqualTo(field);
+                            }
+                            assertNumbers(value.getRow(offset + 2, NUMBER_TYPE.getFieldCount()));
+                            assertThat(value.getArray(offset + 3).size()).isEqualTo(2);
+                            assertNegativeZero(value.getArray(offset + 3).getFloat(0));
+                            assertThat(value.getArray(offset + 3).getFloat(1))
+                                    .isEqualTo(1.0000001F);
+                            assertThat(value.getArray(offset + 4).size()).isEqualTo(1);
+                            assertNegativeZero(value.getArray(offset + 4).getDouble(0));
+                            InternalMap floats = value.getMap(offset + 5);
+                            assertThat(floats.size()).isEqualTo(2);
+                            assertThat(floats.keyArray().getString(0).toString()).isEqualTo("zero");
+                            assertNegativeZero(floats.valueArray().getFloat(0));
+                            assertThat(floats.keyArray().getString(1).toString())
+                                    .isEqualTo("rounded");
+                            assertThat(floats.valueArray().getFloat(1)).isEqualTo(1.0000001F);
+                            InternalMap doubles = value.getMap(offset + 6);
+                            assertThat(doubles.size()).isEqualTo(1);
+                            assertNegativeZero(doubles.valueArray().getDouble(0));
+                            assertThat(value.getArray(offset + 7).size()).isEqualTo(1);
+                            assertNumbers(
+                                    value.getArray(offset + 7)
+                                            .getRow(0, NUMBER_TYPE.getFieldCount()));
+                            InternalMap attributes = value.getMap(offset + 8);
+                            assertThat(attributes.size()).isEqualTo(1);
+                            assertThat(attributes.keyArray().getString(0).toString())
+                                    .isEqualTo("dynamic");
+                            assertNumbers(
+                                    attributes.valueArray().getRow(0, NUMBER_TYPE.getFieldCount()));
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"flat,false", "flat,true", "nested,false", "nested,true"})
+    void testInvalidComplexPartitionIsAtomicAndDoesNotBlockOtherPartitions(
+            String layout, boolean withRescue) throws Exception {
+        TablePath path =
+                TablePath.of(DATABASE, "json_complex_rejections_" + layout + "_" + withRescue);
+        List<String> invalidValues =
+                Arrays.asList(
+                        "{\"id\":1,\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
+                        "{\"id\":1,\"customer\":{}}",
+                        "{\"id\":1,\"customer\":{\"name\":null}}",
+                        "{\"id\":1,\"customer\":{\"name\":1}}",
+                        "{\"id\":1,\"customer\":[]}",
+                        "{\"id\":1,\"float_values\":[1,null]}",
+                        "{\"id\":1,\"double_values\":[1,\"bad\"]}",
+                        "{\"id\":1,\"float_values\":{}}",
+                        "{\"id\":1,\"float_attributes\":[]}",
+                        "{\"id\":1,\"double_attributes\":{\"bad\":null}}",
+                        "{\"id\":1,\"items\":[null]}",
+                        "{\"id\":1,\"items\":[{}]}",
+                        "{\"id\":1,\"attributes\":{\"bad\":null}}",
+                        "{\"id\":1,\"attributes\":{\"bad\":{}}}",
+                        // The escaped surrogate must not be encoded as '?' and overwrite that key.
+                        "{\"id\":1,\"float_attributes\":{\"?\":1,\"\\ud800\":2}}",
+                        "{\"id\":1,\"double_attributes\":{\"?\":1,\"\\udc00\":2}}");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor(COMPLEX_TYPE, layout, true, withRescue, 2));
+            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port());
+                    KafkaProducer<byte[], byte[]> producer = producer()) {
+                assertThat(producer.partitionsFor(path.toString())).hasSize(2);
+                for (int index = 0; index < invalidValues.size(); index++) {
+                    String name = index % 2 == 0 ? path.toString() : path.getTableName();
+                    ProduceResponse response =
+                            produce(
+                                    socket,
+                                    name,
+                                    MemoryRecords.withRecords(
+                                            Compression.NONE,
+                                            record(complexJson(1000, "-0")),
+                                            record(invalidValues.get(index))),
+                                    MemoryRecords.withRecords(
+                                            Compression.NONE, record(complexJson(index, "-0e0"))));
+                    PartitionProduceResponse rejected = partition(response, name, 0);
+                    assertThat(rejected.errorCode())
+                            .as(
+                                    "rejection for %s with rescue=%s",
+                                    invalidValues.get(index), withRescue)
+                            .isEqualTo(Errors.INVALID_RECORD.code());
+                    assertThat(rejected.baseOffset()).isEqualTo(-1L);
+                    PartitionProduceResponse accepted = partition(response, name, 1);
+                    assertThat(accepted.errorCode()).isEqualTo(Errors.NONE.code());
+                    assertThat(accepted.baseOffset()).isEqualTo(index);
+                }
                 assertThat(
                                 producer.send(
-                                                record(
-                                                        path,
-                                                        "{\"customer\":{\"name\":\"Alice\"},\"items\":[1,2],\"attributes\":{\"dynamic\":{\"count\":3}}}"))
+                                                new ProducerRecord<>(
+                                                        path.toString(),
+                                                        0,
+                                                        KEY,
+                                                        bytes(complexJson(-1, "-0.0"))))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
                         .isZero();
                 read(
                         connection,
                         path,
-                        row -> {
-                            assertThat(row.getRow(0, 1).getString(0).toString()).isEqualTo("Alice");
-                            assertThat(row.getArray(1).size()).isEqualTo(2);
-                            assertThat(row.getArray(1).getInt(1)).isEqualTo(2);
-                            assertThat(row.getMap(2).keyArray().getString(0).toString())
-                                    .isEqualTo("dynamic");
-                            assertThat(row.getMap(2).valueArray().getRow(0, 1).getInt(0))
-                                    .isEqualTo(3);
-                        });
+                        0,
+                        1,
+                        (row, index) ->
+                                assertThat(valueId(row, layout, COMPLEX_TYPE)).isEqualTo(-1));
+                read(
+                        connection,
+                        path,
+                        1,
+                        invalidValues.size(),
+                        (row, index) ->
+                                assertThat(valueId(row, layout, COMPLEX_TYPE)).isEqualTo(index));
             } finally {
                 admin.dropTable(path, true).get();
             }
@@ -613,6 +748,58 @@ class KafkaJsonProduceITCase {
         }
         assertThat(metadata.getInt(1)).isEqualTo(timestampType);
         assertThat(metadata.getInt(2)).isEqualTo(partition);
+    }
+
+    private static void assertNegativeZero(float value) {
+        assertThat(Float.floatToRawIntBits(value)).isEqualTo(Float.floatToRawIntBits(-0.0F));
+    }
+
+    private static void assertNegativeZero(double value) {
+        assertThat(Double.doubleToRawLongBits(value)).isEqualTo(Double.doubleToRawLongBits(-0.0D));
+    }
+
+    private static void assertNumbers(InternalRow row) {
+        assertNegativeZero(row.getFloat(0));
+        assertNegativeZero(row.getDouble(1));
+        assertThat(row.getFloat(2)).isEqualTo(1.0000001F);
+        assertThat(row.getDecimal(3, 30, 10).toBigDecimal())
+                .isEqualByComparingTo(new BigDecimal("12345678901234567890.1234567890"));
+    }
+
+    private static String complexJson(int id, String negativeZero) {
+        String numbers =
+                "{\"float_value\":"
+                        + negativeZero
+                        + ",\"double_value\":"
+                        + negativeZero
+                        + ",\"rounded_float\":1.0000000596046448,"
+                        + "\"amount\":12345678901234567890.1234567890}";
+        return "{\"id\":"
+                + id
+                + ",\"customer\":{\"name\":\"Alice\",\"_kafka_key\":1,\"_kafka_value\":2,"
+                + "\"_kafka_headers\":3,\"_kafka_metadata\":4,\"_kafka_rescue\":5},"
+                + "\"measurements\":"
+                + numbers
+                + ",\"float_values\":["
+                + negativeZero
+                + ",1.0000000596046448],\"double_values\":["
+                + negativeZero
+                + "],\"float_attributes\":{\"zero\":"
+                + negativeZero
+                + ",\"rounded\":1.0000000596046448},\"double_attributes\":{\"zero\":"
+                + negativeZero
+                + "},\"items\":["
+                + numbers
+                + "],\"attributes\":{\"dynamic\":"
+                + numbers
+                + "}}";
+    }
+
+    private static int valueId(InternalRow row, String layout, RowType valueType) {
+        return layout.equals("nested")
+                ? row.getRow(1, valueType.getFieldCount()).getInt(0)
+                : row.getInt(1);
+
     }
 
     private static int valueId(InternalRow row, String layout) {
