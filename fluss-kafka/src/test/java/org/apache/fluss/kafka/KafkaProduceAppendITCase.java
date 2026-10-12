@@ -242,7 +242,7 @@ class KafkaProduceAppendITCase {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
             admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            for (String format : new String[] {"raw", "string"}) {
+            for (String format : new String[] {"binary", "string"}) {
                 TablePath path = TablePath.of(DATABASE, "null_values_" + format);
                 admin.createTable(path, descriptor(format), false).get();
                 CLUSTER.waitUntilAllGatewayHasSameMetadata();
@@ -282,7 +282,7 @@ class KafkaProduceAppendITCase {
                             for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
                                 InternalRow row = record.getRow();
                                 byte[] expected = count == 0 ? new byte[0] : VALUE;
-                                if (format.equals("raw")) {
+                                if (format.equals("binary")) {
                                     assertThat(row.getBytes(0)).isEqualTo(expected);
                                 } else {
                                     assertThat(row.getString(0).toString())
@@ -290,8 +290,9 @@ class KafkaProduceAppendITCase {
                                                     new String(expected, StandardCharsets.UTF_8));
                                 }
                                 assertThat(row.isNullAt(3)).isTrue();
-                                assertThat(row.getTimestampNtz(1, 3).getMillisecond())
-                                        .isEqualTo(123L);
+                                assertThat(row.getMap(1).size()).isZero();
+                                assertThat(row.isNullAt(2)).isTrue();
+                                assertThat(record.logOffset()).isEqualTo(count);
                                 count++;
                             }
                         }
@@ -471,7 +472,25 @@ class KafkaProduceAppendITCase {
                         query(socket, existing.toString()), new String[] {existing.toString()}, 0L);
                 assertProduceOffsets(
                         query(socket, existing.toString()), new String[] {existing.toString()}, 1L);
-                assertReadback(connection, existing, "binary", VALUE);
+                try (KafkaProducer<byte[], byte[]> producer = producer(node, "all", 0)) {
+                    assertThat(
+                                    producer.send(
+                                                    new ProducerRecord<>(
+                                                            existing.toString(),
+                                                            0,
+                                                            123L,
+                                                            KEY,
+                                                            VALUE,
+                                                            Arrays.asList(
+                                                                    new RecordHeader(
+                                                                            "source", VALUE),
+                                                                    new RecordHeader(
+                                                                            "source", null))))
+                                            .get(30, TimeUnit.SECONDS)
+                                            .offset())
+                            .isEqualTo(2L);
+                }
+                assertReadback(connection, existing, "binary", VALUE, 3);
                 assertThat(admin.databaseExists("produce_missing_db").get()).isFalse();
                 assertThat(admin.databaseExists("another_missing_db").get()).isFalse();
             }
@@ -683,7 +702,11 @@ class KafkaProduceAppendITCase {
     }
 
     private static KafkaProducer<byte[], byte[]> producer(String acks, int batchSize) {
-        ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+        return producer(CLUSTER.getTabletServerNodes("KAFKA").get(0), acks, batchSize);
+    }
+
+    private static KafkaProducer<byte[], byte[]> producer(
+            ServerNode node, String acks, int batchSize) {
         Map<String, Object> config = new HashMap<>();
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, node.host() + ":" + node.port());
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
