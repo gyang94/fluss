@@ -46,6 +46,8 @@ public final class KafkaClientProbe {
             throw new IllegalStateException(
                     "Expected " + expectedVersion + " but loaded " + actualVersion);
         }
+        String mode = args[4];
+        System.out.println("MODE=" + mode);
         System.out.println("VERSION=" + actualVersion);
         System.out.println(
                 "JAR=" + KafkaProducer.class.getProtectionDomain().getCodeSource().getLocation());
@@ -59,7 +61,17 @@ public final class KafkaClientProbe {
                 config.put("key.serializer", ByteArraySerializer.class);
                 config.put("value.serializer", ByteArraySerializer.class);
                 config.put("enable.idempotence", false);
-                config.put("security.protocol", "PLAINTEXT");
+                config.put("security.protocol", mode);
+                if (mode.equals("SASL_PLAINTEXT")) {
+                    config.put("sasl.mechanism", "PLAIN");
+                    config.put(
+                            "sasl.jaas.config",
+                            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\""
+                                    + args[5]
+                                    + "\" password=\""
+                                    + args[6]
+                                    + "\";");
+                }
                 config.put("acks", acks);
                 config.put("max.in.flight.requests.per.connection", 1);
                 config.put("request.timeout.ms", 10000);

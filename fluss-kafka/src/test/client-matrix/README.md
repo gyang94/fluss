@@ -65,9 +65,33 @@ worktree's reactor, not another branch's installed SNAPSHOTs. A normal build
 without `kafka.client.matrix.file` still runs an isolated smoke test using the
 module's actual declared client version; that single-version run is not a matrix.
 
+## SASL mode
+
+The default remains `PLAINTEXT`. To run the prepared releases through
+`SASL_PLAINTEXT` with `PLAIN`, add this option to the Maven command:
+
+```sh
+-Dkafka.client.matrix.mode=SASL_PLAINTEXT
+```
+
+The fixture uses the existing default `fluss` database, explicitly enables each
+Kafka table, and grants the test principal table access. It does not create a
+database. Each child receives the selected mode and fixture credentials and
+continues to use only that release's verified runtime closure. Use a separate
+`-Dkafka.client.matrix.output=/tmp/my-matrix-run` for each validation stage.
+
+A transparent bootstrap proxy records the **observed** SaslHandshake version and
+either the raw-token frame length or SaslAuthenticate version. It does not record
+token contents. Metadata advertises the real broker endpoints, so this evidence
+covers the observed bootstrap connections, not every subsequent broker socket.
+The parent requires authentication evidence and successful native readback before
+marking a SASL version PASS. Forced v0 and v1 socket regressions also run in
+`KafkaSaslPlainAuthenticationITCase`; the matrix does not infer a wire version
+from the Kafka release number.
+
 ## Coverage and result interpretation
 
-For each selected version the probe uses PLAINTEXT and
+For each selected version the probe uses the selected transport mode and
 `enable.idempotence=false`, negotiates APIs through the real producer, and tests
 `acks=0`, `acks=1` and `acks=all`. The same producer alternates canonical and bare
 names for the same table, checking acknowledged topic names and offsets. Native
@@ -87,12 +111,15 @@ versions; never call the subset a full interval pass.
 
 Runtime evidence lives under:
 
-- `fluss-kafka/target/client-matrix-results/<version>/command.txt`
-- `fluss-kafka/target/client-matrix-results/<version>/client.log`
-- `fluss-kafka/target/client-matrix-results/<version>/result.txt`
+- `fluss-kafka/target/client-matrix-results/<mode>/<version>/command.txt`
+- `fluss-kafka/target/client-matrix-results/<mode>/<version>/client.log`
+- `fluss-kafka/target/client-matrix-results/<mode>/<version>/result.txt`
+- `fluss-kafka/target/client-matrix-results/<mode>/<version>/wire.txt`
 - `fluss-kafka/target/surefire-reports/TEST-org.apache.fluss.kafka.KafkaClientMatrixITCase.xml`
 
-Each invocation deletes the old result and log, writes `FAIL` with the error on
+Each mode invalidates its previous success markers before reading the manifest,
+then writes an incomplete `FAIL` marker for every selected version before
+execution. Each invocation starts a fresh log, writes `FAIL` with the error on
 failure, and only writes `PASS` after successful native readback. A client failure
 fails its parameterized test; other prepared versions still run. A missing JAR,
 version mismatch, process timeout or unsupported JDK is a failure, not a skipped
@@ -104,6 +131,11 @@ once and require both executions to succeed.
 This is a bounded Produce compatibility acceptance flow, not proof of every
 operation in the FIP. Leadership, lifecycle, min-ISR, invalid-record atomicity and
 null-value filtering run separately in the cumulative integration tests using the
-module client. They are not yet repeated for every matrix version. SASL is reserved
-for PR19. Idempotence, other client SDKs, pre-releases, versions outside the target
+module client. They are not repeated for every matrix version. PR19 additionally
+tests two-user
+ACL isolation, cached aliases, table enablement, flat/nested JSON and strict Rescue
+over forced SASL v0/v1 sockets. The full release matrix exercises bounded Produce
+acceptance in the selected transport mode; it does not repeat that entire suite
+for every release. Idempotence, other client SDKs, pre-releases, versions outside
+the target
 interval, and persisted per-row `_kafka_metadata.offset` are not covered here.
