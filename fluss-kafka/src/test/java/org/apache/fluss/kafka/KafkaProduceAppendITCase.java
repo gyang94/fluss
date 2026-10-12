@@ -32,6 +32,7 @@ import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
+import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
 import org.apache.fluss.types.DataTypes;
@@ -60,6 +61,7 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.DataInputStream;
@@ -189,14 +191,24 @@ class KafkaProduceAppendITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"gzip", "snappy", "lz4", "zstd"})
-    void testCompressedBatchPreservesRecordsInNativeStorage(String codec) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "compressed_" + codec);
+    @CsvSource({
+        "gzip,binary",
+        "snappy,binary",
+        "lz4,binary",
+        "zstd,binary",
+        "lz4,string",
+        "zstd,string"
+    })
+    void testCompressedBatchPreservesRecordsInNativeStorage(String codec, String format)
+            throws Exception {
+        TablePath path = TablePath.of(DATABASE, "compressed_" + codec + "_" + format);
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
             admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            admin.createTable(path, descriptor("raw"), false).get();
+            admin.createTable(path, descriptor(format), false).get();
             CLUSTER.waitUntilAllGatewayHasSameMetadata();
+            CLUSTER.waitAndGetLeaderReplica(
+                    new TableBucket(admin.getTableInfo(path).get().getTableId(), 0));
             try (KafkaProducer<byte[], byte[]> producer = compressedProducer(codec)) {
                 producer.partitionsFor(path.toString());
                 List<Future<RecordMetadata>> writes = new ArrayList<>();
@@ -208,10 +220,12 @@ class KafkaProduceAppendITCase {
                                             0,
                                             1000L + i,
                                             KEY,
-                                            ("value-" + i).getBytes(StandardCharsets.UTF_8),
+                                            ("消息-" + i).getBytes(StandardCharsets.UTF_8),
                                             Arrays.asList(
+                                                    new RecordHeader("source", null),
                                                     new RecordHeader("source", VALUE),
-                                                    new RecordHeader("source", null)))));
+                                                    new RecordHeader("nullable", VALUE),
+                                                    new RecordHeader("nullable", null)))));
                 }
                 producer.flush();
                 for (int i = 0; i < writes.size(); i++) {
@@ -226,23 +240,33 @@ class KafkaProduceAppendITCase {
                         for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
                             InternalRow row = record.getRow();
                             assertThat(record.logOffset()).isEqualTo(count);
-                            assertThat(row.getBytes(0))
-                                    .isEqualTo(
-                                            ("value-" + count).getBytes(StandardCharsets.UTF_8));
-                            assertThat(row.getTimestampNtz(1, 3).getMillisecond())
-                                    .isEqualTo(1000L + count);
+                            String expectedValue = "消息-" + count;
+                            if (format.equals("binary")) {
+                                assertThat(row.getBytes(0))
+                                        .isEqualTo(expectedValue.getBytes(StandardCharsets.UTF_8));
+                            } else {
+                                assertThat(row.getString(0).toString()).isEqualTo(expectedValue);
+                            }
                             assertThat(row.getBytes(3)).isEqualTo(KEY);
-                            assertThat(row.getArray(2).size()).isEqualTo(2);
-                            assertThat(row.getArray(2).getRow(0, 2).getString(0).toString())
-                                    .isEqualTo("source");
-                            assertThat(row.getArray(2).getRow(0, 2).getBytes(1)).isEqualTo(VALUE);
-                            assertThat(row.getArray(2).getRow(1, 2).getString(0).toString())
-                                    .isEqualTo("source");
-                            assertThat(row.getArray(2).getRow(1, 2).isNullAt(1)).isTrue();
+                            assertThat(row.isNullAt(2)).isTrue();
+                            InternalMap headers = row.getMap(1);
+                            Map<String, byte[]> values = new HashMap<>();
+                            for (int index = 0; index < headers.size(); index++) {
+                                values.put(
+                                        headers.keyArray().getString(index).toString(),
+                                        headers.valueArray().isNullAt(index)
+                                                ? null
+                                                : headers.valueArray().getBytes(index));
+                            }
+                            assertThat(headers.size()).isEqualTo(2);
+                            assertThat(values).containsOnlyKeys("source", "nullable");
+                            assertThat(values.get("source")).isEqualTo(VALUE);
+                            assertThat(values.get("nullable")).isNull();
                             count++;
                         }
                     }
                     assertThat(count).isEqualTo(50);
+                    assertThat(scanner.poll(Duration.ofMillis(100))).isEmpty();
                 }
             } finally {
                 admin.dropTable(path, true).get();

@@ -57,6 +57,7 @@ import org.apache.kafka.common.message.ProduceRequestData.TopicProduceData;
 import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceResponse;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.CompressionType;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.RecordBatch;
@@ -658,6 +659,146 @@ class KafkaJsonProduceITCase {
                             if (withRescue) {
                                 assertThat(row.getString(4).toString()).isEqualTo("{\"extra\":1}");
                             }
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"gzip,flat", "snappy,nested", "lz4,nested", "zstd,flat"})
+    void testCompressedJsonPreservesStrictRescueAndPartitionAtomicity(String codec, String layout)
+            throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_compressed_" + codec + "_" + layout);
+        RowType valueType =
+                RowType.builder()
+                        .field("id", DataTypes.INT().copy(false))
+                        .field(
+                                "profile",
+                                RowType.builder().field("name", DataTypes.STRING()).build())
+                        .build();
+        List<String> invalidValues =
+                Arrays.asList("{\"id\":1,\"profile\":{\"name\":{}}}", "{\"id\":null}", "{\"id\":1");
+        Compression compression = Compression.of(CompressionType.forName(codec)).build();
+        SimpleRecord filtered = new SimpleRecord(123L, KEY, (byte[]) null, new Header[0]);
+        int headersPosition = layout.equals("nested") ? 2 : 3;
+        int rescuePosition = headersPosition + 1;
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode expectedRescue =
+                mapper.readTree(
+                        "{\"extra\":3,\"profile\":{\"extra\":9},\"_kafka_key\":\"payload\"}");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor(valueType, layout, true, true, 2));
+            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port());
+                    KafkaProducer<byte[], byte[]> producer = producer(codec)) {
+                assertThat(producer.partitionsFor(path.toString())).hasSize(2);
+                for (int index = 0; index < invalidValues.size(); index++) {
+                    String name = index % 2 == 0 ? path.toString() : path.getTableName();
+                    ProduceResponse response =
+                            produce(
+                                    socket,
+                                    name,
+                                    MemoryRecords.withRecords(
+                                            compression,
+                                            record("{\"id\":1000}"),
+                                            record(invalidValues.get(index))),
+                                    MemoryRecords.withRecords(
+                                            compression, record("{\"id\":" + index + "}")));
+                    assertThat(partition(response, name, 0).errorCode())
+                            .as("compressed rejection for %s", invalidValues.get(index))
+                            .isEqualTo(Errors.INVALID_RECORD.code());
+                    assertThat(partition(response, name, 0).baseOffset()).isEqualTo(-1L);
+                    assertThat(partition(response, name, 1).errorCode())
+                            .isEqualTo(Errors.NONE.code());
+                    assertThat(partition(response, name, 1).baseOffset()).isEqualTo(index);
+                }
+                // Filtering makes the batch offset ambiguous even when some records are appended.
+                // An all-filtered batch must not append to the otherwise empty rejected bucket.
+                ProduceResponse filteredResponse =
+                        produce(
+                                socket,
+                                path.toString(),
+                                MemoryRecords.withRecords(compression, filtered, filtered),
+                                MemoryRecords.withRecords(
+                                        compression, filtered, record("{\"id\":3}"), filtered));
+                for (int bucket = 0; bucket < 2; bucket++) {
+                    assertThat(partition(filteredResponse, path.toString(), bucket).errorCode())
+                            .isEqualTo(Errors.NONE.code());
+                    assertThat(partition(filteredResponse, path.toString(), bucket).baseOffset())
+                            .isEqualTo(-1L);
+                }
+                List<String> payloads =
+                        Arrays.asList(
+                                "{\"id\":10,\"profile\":{\"name\":\"你好\",\"extra\":9},"
+                                        + "\"extra\":3,\"_kafka_key\":\"payload\"}",
+                                "{\"id\":11,\"profile\":{\"name\":\"你好\"}}");
+                for (int index = 0; index < payloads.size(); index++) {
+                    String name = index == 0 ? path.toString() : path.getTableName();
+                    // Both names share the same native bucket and continuous native offsets.
+                    assertThat(
+                                    producer.send(
+                                                    new ProducerRecord<>(
+                                                            name,
+                                                            0,
+                                                            123L,
+                                                            KEY,
+                                                            bytes(payloads.get(index)),
+                                                            Arrays.asList(
+                                                                    new RecordHeader(
+                                                                            "source", null),
+                                                                    new RecordHeader(
+                                                                            "source",
+                                                                            new byte[] {1, 2}),
+                                                                    new RecordHeader(
+                                                                            "nullable", KEY),
+                                                                    new RecordHeader(
+                                                                            "nullable", null))))
+                                            .get(30, TimeUnit.SECONDS)
+                                            .offset())
+                            .isEqualTo(index);
+                }
+                read(
+                        connection,
+                        path,
+                        0,
+                        2,
+                        (row, index) -> {
+                            assertThat(valueId(row, layout, valueType)).isEqualTo(10 + index);
+                            InternalRow profile =
+                                    layout.equals("nested")
+                                            ? row.getRow(1, valueType.getFieldCount()).getRow(1, 1)
+                                            : row.getRow(2, 1);
+                            assertThat(profile.getString(0).toString()).isEqualTo("你好");
+                            assertThat(row.getBytes(0)).isEqualTo(KEY);
+                            assertThat(row.getMap(headersPosition).size()).isEqualTo(2);
+                            assertHeaders(row.getMap(headersPosition), true);
+                            if (index == 0) {
+                                try {
+                                    assertThat(
+                                                    mapper.readTree(
+                                                            row.getString(rescuePosition)
+                                                                    .toString()))
+                                            .isEqualTo(expectedRescue);
+                                } catch (java.io.IOException e) {
+                                    throw new AssertionError(e);
+                                }
+                            } else {
+                                assertThat(row.isNullAt(rescuePosition)).isTrue();
+                            }
+                        });
+                read(
+                        connection,
+                        path,
+                        1,
+                        4,
+                        (row, index) -> {
+                            assertThat(valueId(row, layout, valueType)).isEqualTo(index);
+                            assertThat(row.getBytes(0)).isEqualTo(KEY);
+                            assertHeaders(row.getMap(headersPosition), false);
+                            assertThat(row.isNullAt(rescuePosition)).isTrue();
                         });
             } finally {
                 admin.dropTable(path, true).get();
@@ -1439,6 +1580,10 @@ class KafkaJsonProduceITCase {
     }
 
     private static KafkaProducer<byte[], byte[]> producer() {
+        return producer("gzip");
+    }
+
+    private static KafkaProducer<byte[], byte[]> producer(String codec) {
         ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
         Map<String, Object> config = new HashMap<>();
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, node.host() + ":" + node.port());
@@ -1446,7 +1591,7 @@ class KafkaJsonProduceITCase {
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class);
         config.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, false);
         config.put(ProducerConfig.ACKS_CONFIG, "all");
-        config.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "gzip");
+        config.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, codec);
         config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 30000);
         config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 10000);
         config.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 30000);
