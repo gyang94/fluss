@@ -53,19 +53,17 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     }
 
     @Override
-    public BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo) throws Exception {
+    public BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
+            throws Exception {
         return transcode(partitionId, records, prepare(tableInfo));
     }
 
     @Override
-    public BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan) throws Exception {
+    public BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan)
+            throws Exception {
         checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTableSchema schema = plan.topicSchema();
-        if (schema.valueType() != ValueType.BINARY && schema.valueType() != ValueType.STRING) {
-            throw new KafkaRecordEncodingException(
-                    "Unsupported Kafka value conversion type: " + schema.valueType());
-        }
         KafkaRowAssembler assembler = plan.rowAssembler();
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {
