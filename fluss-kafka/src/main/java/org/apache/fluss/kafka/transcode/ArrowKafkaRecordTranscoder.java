@@ -19,9 +19,9 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
-import org.apache.fluss.kafka.format.KafkaDataFormat;
-import org.apache.fluss.kafka.schema.KafkaTopicSchema;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
+import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.row.BinaryString;
@@ -36,7 +36,7 @@ import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 
-/** Converts raw/string Kafka records using the DDL mapping into owned Fluss Arrow log bytes. */
+/** Converts binary/string Kafka values and fixed system columns into owned Arrow log bytes. */
 @Internal
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
@@ -45,36 +45,30 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     @Override
     public BytesView transcode(List<Record> records, TableInfo tableInfo) throws Exception {
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
-        KafkaTopicSchema schema = schemaResolver.resolve(tableInfo.toTableDescriptor());
+        KafkaTableSchema schema = schemaResolver.resolve(tableInfo.toTableDescriptor());
+        if (schema.valueType() != ValueType.BINARY && schema.valueType() != ValueType.STRING) {
+            throw new KafkaRecordEncodingException(
+                    "Unsupported Kafka value conversion type: " + schema.valueType());
+        }
         KafkaRowAssembler assembler = new KafkaRowAssembler(schema);
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {
                     for (Record record : records) {
-                        Object[] key =
-                                schema.keyFormat() == null
-                                        ? new Object[0]
-                                        : new Object[] {
-                                            decode(schema.keyFormat(), record.borrowedKey())
-                                        };
                         consumer.append(
                                 assembler.assemble(
-                                        key,
                                         new Object[] {
-                                            decode(schema.valueFormat(), record.borrowedValue())
+                                            decode(schema.valueType(), record.borrowedValue())
                                         },
-                                        record.timestamp(),
+                                        record.borrowedKey(),
                                         record.headers()));
                     }
                 },
                 tableInfo);
     }
 
-    private static @Nullable Object decode(KafkaDataFormat format, @Nullable byte[] bytes) {
-        if (bytes == null || format == KafkaDataFormat.RAW) {
+    private static @Nullable Object decode(ValueType format, @Nullable byte[] bytes) {
+        if (bytes == null || format == ValueType.BINARY) {
             return bytes;
-        }
-        if (format != KafkaDataFormat.STRING) {
-            throw new KafkaRecordEncodingException("Unsupported Kafka data format: " + format);
         }
         try {
             return BinaryString.fromString(
