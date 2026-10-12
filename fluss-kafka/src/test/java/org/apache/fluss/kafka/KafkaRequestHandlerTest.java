@@ -17,6 +17,7 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
@@ -299,6 +300,6 @@ public class KafkaRequestHandlerTest {
 
     private static KafkaRequestHandler createKafkaRequestHandler() {
         TestingTabletGatewayService service = new TestingTabletGatewayService();
-        return new KafkaRequestHandler(service, service);
+        return new KafkaRequestHandler(new Configuration(), service, service);
     }
 }
