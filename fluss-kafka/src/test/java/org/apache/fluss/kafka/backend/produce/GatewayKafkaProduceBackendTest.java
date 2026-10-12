@@ -861,7 +861,7 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testMetadataOffsetsAndJsonCannotBeActivatedByNullValues() throws Exception {
+    void testLegacyMetadataOffsetsRejectedAndJsonNullValuesPersisted() throws Exception {
         TestingProduceService service = new TestingProduceService();
         TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
         TableDescriptor unsupportedMetadata =
@@ -899,9 +899,182 @@ class GatewayKafkaProduceBackendTest {
                 CompletableFuture.completedFuture(metadata(false).setTableJson(json.toJsonBytes()));
         assertErrors(
                 backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
-                Errors.INVALID_RECORD);
+                Errors.NONE);
+        assertThat(service.appends).isEmpty();
+        assertThat(service.writeChecks).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testJsonConversionRejectsWholeBadPartitionAndPreservesOtherPartitions(boolean nested)
+            throws Exception {
+        List<String> invalidValues =
+                new ArrayList<>(
+                        Arrays.asList(
+                                "{", "[]", "{\"id\":\"bad\"}", "{}", "{\"id\":1,\"unknown\":2}"));
+        for (String reserved :
+                Arrays.asList(
+                        "_kafka_key",
+                        "_kafka_headers",
+                        "_kafka_metadata",
+                        "_kafka_rescue",
+                        "_kafka_value")) {
+            invalidValues.add("{\"id\":1,\"" + reserved + "\":null}");
+        }
+        for (boolean rescue : new boolean[] {false, true}) {
+            for (String invalid : invalidValues) {
+                TestingProduceService service = new TestingProduceService();
+                service.pendingMetadata =
+                        CompletableFuture.completedFuture(
+                                metadata(false)
+                                        .setTableJson(
+                                                jsonDescriptor(nested, rescue).toJsonBytes()));
+                PartitionWrite bad =
+                        new PartitionWrite(
+                                0,
+                                Arrays.asList(
+                                        json(0, "{\"id\":0}").records().get(0),
+                                        json(0, invalid).records().get(0)));
+                KafkaProduceResult result =
+                        backend(service)
+                                .write(
+                                        command(
+                                                (short) 1,
+                                                topic(
+                                                        "topic",
+                                                        bad,
+                                                        json(1, "{\"id\":1}"),
+                                                        json(8, "{\"id\":8}"))))
+                                .join();
+                assertErrors(
+                        result,
+                        Errors.INVALID_RECORD,
+                        Errors.NONE,
+                        Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                assertThat(service.appends).hasSize(1);
+                assertThat(service.append.getBucketsReqsList()).hasSize(1);
+                assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
+                assertThat(result.topics().get(0).partitions().get(1).baseOffset()).isEqualTo(17L);
+                assertThat(service.drains).isEqualTo(1);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testUnsupportedJsonSchemaIsInvalidTopicEvenForFilteredRecords(boolean nested)
+            throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        Schema schema =
+                nested
+                        ? Schema.newBuilder()
+                                .column(
+                                        "_kafka_value",
+                                        DataTypes.ROW(
+                                                DataTypes.FIELD(
+                                                        "id", DataTypes.ARRAY(DataTypes.INT()))))
+                                .build()
+                        : Schema.newBuilder()
+                                .column("id", DataTypes.ARRAY(DataTypes.INT()))
+                                .build();
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false)
+                                .setTableJson(
+                                        TableDescriptor.builder(jsonDescriptor(nested, false))
+                                                .schema(schema)
+                                                .build()
+                                                .toJsonBytes()));
+        GatewayKafkaProduceBackend backend = backend(service);
+        for (PartitionWrite partition : Arrays.asList(nullValue(0), json(0, "{\"id\":[1]}"))) {
+            assertErrors(
+                    backend.write(command((short) 1, topic("topic", partition))).join(),
+                    Errors.INVALID_TOPIC_EXCEPTION);
+        }
         assertThat(service.appends).isEmpty();
         assertThat(service.writeChecks).isZero();
+    }
+
+    @Test
+    void testJsonCacheUsesAuthoritativeLayoutSchemaAndTableIdentity() throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        RecordingTranscoder transcoder = new RecordingTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
+        TableDescriptor flat = jsonDescriptor(false, false);
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(metadata(false).setTableJson(flat.toJsonBytes()));
+        KafkaProduceCommand bare = command((short) 1, topic("topic", json(0, "{\"id\":1}")));
+        KafkaProduceCommand full = command((short) 1, topic("kafka.topic", json(0, "{\"id\":1}")));
+        assertErrors(backend.write(bare).join(), Errors.NONE);
+        assertErrors(backend.write(full).join(), Errors.NONE);
+        assertThat(transcoder.prepared.get(1)).isSameAs(transcoder.prepared.get(0));
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false)
+                                .setTableJson(
+                                        TableDescriptor.builder(flat)
+                                                .property(
+                                                        ConfigOptions
+                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                                        "nested")
+                                                .build()
+                                                .toJsonBytes()));
+        assertErrors(backend.write(bare).join(), Errors.INVALID_TOPIC_EXCEPTION);
+        assertThat(service.appends).hasSize(2);
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false)
+                                .setSchemaId(2)
+                                .setTableJson(jsonDescriptor(true, false).toJsonBytes()));
+        assertErrors(backend.write(full).join(), Errors.NONE);
+        assertThat(transcoder.prepared.get(2)).isNotSameAs(transcoder.prepared.get(0));
+        assertThat(transcoder.prepared.get(2).tableInfo().getSchemaId()).isEqualTo(2);
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false).setTableId(84L).setTableJson(flat.toJsonBytes()));
+        assertErrors(backend.write(bare).join(), Errors.NONE);
+        assertThat(transcoder.prepared.get(3)).isNotSameAs(transcoder.prepared.get(0));
+        assertThat(transcoder.prepared.get(3).tableInfo().getTableId()).isEqualTo(84L);
+        assertThat(service.appends)
+                .extracting(ProduceLogRequest::getTableId)
+                .containsExactly(42L, 42L, 42L, 84L);
+        assertThat(service.metadataPaths).hasSize(5);
+    }
+
+    private static TableDescriptor jsonDescriptor(boolean nested, boolean rescue) {
+        Schema.Builder schema = Schema.newBuilder();
+        if (nested) {
+            schema.column(
+                    "_kafka_value",
+                    DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT().copy(false))));
+        } else {
+            schema.column("id", DataTypes.INT().copy(false));
+        }
+        schema.column("_kafka_key", DataTypes.BYTES());
+        if (rescue) {
+            schema.column("_kafka_rescue", DataTypes.STRING());
+        }
+        return TableDescriptor.builder()
+                .schema(schema.build())
+                .distributedBy(2)
+                .logFormat(LogFormat.ARROW)
+                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                .property(
+                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, nested ? "nested" : "flat")
+                .build();
+    }
+
+    private static PartitionWrite json(int id, String value) {
+        return new PartitionWrite(
+                id,
+                Collections.singletonList(
+                        new Record(
+                                123L,
+                                null,
+                                value.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                                Collections.emptyList())));
     }
 
     private static final class RecordingTranscoder implements KafkaRecordTranscoder {

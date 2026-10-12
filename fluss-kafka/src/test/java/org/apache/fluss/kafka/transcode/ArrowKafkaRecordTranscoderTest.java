@@ -545,13 +545,13 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @Test
-    void testJsonIsNotActivatedEvenForNullValues() {
+    void testUnsupportedJsonBusinessTypesFailDuringPreparation() {
         TableInfo table =
                 table(
                         TableDescriptor.builder()
                                 .schema(
                                         Schema.newBuilder()
-                                                .column("body", DataTypes.STRING())
+                                                .column("body", DataTypes.ARRAY(DataTypes.INT()))
                                                 .build())
                                 .distributedBy(1)
                                 .logFormat(LogFormat.ARROW)
@@ -559,6 +559,9 @@ class ArrowKafkaRecordTranscoderTest {
                                 .property(
                                         ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
                                 .build());
+        assertThatThrownBy(() -> transcoder.prepare(table))
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("ARRAY");
         for (byte[] value : new byte[][] {null, bytes("{}")}) {
             assertThatThrownBy(
                             () ->
@@ -571,8 +574,8 @@ class ArrowKafkaRecordTranscoderTest {
                                                             value,
                                                             Collections.emptyList())),
                                             table))
-                    .isInstanceOf(KafkaRecordEncodingException.class)
-                    .hasMessageContaining("PARSE_JSON");
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining("ARRAY");
         }
     }
 

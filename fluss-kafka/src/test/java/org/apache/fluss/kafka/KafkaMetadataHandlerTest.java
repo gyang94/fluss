@@ -290,6 +290,116 @@ public class KafkaMetadataHandlerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    public void testJsonTableIsDiscoverableForEveryMetadataVersion(boolean nested) {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        Schema schema =
+                nested
+                        ? Schema.newBuilder()
+                                .column(
+                                        "_kafka_value",
+                                        DataTypes.ROW(
+                                                DataTypes.FIELD("id", DataTypes.INT()),
+                                                DataTypes.FIELD("name", DataTypes.STRING())))
+                                .column("_kafka_key", DataTypes.BYTES())
+                                .build()
+                        : Schema.newBuilder()
+                                .column("id", DataTypes.INT())
+                                .column("_kafka_key", DataTypes.BYTES())
+                                .column("name", DataTypes.STRING())
+                                .build();
+        service.putTable(
+                "fluss.json_topic",
+                140L,
+                TableDescriptor.builder(defaultDescriptor())
+                        .schema(schema)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                nested ? "nested" : "flat")
+                        .build());
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse response =
+                    handle(
+                            service,
+                            topicsRequest(version, "json_topic", "fluss.json_topic"),
+                            version);
+            for (String name : Arrays.asList("json_topic", "fluss.json_topic")) {
+                assertThat(response.data().topics().find(name).errorCode())
+                        .isEqualTo(Errors.NONE.code());
+                assertThat(response.data().topics().find(name).partitions()).hasSize(2);
+            }
+            if (version >= 10) {
+                assertThat(response.data().topics().find("json_topic").topicId())
+                        .isEqualTo(new Uuid(0x466c757373410000L, 140L));
+                assertThat(response.data().topics().find("fluss.json_topic").topicId())
+                        .isEqualTo(new Uuid(0x466c757373000000L, 140L));
+            }
+            assertThat(handle(service, allTopicsRequest(version), version).data().topics())
+                    .extracting(MetadataResponseTopic::name)
+                    .contains("fluss.json_topic")
+                    .doesNotContain("json_topic");
+        }
+    }
+
+    @Test
+    public void testJsonAdmissionReflectsAuthoritativeSchemaAndProperties() {
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        TableDescriptor flat =
+                TableDescriptor.builder(defaultDescriptor())
+                        .schema(Schema.newBuilder().column("id", DataTypes.INT()).build())
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .build();
+        service.putTable("fluss.json_topic", 140L, flat);
+        assertThat(
+                        handle(service, namedTopicRequest("json_topic"), (short) 11)
+                                .data()
+                                .topics()
+                                .find("json_topic")
+                                .errorCode())
+                .isEqualTo(Errors.NONE.code());
+        // Changing the layout without moving business columns invalidates the same table ID.
+        service.putTable(
+                "fluss.json_topic",
+                140L,
+                TableDescriptor.builder(flat)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, "nested")
+                        .build());
+        assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
+                .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+        service.putTable(
+                "fluss.json_topic",
+                140L,
+                TableDescriptor.builder(flat)
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("items", DataTypes.ARRAY(DataTypes.INT()))
+                                        .build())
+                        .build());
+        assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
+                .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+        service.putTable(
+                "fluss.json_topic",
+                140L,
+                TableDescriptor.builder(flat)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                        .build());
+        assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
+                .containsEntry("json_topic", Errors.UNKNOWN_TOPIC_OR_PARTITION);
+        service.putTable("fluss.json_topic", 141L, flat);
+        MetadataResponse recreated =
+                handle(
+                        service,
+                        topicsRequest((short) 11, "json_topic", "fluss.json_topic"),
+                        (short) 11);
+        assertThat(recreated.errorCounts()).containsOnlyKeys(Errors.NONE);
+        assertThat(recreated.data().topics().find("json_topic").topicId())
+                .isEqualTo(new Uuid(0x466c757373410000L, 141L));
+        assertThat(recreated.data().topics().find("fluss.json_topic").topicId())
+                .isEqualTo(new Uuid(0x466c757373000000L, 141L));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     public void testMetadataColumnContractForEveryVersion(boolean legacyOffset) {
         RowType metadataType =
                 DataTypes.ROW(

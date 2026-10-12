@@ -266,7 +266,8 @@ class KafkaTableMappingITCase {
         TableDescriptor stored = stored(path);
         assertThat(stored.getSchema()).isEqualTo(schema);
         assertThat(kafkaProperties(stored)).isEqualTo(kafkaProperties(descriptor));
-        assertThat(new KafkaTopicSchemaResolver().resolve(stored).valueProjection().positions())
+        // This checks persisted DDL mapping; recursive gateway decoding is a later stage.
+        assertThat(KafkaTableSchema.resolve(stored).valueProjection().positions())
                 .containsExactly(1);
     }
 

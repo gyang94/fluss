@@ -18,10 +18,13 @@
 package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 import org.apache.fluss.kafka.format.KafkaFieldDecoder;
 import org.apache.fluss.kafka.format.KafkaFormatFactory;
 import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
+
+import javax.annotation.Nullable;
 
 /** Factory for schema-aware Kafka JSON value decoding. */
 @Internal
@@ -35,5 +38,11 @@ public final class JsonKafkaFormatFactory implements KafkaFormatFactory {
     @Override
     public KafkaFieldDecoder createDecoder(KafkaFieldProjection projection) {
         return new JsonKafkaFieldDecoder(projection);
+    }
+
+    @Override
+    public KafkaFieldDecoder createDecoder(
+            KafkaFieldProjection projection, @Nullable ValueLayout layout) {
+        return new JsonKafkaFieldDecoder(projection, layout);
     }
 }
