@@ -30,7 +30,7 @@ import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 
-/** Converts binary/string Kafka values and fixed system columns into owned Arrow log bytes. */
+/** Converts schema-mapped Kafka values and fixed system columns into owned Arrow log bytes. */
 @Internal
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final KafkaFormatFactoryRegistry formats = new KafkaFormatFactoryRegistry();
@@ -60,7 +60,10 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTableSchema schema = plan.topicSchema();
         KafkaFieldDecoder valueDecoder =
-                formats.createDecoder(schema.valueConversionType(), schema.valueProjection());
+                formats.createDecoder(
+                        schema.valueConversionType(),
+                        schema.valueProjection(),
+                        schema.valueConversionLayout());
         KafkaRowAssembler assembler = plan.rowAssembler();
         return arrowRecordEncoder.encodeStreaming(
                 consumer -> {
