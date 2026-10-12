@@ -43,6 +43,7 @@ import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
+import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.CloseableIterator;
 
 import org.junit.jupiter.api.Test;
@@ -544,14 +545,93 @@ class ArrowKafkaRecordTranscoderTest {
                 .hasMessageContaining("empty");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testComplexJsonFailureDiscardsOutputAndCanBeReused(boolean nested) throws Exception {
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD(
+                                "customer",
+                                DataTypes.ROW(
+                                        DataTypes.FIELD("name", DataTypes.STRING().copy(false)))),
+                        DataTypes.FIELD("items", DataTypes.ARRAY(DataTypes.INT().copy(false))),
+                        DataTypes.FIELD(
+                                "attributes",
+                                DataTypes.MAP(
+                                        DataTypes.STRING(),
+                                        DataTypes.ROW(DataTypes.FIELD("count", DataTypes.INT())))));
+        Schema schema =
+                nested
+                        ? Schema.newBuilder().column("_kafka_value", business).build()
+                        : Schema.newBuilder().fromRowType(business).build();
+        TableInfo table =
+                table(
+                        descriptor(schema, false)
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                        nested ? "nested" : "flat")
+                                .build());
+        Record valid =
+                new Record(
+                        1L,
+                        null,
+                        bytes(
+                                "{\"customer\":{\"name\":\"Alice\"},\"items\":[1,2],"
+                                        + "\"attributes\":{\"?\":{\"count\":3}}}"),
+                        Collections.emptyList());
+        for (String invalid :
+                Arrays.asList(
+                        "{\"customer\":{}}",
+                        "{\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
+                        "{\"items\":[1,null]}",
+                        "{\"attributes\":[]}",
+                        "{\"attributes\":{\"?\":{\"count\":1},\"\\ud800\":{\"count\":2}}}")) {
+            AtomicReference<BytesView> output = new AtomicReference<>();
+            Throwable failure =
+                    catchThrowable(
+                            () ->
+                                    output.set(
+                                            transcoder.transcode(
+                                                    Arrays.asList(
+                                                            valid,
+                                                            new Record(
+                                                                    2L,
+                                                                    null,
+                                                                    bytes(invalid),
+                                                                    Collections.emptyList())),
+                                                    table)));
+            assertThat(failure).isInstanceOf(KafkaRecordEncodingException.class);
+            assertThat(failure.getSuppressed()).isEmpty();
+            assertThat(output).hasNullValue();
+            read(
+                    transcoder.transcode(Collections.singletonList(valid), table),
+                    table,
+                    1,
+                    physical -> {
+                        InternalRow row = nested ? physical.getRow(0, 3) : physical;
+                        assertThat(row.getRow(0, 1).getString(0).toString()).isEqualTo("Alice");
+                        assertThat(row.getArray(1).size()).isEqualTo(2);
+                        assertThat(row.getArray(1).getInt(1)).isEqualTo(2);
+                        assertThat(row.getMap(2).keyArray().getString(0).toString()).isEqualTo("?");
+                        assertThat(row.getMap(2).valueArray().getRow(0, 1).getInt(0)).isEqualTo(3);
+                    });
+        }
+    }
+
     @Test
-    void testUnsupportedJsonBusinessTypesFailDuringPreparation() {
+    void testInvalidJsonMapKeysFailDuringPreparation() {
         TableInfo table =
                 table(
                         TableDescriptor.builder()
                                 .schema(
                                         Schema.newBuilder()
-                                                .column("body", DataTypes.ARRAY(DataTypes.INT()))
+                                                .column(
+                                                        "body",
+                                                        DataTypes.MAP(
+                                                                DataTypes.INT(),
+                                                                DataTypes.STRING()))
                                                 .build())
                                 .distributedBy(1)
                                 .logFormat(LogFormat.ARROW)
@@ -561,7 +641,7 @@ class ArrowKafkaRecordTranscoderTest {
                                 .build());
         assertThatThrownBy(() -> transcoder.prepare(table))
                 .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("ARRAY");
+                .hasMessageContaining("only supports STRING map keys");
         for (byte[] value : new byte[][] {null, bytes("{}")}) {
             assertThatThrownBy(
                             () ->
@@ -575,7 +655,7 @@ class ArrowKafkaRecordTranscoderTest {
                                                             Collections.emptyList())),
                                             table))
                     .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining("ARRAY");
+                    .hasMessageContaining("only supports STRING map keys");
         }
     }
 

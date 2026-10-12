@@ -35,7 +35,10 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.Arra
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.DoubleNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.FloatNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.fluss.types.ArrayType;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
+import org.apache.fluss.types.MapType;
 import org.apache.fluss.types.RowType;
 
 import javax.annotation.Nullable;
@@ -54,9 +57,9 @@ import java.util.Map;
 /** Decodes a strict UTF-8 JSON object according to the projected Fluss fields. */
 @Internal
 public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
-    // Jackson counts the JSON root; the shared business-schema depth starts below that root.
-    // The physical nested ROW adds no JSON level. This stage rejects all business containers.
-    static final int MAX_JSON_NESTING_DEPTH = 64;
+    // Jackson counts both the JSON root and a container at business depth zero. An empty ROW
+    // at the maximum business depth is still a container. The nested physical ROW is the root.
+    static final int MAX_JSON_NESTING_DEPTH = KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH + 2;
     static final int MAX_CONTAINER_ELEMENTS = JsonToFlussConverters.MAX_CONTAINER_ELEMENTS;
     private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
 
@@ -193,27 +196,53 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                     break;
             }
         }
-        return readBoundedTree(parser, path);
+        return readBoundedTree(parser, dataType, path);
     }
 
-    private static JsonNode readBoundedTree(JsonParser parser, String path) throws IOException {
+    private static JsonNode readBoundedTree(JsonParser parser, DataType dataType, String path)
+            throws IOException {
         // Bound every container while consuming tokens, before allocating excess children.
-        // The parser independently enforces nesting depth and rejects duplicate object fields.
+        // Read each child with its schema so numeric tokens retain their original precision
+        // and floating-point sign. The parser also bounds depth and rejects duplicate fields.
         switch (parser.currentToken()) {
             case START_ARRAY:
+                if (!(dataType instanceof ArrayType)) {
+                    throw new KafkaRecordEncodingException(
+                            "Invalid Kafka record value at " + path + ": expected a JSON object.");
+                }
+                DataType elementType = ((ArrayType) dataType).getElementType();
                 ArrayNode array = OBJECT_MAPPER.createArrayNode();
                 while (parser.nextToken() != JsonToken.END_ARRAY) {
                     checkContainerSize(array.size() + 1, path);
-                    array.add(readBoundedTree(parser, JsonPath.index(path, array.size())));
+                    array.add(readValue(parser, elementType, JsonPath.index(path, array.size())));
                 }
                 return array;
             case START_OBJECT:
+                if (dataType instanceof ArrayType) {
+                    throw new KafkaRecordEncodingException(
+                            "Invalid Kafka record value at " + path + ": expected a JSON array.");
+                }
+                Map<String, DataType> rowFields = new HashMap<>();
+                if (dataType instanceof RowType) {
+                    for (DataField field : ((RowType) dataType).getFields()) {
+                        rowFields.put(field.getName(), field.getType());
+                    }
+                }
                 ObjectNode object = OBJECT_MAPPER.createObjectNode();
                 while (parser.nextToken() != JsonToken.END_OBJECT) {
                     checkContainerSize(object.size() + 1, path);
                     String fieldName = parser.currentName();
+                    String fieldPath = JsonPath.field(path, fieldName);
+                    DataType fieldType =
+                            dataType instanceof MapType
+                                    ? ((MapType) dataType).getValueType()
+                                    : rowFields.get(fieldName);
+                    if (fieldType == null) {
+                        throw new KafkaRecordEncodingException(
+                                "Invalid Kafka record value at " + fieldPath + ": unknown field.");
+                    }
                     parser.nextToken();
-                    object.set(fieldName, readBoundedTree(parser, JsonPath.field(path, fieldName)));
+                    object.set(fieldName, readValue(parser, fieldType, fieldPath));
                 }
                 return object;
             default:

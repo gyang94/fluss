@@ -366,17 +366,59 @@ public class KafkaMetadataHandlerTest {
                         .build());
         assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
                 .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
-        service.putTable(
-                "fluss.json_topic",
-                140L,
-                TableDescriptor.builder(flat)
-                        .schema(
-                                Schema.newBuilder()
-                                        .column("items", DataTypes.ARRAY(DataTypes.INT()))
-                                        .build())
-                        .build());
-        assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
-                .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+        RowType business =
+                DataTypes.ROW(
+                        DataTypes.FIELD("items", DataTypes.ARRAY(DataTypes.INT())),
+                        DataTypes.FIELD(
+                                "attributes",
+                                DataTypes.MAP(
+                                        DataTypes.STRING(),
+                                        DataTypes.ROW(DataTypes.FIELD("count", DataTypes.INT())))));
+        for (boolean nested : new boolean[] {false, true}) {
+            Schema complexSchema =
+                    nested
+                            ? Schema.newBuilder().column("_kafka_value", business).build()
+                            : Schema.newBuilder().fromRowType(business).build();
+            TableDescriptor complex =
+                    TableDescriptor.builder(flat)
+                            .schema(complexSchema)
+                            .property(
+                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                    nested ? "nested" : "flat")
+                            .build();
+            service.putTable("fluss.json_topic", 140L, complex);
+            assertThat(
+                            handle(service, namedTopicRequest("json_topic"), (short) 11)
+                                    .data()
+                                    .topics()
+                                    .find("json_topic")
+                                    .errorCode())
+                    .isEqualTo(Errors.NONE.code());
+            assertThat(
+                            handle(service, allTopicsRequest((short) 11), (short) 11)
+                                    .data()
+                                    .topics()
+                                    .find("fluss.json_topic")
+                                    .errorCode())
+                    .isEqualTo(Errors.NONE.code());
+
+            RowType invalidBusiness =
+                    DataTypes.ROW(
+                            DataTypes.FIELD(
+                                    "items", DataTypes.MAP(DataTypes.INT(), DataTypes.STRING())));
+            Schema invalidSchema =
+                    nested
+                            ? Schema.newBuilder().column("_kafka_value", invalidBusiness).build()
+                            : Schema.newBuilder().fromRowType(invalidBusiness).build();
+            service.putTable(
+                    "fluss.json_topic",
+                    140L,
+                    TableDescriptor.builder(complex).schema(invalidSchema).build());
+            assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
+                    .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+            assertThat(handle(service, allTopicsRequest((short) 11), (short) 11).errors())
+                    .containsEntry("fluss.json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+        }
         service.putTable(
                 "fluss.json_topic",
                 140L,
