@@ -18,10 +18,13 @@
 package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.kafka.format.KafkaFieldDecoder;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
+import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonToken;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.StreamReadConstraints;
@@ -31,6 +34,7 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMap
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.DoubleNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.FloatNode;
 import org.apache.fluss.types.DataType;
+import org.apache.fluss.types.RowType;
 
 import javax.annotation.Nullable;
 
@@ -40,30 +44,61 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /** Decodes a strict UTF-8 JSON object according to the projected Fluss fields. */
 @Internal
 public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
+    // Jackson counts the JSON root; the shared business-schema depth starts below that root.
+    // The physical nested ROW adds no JSON level. This stage rejects all business containers.
     static final int MAX_JSON_NESTING_DEPTH = 64;
     static final int MAX_CONTAINER_ELEMENTS = 10_000;
     private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
 
     private final KafkaFieldProjection projection;
+    private final @Nullable RowType nestedType;
     private final Map<String, Integer> projectedFields = new HashMap<>();
     private final JsonToFlussConverter[] converters;
 
     /** Creates a JSON decoder and validates every projected field type. */
     public JsonKafkaFieldDecoder(KafkaFieldProjection projection) {
-        this.projection = projection;
-        converters = new JsonToFlussConverter[projection.size()];
-        for (int i = 0; i < projection.size(); i++) {
-            if (projectedFields.put(projection.nameAt(i), i) != null) {
+        this(projection, KafkaValueConversionLayout.FLAT);
+    }
+
+    /** Creates a decoder whose nested physical ROW represents the JSON object root. */
+    public JsonKafkaFieldDecoder(
+            KafkaFieldProjection projection, @Nullable KafkaValueConversionLayout layout) {
+        if (layout == KafkaValueConversionLayout.NESTED) {
+            if (projection.size() != 1
+                    || !KafkaTableSchema.VALUE_COLUMN.equals(projection.nameAt(0))
+                    || !(projection.dataTypeAt(0) instanceof RowType)) {
                 throw new KafkaTopicSchemaException(
-                        "Duplicate Kafka JSON field '" + projection.nameAt(i) + "'.");
+                        "Nested Kafka JSON requires exactly one _kafka_value ROW.");
             }
-            converters[i] = JsonToFlussConverters.create(projection.dataTypeAt(i));
+            nestedType = (RowType) projection.dataTypeAt(0);
+            List<Integer> positions = new ArrayList<>();
+            for (int i = 0; i < nestedType.getFieldCount(); i++) {
+                positions.add(i);
+            }
+            this.projection = new KafkaFieldProjection(nestedType, positions);
+        } else {
+            nestedType = null;
+            this.projection = projection;
+        }
+        converters = new JsonToFlussConverter[this.projection.size()];
+        for (int i = 0; i < this.projection.size(); i++) {
+            String name = this.projection.nameAt(i);
+            if (KafkaTableSchema.isReservedName(name)) {
+                throw new KafkaTopicSchemaException(
+                        "Reserved name '" + name + "' cannot be a Kafka JSON business field.");
+            }
+            if (projectedFields.put(name, i) != null) {
+                throw new KafkaTopicSchemaException("Duplicate Kafka JSON field '" + name + "'.");
+            }
+            converters[i] = JsonToFlussConverters.create(this.projection.dataTypeAt(i));
         }
     }
 
@@ -96,6 +131,10 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 }
                 String fieldName = parser.currentName();
                 String path = JsonPath.field(JsonPath.ROOT, fieldName);
+                if (KafkaTableSchema.isReservedName(fieldName)) {
+                    throw new KafkaRecordEncodingException(
+                            "Invalid Kafka record value at " + path + ": reserved field.");
+                }
                 Integer position = projectedFields.get(fieldName);
                 if (position == null) {
                     throw new KafkaRecordEncodingException(
@@ -123,7 +162,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                                     null, JsonPath.field(JsonPath.ROOT, projection.nameAt(i)));
                 }
             }
-            return values;
+            return nestedType == null ? values : new Object[] {GenericRow.of(values)};
         } catch (KafkaRecordEncodingException e) {
             throw e;
         } catch (IOException | RuntimeException e) {
@@ -150,6 +189,13 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
     }
 
     private Object[] nullValues() {
+        if (nestedType != null) {
+            if (!nestedType.isNullable()) {
+                throw new KafkaRecordEncodingException(
+                        "Kafka null value cannot populate NOT NULL field '_kafka_value'.");
+            }
+            return new Object[] {null};
+        }
         Object[] values = new Object[projection.size()];
         for (int i = 0; i < projection.size(); i++) {
             DataType dataType = projection.dataTypeAt(i);
