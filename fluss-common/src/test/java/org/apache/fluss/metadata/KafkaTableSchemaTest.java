@@ -187,6 +187,109 @@ class KafkaTableSchemaTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testJsonRejectsNonStringMapKeysRecursively(String layout) {
+        for (DataType key : Arrays.asList(DataTypes.INT(), DataTypes.CHAR(10), DataTypes.BYTES())) {
+            DataType invalidMap = DataTypes.MAP(key, DataTypes.STRING());
+            for (DataType type :
+                    Arrays.asList(
+                            invalidMap,
+                            DataTypes.ARRAY(invalidMap),
+                            DataTypes.ROW(DataTypes.FIELD("attributes", invalidMap)),
+                            DataTypes.MAP(DataTypes.STRING(), DataTypes.ARRAY(invalidMap)))) {
+                TableDescriptor table = jsonTable(layout, type);
+                assertInvalid(table, "only supports STRING map keys");
+                assertThatCode(
+                                () ->
+                                        KafkaTableSchema.validate(
+                                                TableDescriptor.builder(table)
+                                                        .property(
+                                                                ConfigOptions.TABLE_KAFKA_ENABLED,
+                                                                false)
+                                                        .build()))
+                        .doesNotThrowAnyException();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testJsonAcceptsAllScalarTypesInNestedContainers(String layout) {
+        for (DataType scalar :
+                Arrays.asList(
+                        DataTypes.CHAR(10),
+                        DataTypes.STRING(),
+                        DataTypes.BOOLEAN(),
+                        DataTypes.BINARY(4),
+                        DataTypes.BYTES(),
+                        DataTypes.DECIMAL(18, 2),
+                        DataTypes.TINYINT(),
+                        DataTypes.SMALLINT(),
+                        DataTypes.INT(),
+                        DataTypes.BIGINT(),
+                        DataTypes.FLOAT(),
+                        DataTypes.DOUBLE(),
+                        DataTypes.DATE(),
+                        DataTypes.TIME(3),
+                        DataTypes.TIMESTAMP(9),
+                        DataTypes.TIMESTAMP_LTZ(9))) {
+            DataType type =
+                    DataTypes.ARRAY(
+                            DataTypes.MAP(
+                                    DataTypes.STRING().copy(false),
+                                    DataTypes.ROW(
+                                            DataTypes.FIELD("_kafka_key", scalar.copy(false)))));
+            TableDescriptor table = jsonTable(layout, type);
+            byte[] before = table.toJsonBytes();
+            assertThatCode(() -> KafkaTableSchema.validate(table)).doesNotThrowAnyException();
+            assertThat(table.toJsonBytes()).isEqualTo(before);
+            assertThat(KafkaTableSchema.resolve(TableDescriptor.fromJsonBytes(before)))
+                    .isEqualTo(KafkaTableSchema.resolve(table));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testJsonBusinessNestingDepthBoundary(String layout) {
+        // Exercise every recursive edge, including map values (keys do not add a level).
+        DataType boundary = DataTypes.STRING();
+        for (int depth = 0; depth < KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; depth++) {
+            if (depth % 3 == 0) {
+                boundary = DataTypes.ARRAY(boundary);
+            } else if (depth % 3 == 1) {
+                boundary = DataTypes.MAP(DataTypes.STRING(), boundary);
+            } else {
+                boundary = DataTypes.ROW(DataTypes.FIELD("child", boundary));
+            }
+        }
+        TableDescriptor valid = jsonTable(layout, boundary);
+        assertThatCode(() -> KafkaTableSchema.validate(valid)).doesNotThrowAnyException();
+        TableDescriptor tooDeep = jsonTable(layout, DataTypes.ARRAY(boundary));
+        assertInvalid(tooDeep, "maximum nesting depth of 64");
+        assertThatCode(
+                        () ->
+                                KafkaTableSchema.validate(
+                                        TableDescriptor.builder(tooDeep)
+                                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                                                .build()))
+                .doesNotThrowAnyException();
+    }
+
+    private static TableDescriptor jsonTable(String layout, DataType businessType) {
+        Schema schema =
+                "flat".equals(layout)
+                        ? Schema.newBuilder().column("payload", businessType).build()
+                        : Schema.newBuilder()
+                                .column(
+                                        "_kafka_value",
+                                        DataTypes.ROW(DataTypes.FIELD("payload", businessType)))
+                                .build();
+        return enabled(schema, "parse_json")
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
+                .build();
+    }
+
+    @ParameterizedTest
     @ValueSource(
             strings = {
                 "_kafka_key",
