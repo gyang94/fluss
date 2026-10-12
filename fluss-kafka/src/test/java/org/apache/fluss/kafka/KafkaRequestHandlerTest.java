@@ -114,6 +114,7 @@ public class KafkaRequestHandlerTest {
                     apiVersion,
                     header,
                     requestBody,
+                    "KAFKA",
                     requestBuffer,
                     context,
                     new CompletableFuture<>());

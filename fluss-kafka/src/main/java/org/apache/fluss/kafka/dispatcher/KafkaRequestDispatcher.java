@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.KafkaRequest;
 import org.apache.fluss.kafka.KafkaRequestContext;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
+import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.requests.AbstractRequest;
@@ -110,6 +111,10 @@ public final class KafkaRequestDispatcher {
 
     private CompletableFuture<AbstractResponse> completedErrorResponse(
             AbstractRequest request, Throwable failure) {
-        return CompletableFuture.completedFuture(errorMapper.toResponse(request, failure));
+        try {
+            return CompletableFuture.completedFuture(errorMapper.toResponse(request, failure));
+        } catch (Throwable mappingFailure) {
+            return FutureUtils.completedExceptionally(mappingFailure);
+        }
     }
 }

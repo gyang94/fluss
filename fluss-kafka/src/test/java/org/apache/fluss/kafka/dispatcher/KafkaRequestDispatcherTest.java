@@ -34,6 +34,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Collections;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicReference;
@@ -50,8 +51,7 @@ class KafkaRequestDispatcherTest {
 
     @Test
     void testUnregisteredApiReturnsUnsupportedVersion() {
-        KafkaApiRegistry registry = new KafkaApiRegistry();
-        registry.freeze();
+        KafkaApiRegistry registry = new KafkaApiRegistry(Collections.emptyList());
 
         AbstractResponse response =
                 new KafkaRequestDispatcher(registry, new KafkaErrorMapper())
@@ -159,11 +159,55 @@ class KafkaRequestDispatcherTest {
         assertThatThrownBy(result::join).hasCause(mappingFailure);
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testSynchronousErrorMappingFailureCompletesFutureExceptionally(boolean nullFuture) {
+        KafkaRequestDispatcher dispatcher =
+                dispatcher(
+                        (context, request) -> {
+                            if (nullFuture) {
+                                return null;
+                            }
+                            throw new InvalidRequestException("invalid request");
+                        });
+
+        assertErrorMappingFailureCompletesFutureExceptionally(dispatcher, request((short) 0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void testRejectedRequestErrorMappingFailureCompletesFutureExceptionally(boolean registeredApi) {
+        KafkaRequestDispatcher dispatcher =
+                registeredApi
+                        ? dispatcher(
+                                (context, request) -> {
+                                    throw new AssertionError(
+                                            "Unsupported versions must not be dispatched.");
+                                })
+                        : new KafkaRequestDispatcher(
+                                new KafkaApiRegistry(Collections.emptyList()),
+                                new KafkaErrorMapper());
+
+        assertErrorMappingFailureCompletesFutureExceptionally(dispatcher, request((short) 1));
+    }
+
+    private static void assertErrorMappingFailureCompletesFutureExceptionally(
+            KafkaRequestDispatcher dispatcher, KafkaRequest request) {
+        ApiVersionsRequest requestBody = mock(ApiVersionsRequest.class);
+        IllegalStateException mappingFailure = new IllegalStateException("error mapping failure");
+        when(requestBody.getErrorResponse(any(Throwable.class))).thenThrow(mappingFailure);
+        when(request.request()).thenReturn(requestBody);
+
+        CompletableFuture<AbstractResponse> result = dispatcher.dispatch(request);
+
+        assertThat(result).isCompletedExceptionally();
+        assertThatThrownBy(result::join).hasCause(mappingFailure);
+    }
+
     private static KafkaRequestDispatcher dispatcher(
             BiFunction<KafkaRequestContext, ApiVersionsRequest, CompletableFuture<AbstractResponse>>
                     action) {
-        KafkaApiRegistry registry = new KafkaApiRegistry();
-        registry.register(
+        KafkaApiHandler<ApiVersionsRequest> handler =
                 new KafkaApiHandler<ApiVersionsRequest>() {
                     @Override
                     public KafkaApiSpec apiSpec() {
@@ -175,8 +219,8 @@ class KafkaRequestDispatcherTest {
                             KafkaRequestContext context, ApiVersionsRequest request) {
                         return action.apply(context, request);
                     }
-                });
-        registry.freeze();
+                };
+        KafkaApiRegistry registry = new KafkaApiRegistry(Collections.singletonList(handler));
         return new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
 

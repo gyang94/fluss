@@ -20,10 +20,14 @@ package org.apache.fluss.kafka.dispatcher;
 import org.apache.fluss.kafka.KafkaRequestContext;
 
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
-import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,39 +37,75 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 public class KafkaApiRegistryTest {
 
     @Test
-    public void testRejectDuplicateRegistrationAndRegistrationAfterFreeze() {
-        KafkaApiRegistry registry = brokerRegistry();
-        TestingApiVersionsHandler handler = new TestingApiVersionsHandler(true);
-        registry.register(handler);
-
-        assertThatThrownBy(() -> registry.register(handler))
+    public void testRejectDuplicateApiKeys() {
+        assertThatThrownBy(
+                        () ->
+                                new KafkaApiRegistry(
+                                        Arrays.asList(
+                                                new TestingApiHandler(ApiKeys.API_VERSIONS, true),
+                                                new TestingApiHandler(
+                                                        ApiKeys.API_VERSIONS, false))))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("already registered");
+    }
 
-        registry.freeze();
-        assertThatThrownBy(() -> registry.register(handler))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("already frozen");
+    @Test
+    public void testEmptyRegistry() {
+        KafkaApiRegistry registry = new KafkaApiRegistry(Collections.emptyList());
+
+        assertThat(registry.lookup(ApiKeys.API_VERSIONS)).isNull();
+        assertThat(registry.advertisedApiSpecs()).isEmpty();
+    }
+
+    @Test
+    public void testChangesToInputCollectionDoNotAffectRegistry() {
+        TestingApiHandler handler = new TestingApiHandler(ApiKeys.API_VERSIONS, true);
+        List<KafkaApiHandler<?>> handlers = new ArrayList<>();
+        handlers.add(handler);
+        KafkaApiRegistry registry = new KafkaApiRegistry(handlers);
+
+        handlers.clear();
+        handlers.add(new TestingApiHandler(ApiKeys.METADATA, true));
+
+        assertThat(registry.lookup(ApiKeys.API_VERSIONS)).isSameAs(handler);
+        assertThat(registry.lookup(ApiKeys.METADATA)).isNull();
+        assertThat(registry.advertisedApiSpecs()).containsExactly(handler.apiSpec());
+    }
+
+    @Test
+    public void testAdvertisedSpecsAreSortedAndUnmodifiable() {
+        TestingApiHandler apiVersions = new TestingApiHandler(ApiKeys.API_VERSIONS, true);
+        TestingApiHandler metadata = new TestingApiHandler(ApiKeys.METADATA, true);
+        KafkaApiRegistry registry = new KafkaApiRegistry(Arrays.asList(apiVersions, metadata));
+
+        List<KafkaApiSpec> specs = registry.advertisedApiSpecs();
+
+        assertThat(specs).containsExactly(metadata.apiSpec(), apiVersions.apiSpec());
+        assertThatThrownBy(specs::clear).isInstanceOf(UnsupportedOperationException.class);
+        assertThat(registry.advertisedApiSpecs())
+                .containsExactly(metadata.apiSpec(), apiVersions.apiSpec());
     }
 
     @Test
     public void testOnlyAdvertiseEnabledHandlers() {
-        KafkaApiRegistry registry = brokerRegistry();
-        registry.register(new TestingApiVersionsHandler(true));
+        KafkaApiRegistry registry =
+                new KafkaApiRegistry(
+                        Collections.singletonList(
+                                new TestingApiHandler(ApiKeys.API_VERSIONS, true)));
         assertThat(registry.advertisedApiSpecs()).hasSize(1);
 
-        KafkaApiRegistry hiddenRegistry = brokerRegistry();
-        hiddenRegistry.register(new TestingApiVersionsHandler(false));
+        KafkaApiRegistry hiddenRegistry =
+                new KafkaApiRegistry(
+                        Collections.singletonList(
+                                new TestingApiHandler(ApiKeys.API_VERSIONS, false)));
         assertThat(hiddenRegistry.advertisedApiSpecs()).isEmpty();
         assertThat(hiddenRegistry.lookup(ApiKeys.API_VERSIONS)).isNull();
     }
 
     @Test
     public void testAdvertisedSpecIsSameSpecUsedForRouting() {
-        KafkaApiRegistry registry = brokerRegistry();
-        TestingApiVersionsHandler handler = new TestingApiVersionsHandler(true);
-        registry.register(handler);
-        registry.freeze();
+        TestingApiHandler handler = new TestingApiHandler(ApiKeys.API_VERSIONS, true);
+        KafkaApiRegistry registry = new KafkaApiRegistry(Collections.singletonList(handler));
 
         KafkaApiSpec advertisedSpec = registry.advertisedApiSpecs().get(0);
         KafkaApiHandler<?> routedHandler = registry.lookup(ApiKeys.API_VERSIONS);
@@ -95,22 +135,14 @@ public class KafkaApiRegistryTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
-    private static KafkaApiRegistry brokerRegistry() {
-        return new KafkaApiRegistry();
-    }
-
-    private static final class TestingApiVersionsHandler
-            implements KafkaApiHandler<ApiVersionsRequest> {
+    private static final class TestingApiHandler implements KafkaApiHandler<AbstractRequest> {
 
         private final KafkaApiSpec spec;
 
-        private TestingApiVersionsHandler(boolean advertised) {
+        private TestingApiHandler(ApiKeys apiKey, boolean advertised) {
             this.spec =
                     new KafkaApiSpec(
-                            ApiKeys.API_VERSIONS,
-                            ApiKeys.API_VERSIONS.oldestVersion(),
-                            ApiKeys.API_VERSIONS.latestVersion(),
-                            advertised);
+                            apiKey, apiKey.oldestVersion(), apiKey.latestVersion(), advertised);
         }
 
         @Override
@@ -120,7 +152,7 @@ public class KafkaApiRegistryTest {
 
         @Override
         public CompletableFuture<? extends AbstractResponse> handle(
-                KafkaRequestContext context, ApiVersionsRequest request) {
+                KafkaRequestContext context, AbstractRequest request) {
             throw new UnsupportedOperationException();
         }
     }

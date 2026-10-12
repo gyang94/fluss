@@ -60,17 +60,6 @@ public class KafkaRequest implements RpcRequest {
             short apiVersion,
             RequestHeader header,
             AbstractRequest request,
-            ByteBuf buffer,
-            ChannelHandlerContext ctx,
-            CompletableFuture<AbstractResponse> future) {
-        this(apiKey, apiVersion, header, request, "UNKNOWN", buffer, ctx, future);
-    }
-
-    protected KafkaRequest(
-            ApiKeys apiKey,
-            short apiVersion,
-            RequestHeader header,
-            AbstractRequest request,
             String listenerName,
             ByteBuf buffer,
             ChannelHandlerContext ctx,

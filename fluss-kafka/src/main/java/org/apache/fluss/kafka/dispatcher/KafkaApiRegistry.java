@@ -22,6 +22,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.kafka.common.protocol.ApiKeys;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -30,30 +31,27 @@ import java.util.Map;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
-import static org.apache.fluss.utils.Preconditions.checkState;
 
-/** Registry and single source of truth for Kafka APIs exposed by one server. */
+/** Immutable registry and single source of truth for Kafka APIs exposed by one server. */
 @Internal
 public final class KafkaApiRegistry {
 
-    private final Map<ApiKeys, KafkaApiHandler<?>> handlers = new HashMap<>();
-    private boolean frozen;
+    private final Map<ApiKeys, KafkaApiHandler<?>> handlers;
 
-    /** Creates an empty API registry. */
-    public KafkaApiRegistry() {}
-
-    /** Registers a handler. Registrations are rejected after {@link #freeze()} is called. */
-    public void register(KafkaApiHandler<?> handler) {
-        checkNotNull(handler);
-        checkState(!frozen, "Kafka API registry is already frozen.");
-        ApiKeys apiKey = handler.apiSpec().apiKey();
-        checkArgument(!handlers.containsKey(apiKey), "Kafka API %s is already registered.", apiKey);
-        handlers.put(apiKey, handler);
-    }
-
-    /** Prevents further registrations. */
-    public void freeze() {
-        frozen = true;
+    /**
+     * Creates a registry from a snapshot of the supplied handlers, rejecting duplicate API keys.
+     */
+    public KafkaApiRegistry(Collection<? extends KafkaApiHandler<?>> handlers) {
+        Map<ApiKeys, KafkaApiHandler<?>> registeredHandlers = new HashMap<>();
+        for (KafkaApiHandler<?> handler : checkNotNull(handlers)) {
+            ApiKeys apiKey = checkNotNull(handler).apiSpec().apiKey();
+            checkArgument(
+                    !registeredHandlers.containsKey(apiKey),
+                    "Kafka API %s is already registered.",
+                    apiKey);
+            registeredHandlers.put(apiKey, handler);
+        }
+        this.handlers = Collections.unmodifiableMap(registeredHandlers);
     }
 
     /** Returns a routable handler, or {@code null} when the API is not exposed by this server. */

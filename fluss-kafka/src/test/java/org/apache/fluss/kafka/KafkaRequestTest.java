@@ -45,6 +45,7 @@ public class KafkaRequestTest {
                         version,
                         new RequestHeader(ApiKeys.API_VERSIONS, version, "client-id", 1),
                         new ApiVersionsRequest.Builder().build(version),
+                        "KAFKA",
                         buffer,
                         mock(ChannelHandlerContext.class),
                         new CompletableFuture<>());
