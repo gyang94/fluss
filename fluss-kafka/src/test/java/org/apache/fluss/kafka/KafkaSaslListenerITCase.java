@@ -137,8 +137,6 @@ class KafkaSaslListenerITCase {
             conf.set(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS, 1);
             conf.set(ConfigOptions.NETTY_SERVER_NUM_NETWORK_THREADS, 1);
             conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, idleTimeout);
-            // A legacy Kafka-only setting must not override the shared Netty timeout.
-            conf.setString("kafka.connection.max-idle-time", "1 min");
             conf.set(
                     ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
                     Collections.singletonMap("KAFKA", "sasl"));
