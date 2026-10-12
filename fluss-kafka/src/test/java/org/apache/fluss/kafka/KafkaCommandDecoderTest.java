@@ -17,6 +17,7 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.rpc.netty.server.RpcRequest;
@@ -93,7 +94,8 @@ public class KafkaCommandDecoderTest {
     public void testApiVersionsDuringAuthenticationIsFlushedBeforeChannelCloses() throws Exception {
         RequestChannel requestChannel = new RequestChannel(100);
         TestingTabletGatewayService service = new TestingTabletGatewayService();
-        KafkaRequestHandler requestHandler = new KafkaRequestHandler(service, service);
+        KafkaRequestHandler requestHandler =
+                new KafkaRequestHandler(new Configuration(), service, service);
         EmbeddedChannel channel =
                 new EmbeddedChannel(
                         new LengthFieldPrepender(4),
