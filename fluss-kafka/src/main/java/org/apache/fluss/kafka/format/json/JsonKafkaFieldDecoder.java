@@ -24,6 +24,7 @@ import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
+import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonToken;
@@ -38,6 +39,7 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.Obje
 import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
+import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.MapType;
 import org.apache.fluss.types.RowType;
 
@@ -51,6 +53,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -63,7 +66,10 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
     static final int MAX_CONTAINER_ELEMENTS = JsonToFlussConverters.MAX_CONTAINER_ELEMENTS;
     private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
 
+    private static final DataType JSON_STRING_TYPE = DataTypes.STRING();
+
     private final KafkaFieldProjection projection;
+    private final boolean rescueEnabled;
     private final @Nullable RowType nestedType;
     private final Map<String, Integer> projectedFields = new HashMap<>();
     private final JsonToFlussConverter[] converters;
@@ -75,6 +81,17 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
 
     /** Creates a decoder whose nested physical ROW represents the JSON object root. */
     public JsonKafkaFieldDecoder(KafkaFieldProjection projection, @Nullable ValueLayout layout) {
+        this(projection, layout, false);
+    }
+
+    /** Creates a decoder with rescue enabled only by the validated fixed system column. */
+    public JsonKafkaFieldDecoder(KafkaTableSchema schema) {
+        this(schema.valueProjection(), schema.valueLayout(), schema.rescuePosition() >= 0);
+    }
+
+    private JsonKafkaFieldDecoder(
+            KafkaFieldProjection projection, @Nullable ValueLayout layout, boolean rescueEnabled) {
+        this.rescueEnabled = rescueEnabled;
         if (layout == ValueLayout.NESTED) {
             if (projection.size() != 1
                     || !KafkaTableSchema.VALUE_COLUMN.equals(projection.nameAt(0))
@@ -123,7 +140,10 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 throw new KafkaRecordEncodingException(
                         "Kafka JSON record value must have an object root.");
             }
-            Object[] values = new Object[projection.size()];
+            Object[] values =
+                    new Object[projection.size() + (rescueEnabled && nestedType == null ? 1 : 0)];
+            ObjectNode rescuedFields = rescueEnabled ? OBJECT_MAPPER.createObjectNode() : null;
+            JsonNode[] nestedRescues = rescueEnabled ? new JsonNode[projection.size()] : null;
             boolean[] present = new boolean[projection.size()];
             int fieldCount = 0;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
@@ -135,17 +155,28 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 }
                 String fieldName = parser.currentName();
                 String path = JsonPath.field(JsonPath.ROOT, fieldName);
-                if (KafkaTableSchema.isReservedName(fieldName)) {
-                    throw new KafkaRecordEncodingException(
-                            "Invalid Kafka record value at " + path + ": reserved field.");
-                }
+                validateUnicode(fieldName, path);
                 Integer position = projectedFields.get(fieldName);
-                if (position == null) {
-                    throw new KafkaRecordEncodingException(
-                            "Invalid Kafka record value at " + path + ": unknown field.");
+                if (position == null || KafkaTableSchema.isReservedName(fieldName)) {
+                    if (!rescueEnabled) {
+                        throw new KafkaRecordEncodingException(
+                                "Invalid Kafka record value at "
+                                        + path
+                                        + (KafkaTableSchema.isReservedName(fieldName)
+                                                ? ": reserved field."
+                                                : ": unknown field."));
+                    }
+                    parser.nextToken();
+                    rescuedFields.set(fieldName, readValue(parser, null, path));
+                    continue;
                 }
                 parser.nextToken();
                 JsonNode value = readValue(parser, projection.dataTypeAt(position), path);
+                if (rescueEnabled) {
+                    nestedRescues[position] =
+                            extractNestedUnknownFields(
+                                    value, projection.dataTypeAt(position), path);
+                }
                 values[position] = converters[position].convert(value, path);
                 present[position] = true;
             }
@@ -160,7 +191,24 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                                     null, JsonPath.field(JsonPath.ROOT, projection.nameAt(i)));
                 }
             }
-            return nestedType == null ? values : new Object[] {GenericRow.of(values)};
+            Object[] decoded = values;
+            if (nestedType != null) {
+                decoded = new Object[rescueEnabled ? 2 : 1];
+                decoded[0] = GenericRow.of(values);
+            }
+            if (rescueEnabled) {
+                // Root members retain input order; nested unknowns follow projection order.
+                for (int i = 0; i < projection.size(); i++) {
+                    if (nestedRescues[i] != null) {
+                        rescuedFields.set(projection.nameAt(i), nestedRescues[i]);
+                    }
+                }
+                decoded[decoded.length - 1] =
+                        rescuedFields.isEmpty()
+                                ? null
+                                : BinaryString.fromString(rescuedFields.toString());
+            }
+            return decoded;
         } catch (KafkaRecordEncodingException e) {
             throw e;
         } catch (IOException | RuntimeException e) {
@@ -169,8 +217,11 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
         }
     }
 
-    private static JsonNode readValue(JsonParser parser, DataType dataType, String path)
+    private JsonNode readValue(JsonParser parser, @Nullable DataType dataType, String path)
             throws IOException {
+        if (dataType == null) {
+            return readBoundedTree(parser, null, path);
+        }
         if (parser.currentToken() == JsonToken.START_OBJECT
                 || parser.currentToken() == JsonToken.START_ARRAY) {
             switch (dataType.getTypeRoot()) {
@@ -199,18 +250,19 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
         return readBoundedTree(parser, dataType, path);
     }
 
-    private static JsonNode readBoundedTree(JsonParser parser, DataType dataType, String path)
+    private JsonNode readBoundedTree(JsonParser parser, @Nullable DataType dataType, String path)
             throws IOException {
         // Bound every container while consuming tokens, before allocating excess children.
         // Read each child with its schema so numeric tokens retain their original precision
         // and floating-point sign. The parser also bounds depth and rejects duplicate fields.
         switch (parser.currentToken()) {
             case START_ARRAY:
-                if (!(dataType instanceof ArrayType)) {
+                if (dataType != null && !(dataType instanceof ArrayType)) {
                     throw new KafkaRecordEncodingException(
                             "Invalid Kafka record value at " + path + ": expected a JSON object.");
                 }
-                DataType elementType = ((ArrayType) dataType).getElementType();
+                DataType elementType =
+                        dataType == null ? null : ((ArrayType) dataType).getElementType();
                 ArrayNode array = OBJECT_MAPPER.createArrayNode();
                 while (parser.nextToken() != JsonToken.END_ARRAY) {
                     checkContainerSize(array.size() + 1, path);
@@ -233,11 +285,12 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                     checkContainerSize(object.size() + 1, path);
                     String fieldName = parser.currentName();
                     String fieldPath = JsonPath.field(path, fieldName);
+                    validateUnicode(fieldName, fieldPath);
                     DataType fieldType =
                             dataType instanceof MapType
                                     ? ((MapType) dataType).getValueType()
                                     : rowFields.get(fieldName);
-                    if (fieldType == null) {
+                    if (fieldType == null && dataType != null && !rescueEnabled) {
                         throw new KafkaRecordEncodingException(
                                 "Invalid Kafka record value at " + fieldPath + ": unknown field.");
                     }
@@ -246,8 +299,25 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 }
                 return object;
             default:
-                return OBJECT_MAPPER.readTree(parser);
+                JsonNode value = OBJECT_MAPPER.readTree(parser);
+                if (value.isTextual()) {
+                    validateUnicode(value.textValue(), path);
+                }
+                // Jackson can produce a DoubleNode on overflow even in BigDecimal mode.
+                // Never turn a rescued numeric token into the JSON string "Infinity".
+                if ((value.isDouble() || value.isFloat())
+                        && !Double.isFinite(value.doubleValue())) {
+                    throw new KafkaRecordEncodingException(
+                            "Invalid Kafka record value at "
+                                    + path
+                                    + ": non-finite or overflowing number.");
+                }
+                return value;
         }
+    }
+
+    private static void validateUnicode(String value, String path) {
+        JsonToFlussConverters.validateUnicode(value, path, JSON_STRING_TYPE);
     }
 
     private static void checkContainerSize(int size, String path) {
@@ -261,15 +331,102 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
         }
     }
 
+    private static JsonNode extractNestedUnknownFields(
+            JsonNode node, DataType dataType, String path) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (dataType instanceof RowType && node.isObject()) {
+            return extractRowUnknownFields((ObjectNode) node, (RowType) dataType, path);
+        }
+        if (dataType instanceof ArrayType && node.isArray()) {
+            return extractArrayUnknownFields((ArrayNode) node, (ArrayType) dataType, path);
+        }
+        if (dataType instanceof MapType && node.isObject()) {
+            return extractMapValueUnknownFields((ObjectNode) node, (MapType) dataType, path);
+        }
+        return null;
+    }
+
+    private static JsonNode extractRowUnknownFields(ObjectNode node, RowType rowType, String path) {
+        checkContainerSize(node.size(), path);
+        ObjectNode rescuedFields = OBJECT_MAPPER.createObjectNode();
+        List<String> fieldsToRemove = new ArrayList<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            int fieldPosition = rowType.getFieldIndex(field.getKey());
+            if (fieldPosition < 0) {
+                rescuedFields.set(field.getKey(), field.getValue());
+                fieldsToRemove.add(field.getKey());
+            } else {
+                JsonNode nestedRescue =
+                        extractNestedUnknownFields(
+                                field.getValue(),
+                                rowType.getTypeAt(fieldPosition),
+                                JsonPath.field(path, field.getKey()));
+                if (nestedRescue != null) {
+                    rescuedFields.set(field.getKey(), nestedRescue);
+                }
+            }
+        }
+        for (String fieldName : fieldsToRemove) {
+            node.remove(fieldName);
+        }
+        return rescuedFields.isEmpty() ? null : rescuedFields;
+    }
+
+    private static JsonNode extractArrayUnknownFields(
+            ArrayNode node, ArrayType arrayType, String path) {
+        checkContainerSize(node.size(), path);
+        ArrayNode rescuedElements = OBJECT_MAPPER.createArrayNode();
+        boolean hasRescuedElement = false;
+        int elementPosition = 0;
+        for (JsonNode element : node) {
+            JsonNode rescuedElement =
+                    extractNestedUnknownFields(
+                            element,
+                            arrayType.getElementType(),
+                            JsonPath.index(path, elementPosition));
+            if (rescuedElement == null) {
+                rescuedElements.addNull();
+            } else {
+                rescuedElements.add(rescuedElement);
+                hasRescuedElement = true;
+            }
+            elementPosition++;
+        }
+        return hasRescuedElement ? rescuedElements : null;
+    }
+
+    private static JsonNode extractMapValueUnknownFields(
+            ObjectNode node, MapType mapType, String path) {
+        checkContainerSize(node.size(), path);
+        ObjectNode rescuedValues = OBJECT_MAPPER.createObjectNode();
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            JsonNode rescuedValue =
+                    extractNestedUnknownFields(
+                            field.getValue(),
+                            mapType.getValueType(),
+                            JsonPath.field(path, field.getKey()));
+            if (rescuedValue != null) {
+                rescuedValues.set(field.getKey(), rescuedValue);
+            }
+        }
+        return rescuedValues.isEmpty() ? null : rescuedValues;
+    }
+
     private Object[] nullValues() {
         if (nestedType != null) {
             if (!nestedType.isNullable()) {
                 throw new KafkaRecordEncodingException(
                         "Kafka null value cannot populate NOT NULL field '_kafka_value'.");
             }
-            return new Object[] {null};
+            return new Object[rescueEnabled ? 2 : 1];
         }
-        Object[] values = new Object[projection.size()];
+        Object[] values = new Object[projection.size() + (rescueEnabled ? 1 : 0)];
         for (int i = 0; i < projection.size(); i++) {
             DataType dataType = projection.dataTypeAt(i);
             if (!dataType.isNullable()) {

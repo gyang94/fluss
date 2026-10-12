@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
@@ -54,7 +55,13 @@ public final class KafkaRowAssembler {
     public GenericRow assemble(
             Object[] valueValues, @Nullable byte[] key, List<RecordHeader> headers) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
-        setProjectedFields(row, topicSchema.valueProjection(), valueValues);
+        boolean withRescue =
+                topicSchema.valueType() == ValueType.PARSE_JSON
+                        && topicSchema.rescuePosition() >= 0;
+        setProjectedFields(row, topicSchema.valueProjection(), valueValues, withRescue);
+        if (withRescue) {
+            row.setField(topicSchema.rescuePosition(), valueValues[valueValues.length - 1]);
+        }
         if (topicSchema.keyPosition() >= 0) {
             int position = topicSchema.keyPosition();
             if (key == null && !topicSchema.rowType().getTypeAt(position).isNullable()) {
@@ -74,16 +81,17 @@ public final class KafkaRowAssembler {
     }
 
     private static void setProjectedFields(
-            GenericRow row, KafkaFieldProjection projection, Object[] values) {
-        if (values.length != projection.size()) {
+            GenericRow row, KafkaFieldProjection projection, Object[] values, boolean withRescue) {
+        int expected = projection.size() + (withRescue ? 1 : 0);
+        if (values.length != expected) {
             throw new IllegalArgumentException(
                     "Kafka decoder returned "
                             + values.length
-                            + " fields for a projection of "
-                            + projection.size()
+                            + " fields but the value/rescue contract requires "
+                            + expected
                             + ".");
         }
-        for (int i = 0; i < values.length; i++) {
+        for (int i = 0; i < projection.size(); i++) {
             Object value = values[i];
             if (value == null && !projection.dataTypeAt(i).isNullable()) {
                 throw new KafkaRecordEncodingException(

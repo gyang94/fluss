@@ -38,11 +38,7 @@ public final class KafkaTopicWritePlan {
         this.tableInfo = checkNotNull(tableInfo);
         this.topicSchema = checkNotNull(topicSchema);
         // Validate support during preparation as filtered partitions may never call transcode.
-        new KafkaFormatFactoryRegistry()
-                .createDecoder(
-                        topicSchema.valueType(),
-                        topicSchema.valueProjection(),
-                        topicSchema.valueLayout());
+        new KafkaFormatFactoryRegistry().createDecoder(topicSchema);
         this.rowAssembler = new KafkaRowAssembler(topicSchema);
     }
 

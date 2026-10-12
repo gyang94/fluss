@@ -21,6 +21,7 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.format.json.JsonKafkaFormatFactory;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 
@@ -51,12 +52,21 @@ public final class KafkaFormatFactoryRegistry {
     /** Creates and validates a decoder using the table's physical projection and value layout. */
     public KafkaFieldDecoder createDecoder(
             ValueType format, KafkaFieldProjection projection, @Nullable ValueLayout layout) {
+        return factory(format).createDecoder(projection, layout);
+    }
+
+    /** Creates a decoder with fixed rescue-column support from the validated table schema. */
+    public KafkaFieldDecoder createDecoder(KafkaTableSchema schema) {
+        return factory(schema.valueType()).createDecoder(schema);
+    }
+
+    private KafkaFormatFactory factory(ValueType format) {
         KafkaFormatFactory factory = factories.get(format);
         if (factory == null) {
             throw new KafkaTopicSchemaException(
                     "No Kafka format factory is registered for '" + format + "'.");
         }
-        return factory.createDecoder(projection, layout);
+        return factory;
     }
 
     private void register(KafkaFormatFactory factory) {
