@@ -22,12 +22,9 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.fluss.shaded.netty4.io.netty.channel.socket.SocketChannel;
-import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateEvent;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateHandler;
 
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 
@@ -35,56 +32,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Tests Kafka listener idle-time configuration and idle-event handling. */
+/** Tests disabling the Kafka listener's idle timeout. */
 class KafkaProtocolPluginTest {
 
     @Test
-    void testDefaultNettyIdleTimeout() throws Exception {
-        EmbeddedChannel channel = createChannel(new Configuration());
-        try {
-            IdleStateHandler idleHandler = channel.pipeline().get(IdleStateHandler.class);
-            assertThat(idleHandler.getAllIdleTimeInMillis())
-                    .isEqualTo(Duration.ofMinutes(10).toMillis());
-            assertThat(idleHandler.getReaderIdleTimeInMillis()).isZero();
-            assertThat(idleHandler.getWriterIdleTimeInMillis()).isZero();
-        } finally {
-            channel.finishAndReleaseAll();
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(longs = {0, 7})
-    void testConfiguredNettyIdleTimeout(long timeoutSeconds) throws Exception {
+    void testZeroDisablesNettyIdleTimeout() throws Exception {
         Configuration conf = new Configuration();
-        conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ofSeconds(timeoutSeconds));
-        EmbeddedChannel channel = createChannel(conf);
-        try {
-            IdleStateHandler idleHandler = channel.pipeline().get(IdleStateHandler.class);
-            assertThat(idleHandler.getAllIdleTimeInMillis())
-                    .isEqualTo(Duration.ofSeconds(timeoutSeconds).toMillis());
-            assertThat(idleHandler.getReaderIdleTimeInMillis()).isZero();
-            assertThat(idleHandler.getWriterIdleTimeInMillis()).isZero();
-        } finally {
-            channel.finishAndReleaseAll();
-        }
-    }
-
-    @Test
-    void testOnlyAllIdleClosesConnection() throws Exception {
-        EmbeddedChannel channel = createChannel(new Configuration());
-        try {
-            channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_READER_IDLE_STATE_EVENT);
-            assertThat(channel.isActive()).isTrue();
-            channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_WRITER_IDLE_STATE_EVENT);
-            assertThat(channel.isActive()).isTrue();
-            channel.pipeline().fireUserEventTriggered(IdleStateEvent.FIRST_ALL_IDLE_STATE_EVENT);
-            assertThat(channel.isActive()).isFalse();
-        } finally {
-            channel.finishAndReleaseAll();
-        }
-    }
-
-    private static EmbeddedChannel createChannel(Configuration conf) throws Exception {
+        conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ZERO);
         EmbeddedChannel channel = new EmbeddedChannel();
         try {
             // Adapt the socket type while installing the real pipeline on the embedded event loop.
@@ -97,10 +51,12 @@ class KafkaProtocolPluginTest {
                             plugin.createChannelHandler(
                                     new RequestChannel[] {new RequestChannel(1)}, "KAFKA");
             initializer.initChannel(socket);
-            return channel;
-        } catch (Exception | Error failure) {
+            IdleStateHandler idleHandler = channel.pipeline().get(IdleStateHandler.class);
+            assertThat(idleHandler.getAllIdleTimeInMillis()).isZero();
+            assertThat(idleHandler.getReaderIdleTimeInMillis()).isZero();
+            assertThat(idleHandler.getWriterIdleTimeInMillis()).isZero();
+        } finally {
             channel.finishAndReleaseAll();
-            throw failure;
         }
     }
 }

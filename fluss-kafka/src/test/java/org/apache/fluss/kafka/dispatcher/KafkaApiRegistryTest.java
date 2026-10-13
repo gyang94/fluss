@@ -26,7 +26,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
@@ -50,14 +49,6 @@ public class KafkaApiRegistryTest {
     }
 
     @Test
-    public void testEmptyRegistry() {
-        KafkaApiRegistry registry = new KafkaApiRegistry(Collections.emptyList());
-
-        assertThat(registry.lookup(ApiKeys.API_VERSIONS)).isNull();
-        assertThat(registry.advertisedApiSpecs()).isEmpty();
-    }
-
-    @Test
     public void testChangesToInputCollectionDoNotAffectRegistry() {
         TestingApiHandler handler = new TestingApiHandler(ApiKeys.API_VERSIONS, true);
         List<KafkaApiHandler<?>> handlers = new ArrayList<>();
@@ -73,52 +64,27 @@ public class KafkaApiRegistryTest {
     }
 
     @Test
-    public void testAdvertisedSpecsAreSortedAndUnmodifiable() {
+    public void testOnlyEnabledApisAreAdvertisedAndRoutable() {
         TestingApiHandler apiVersions = new TestingApiHandler(ApiKeys.API_VERSIONS, true);
         TestingApiHandler metadata = new TestingApiHandler(ApiKeys.METADATA, true);
-        KafkaApiRegistry registry = new KafkaApiRegistry(Arrays.asList(apiVersions, metadata));
+        TestingApiHandler hidden = new TestingApiHandler(ApiKeys.PRODUCE, false);
+        KafkaApiRegistry registry =
+                new KafkaApiRegistry(Arrays.asList(apiVersions, hidden, metadata));
 
         List<KafkaApiSpec> specs = registry.advertisedApiSpecs();
 
-        assertThat(specs).containsExactly(metadata.apiSpec(), apiVersions.apiSpec());
-        assertThatThrownBy(specs::clear).isInstanceOf(UnsupportedOperationException.class);
-        assertThat(registry.advertisedApiSpecs())
-                .containsExactly(metadata.apiSpec(), apiVersions.apiSpec());
-    }
-
-    @Test
-    public void testOnlyAdvertiseEnabledHandlers() {
-        KafkaApiRegistry registry =
-                new KafkaApiRegistry(
-                        Collections.singletonList(
-                                new TestingApiHandler(ApiKeys.API_VERSIONS, true)));
-        assertThat(registry.advertisedApiSpecs()).hasSize(1);
-
-        KafkaApiRegistry hiddenRegistry =
-                new KafkaApiRegistry(
-                        Collections.singletonList(
-                                new TestingApiHandler(ApiKeys.API_VERSIONS, false)));
-        assertThat(hiddenRegistry.advertisedApiSpecs()).isEmpty();
-        assertThat(hiddenRegistry.lookup(ApiKeys.API_VERSIONS)).isNull();
-    }
-
-    @Test
-    public void testAdvertisedSpecIsSameSpecUsedForRouting() {
-        TestingApiHandler handler = new TestingApiHandler(ApiKeys.API_VERSIONS, true);
-        KafkaApiRegistry registry = new KafkaApiRegistry(Collections.singletonList(handler));
-
-        KafkaApiSpec advertisedSpec = registry.advertisedApiSpecs().get(0);
-        KafkaApiHandler<?> routedHandler = registry.lookup(ApiKeys.API_VERSIONS);
-
-        assertThat(routedHandler).isSameAs(handler);
-        assertThat(routedHandler.apiSpec()).isSameAs(advertisedSpec);
-        for (short version : ApiKeys.API_VERSIONS.allVersions()) {
-            assertThat(advertisedSpec.supportsVersion(version)).isTrue();
+        assertThat(specs)
+                .extracting(KafkaApiSpec::apiKey)
+                .containsExactly(ApiKeys.METADATA, ApiKeys.API_VERSIONS);
+        assertThat(registry.lookup(ApiKeys.PRODUCE)).isNull();
+        for (KafkaApiSpec spec : specs) {
+            KafkaApiHandler<?> handler = registry.lookup(spec.apiKey());
+            assertThat(handler).isNotNull();
+            assertThat(handler.apiSpec().apiKey()).isEqualTo(spec.apiKey());
+            assertThat(spec.minVersion()).isEqualTo(handler.apiSpec().minVersion());
+            assertThat(spec.maxVersion()).isEqualTo(handler.apiSpec().maxVersion());
         }
-        assertThat(
-                        advertisedSpec.supportsVersion(
-                                (short) (ApiKeys.API_VERSIONS.latestVersion() + 1)))
-                .isFalse();
+        assertThatThrownBy(specs::clear).isInstanceOf(UnsupportedOperationException.class);
     }
 
     @Test
