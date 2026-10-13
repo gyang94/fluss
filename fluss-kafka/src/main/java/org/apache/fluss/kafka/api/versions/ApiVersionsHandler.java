@@ -69,8 +69,10 @@ public final class ApiVersionsHandler implements KafkaApiHandler<ApiVersionsRequ
             return CompletableFuture.completedFuture(
                     request.getErrorResponse(Errors.INVALID_REQUEST.exception()));
         }
+        KafkaApiRegistry registry =
+                checkNotNull(registrySupplier.get(), "Kafka API registry is not initialized.");
         ApiVersionsResponseData data = new ApiVersionsResponseData();
-        for (KafkaApiSpec spec : registrySupplier.get().advertisedApiSpecs()) {
+        for (KafkaApiSpec spec : registry.advertisedApiSpecs()) {
             data.apiKeys()
                     .add(
                             new ApiVersionsResponseData.ApiVersion()
