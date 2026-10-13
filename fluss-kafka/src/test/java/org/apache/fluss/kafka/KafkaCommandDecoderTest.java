@@ -17,7 +17,6 @@
 
 package org.apache.fluss.kafka;
 
-import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
@@ -71,7 +70,7 @@ public class KafkaCommandDecoderTest {
             assertThat(parsedRequest.hasUnsupportedRequestVersion()).isTrue();
             assertThat(parsedRequest.version()).isZero();
 
-            new KafkaRequestHandler(new TestingTabletGatewayService()).processRequest(request);
+            new KafkaRequestHandler().processRequest(request);
             channel.runPendingTasks();
 
             responseBuffer = channel.readOutbound();
