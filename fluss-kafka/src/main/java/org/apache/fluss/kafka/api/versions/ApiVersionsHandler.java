@@ -31,6 +31,7 @@ import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -45,11 +46,15 @@ public final class ApiVersionsHandler implements KafkaApiHandler<ApiVersionsRequ
                     ApiKeys.API_VERSIONS.latestVersion(),
                     true);
 
-    private final KafkaApiRegistry registry;
+    private final Supplier<KafkaApiRegistry> registrySupplier;
 
-    /** Creates an ApiVersions handler backed by the server capability registry. */
-    public ApiVersionsHandler(KafkaApiRegistry registry) {
-        this.registry = checkNotNull(registry);
+    /**
+     * Creates an ApiVersions handler backed by the same immutable registry used for dispatch. The
+     * supplier is read only when handling requests, so this handler can be included in the
+     * registry's construction snapshot.
+     */
+    public ApiVersionsHandler(Supplier<KafkaApiRegistry> registrySupplier) {
+        this.registrySupplier = checkNotNull(registrySupplier);
     }
 
     @Override
@@ -65,7 +70,7 @@ public final class ApiVersionsHandler implements KafkaApiHandler<ApiVersionsRequ
                     request.getErrorResponse(Errors.INVALID_REQUEST.exception()));
         }
         ApiVersionsResponseData data = new ApiVersionsResponseData();
-        for (KafkaApiSpec spec : registry.advertisedApiSpecs()) {
+        for (KafkaApiSpec spec : registrySupplier.get().advertisedApiSpecs()) {
             data.apiKeys()
                     .add(
                             new ApiVersionsResponseData.ApiVersion()

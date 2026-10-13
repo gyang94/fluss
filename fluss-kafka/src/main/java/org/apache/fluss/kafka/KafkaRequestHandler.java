@@ -24,16 +24,19 @@ import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
 
+import java.util.Collections;
+
 /** Entry point that dispatches Kafka protocol requests to registered API handlers. */
 public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
 
+    private final KafkaApiRegistry registry;
     private final KafkaRequestDispatcher dispatcher;
 
     /** Creates a Kafka request handler with the implemented server capabilities. */
     public KafkaRequestHandler() {
-        KafkaApiRegistry registry = new KafkaApiRegistry();
-        registry.register(new ApiVersionsHandler(registry));
-        registry.freeze();
+        this.registry =
+                new KafkaApiRegistry(
+                        Collections.singletonList(new ApiVersionsHandler(this::apiRegistry)));
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
 
@@ -54,5 +57,9 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                 request.fail(failure);
                             }
                         });
+    }
+
+    private KafkaApiRegistry apiRegistry() {
+        return registry;
     }
 }

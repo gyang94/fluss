@@ -32,7 +32,9 @@ import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Arrays;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
@@ -43,16 +45,29 @@ class ApiVersionsHandlerTest {
     @ParameterizedTest
     @ValueSource(shorts = {0, 1, 2, 3, 4})
     void testAdvertiseRegisteredRangesAndExcludeHiddenApis(short version) {
-        KafkaApiRegistry registry = new KafkaApiRegistry();
-        ApiVersionsHandler handler = new ApiVersionsHandler(registry);
-        registry.register(handler);
-        registry.register(
+        AtomicReference<KafkaApiRegistry> registryReference = new AtomicReference<>();
+        ApiVersionsHandler handler =
+                new ApiVersionsHandler(
+                        () -> {
+                            assertThat(registryReference.get()).isNotNull();
+                            return registryReference.get();
+                        });
+        TestingApiHandler metadataHandler =
                 new TestingApiHandler(
-                        new KafkaApiSpec(ApiKeys.METADATA, (short) 2, (short) 7, true)));
-        registry.register(
-                new TestingApiHandler(
-                        new KafkaApiSpec(ApiKeys.FETCH, (short) 0, (short) 3, false)));
-        registry.freeze();
+                        new KafkaApiSpec(ApiKeys.METADATA, (short) 2, (short) 7, true));
+        KafkaApiRegistry registry =
+                new KafkaApiRegistry(
+                        Arrays.asList(
+                                handler,
+                                metadataHandler,
+                                new TestingApiHandler(
+                                        new KafkaApiSpec(
+                                                ApiKeys.FETCH, (short) 0, (short) 3, false))));
+        registryReference.set(registry);
+
+        assertThat(registry.lookup(ApiKeys.API_VERSIONS)).isSameAs(handler);
+        assertThat(registry.lookup(ApiKeys.METADATA)).isSameAs(metadataHandler);
+        assertThat(registry.lookup(ApiKeys.FETCH)).isNull();
 
         ApiVersionsResponse response =
                 (ApiVersionsResponse)
