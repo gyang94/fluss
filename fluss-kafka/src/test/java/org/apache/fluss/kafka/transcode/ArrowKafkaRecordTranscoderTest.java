@@ -87,12 +87,12 @@ class ArrowKafkaRecordTranscoderTest {
                                 new RecordHeader("nullable", bytes("discarded")),
                                 new RecordHeader("duplicate", bytes("last")),
                                 new RecordHeader("nullable", null)));
-        for (int mask = 0; mask < 8; mask++) {
+        for (int mask = 0; mask < 16; mask++) {
             TableInfo table = envelope(string, mask);
             TableDescriptor before = table.toTableDescriptor();
             KafkaTableSchema contract = KafkaTableSchema.resolve(before);
             read(
-                    transcoder.transcode(Collections.singletonList(record), table),
+                    transcoder.transcode(7, Collections.singletonList(record), table),
                     table,
                     1,
                     row -> {
@@ -108,6 +108,9 @@ class ArrowKafkaRecordTranscoderTest {
                             assertThat(headers).hasSize(2).containsKey("nullable");
                             assertThat(headers.get("duplicate")).isEqualTo(bytes("last"));
                             assertThat(headers.get("nullable")).isNull();
+                        }
+                        if (contract.metadataPosition() >= 0) {
+                            assertMetadata(row, contract.metadataPosition(), 123L, 1, 7);
                         }
                         if (contract.rescuePosition() >= 0) {
                             assertThat(row.isNullAt(contract.rescuePosition())).isTrue();
@@ -134,7 +137,7 @@ class ArrowKafkaRecordTranscoderTest {
                         new Record(0L, new byte[0], new byte[0], Collections.emptyList()));
         AtomicInteger next = new AtomicInteger();
         read(
-                transcoder.transcode(records, table),
+                transcoder.transcode(0, records, table),
                 table,
                 2,
                 row -> {
@@ -171,6 +174,7 @@ class ArrowKafkaRecordTranscoderTest {
         assertThatThrownBy(
                         () ->
                                 transcoder.transcode(
+                                        0,
                                         Collections.singletonList(
                                                 new Record(
                                                         1L,
@@ -183,6 +187,7 @@ class ArrowKafkaRecordTranscoderTest {
         byte[] invalidUtf8Key = {(byte) 0xff};
         read(
                 transcoder.transcode(
+                        0,
                         Collections.singletonList(
                                 new Record(
                                         1L,
@@ -222,6 +227,7 @@ class ArrowKafkaRecordTranscoderTest {
                         new RecordHeader("same", bytes("last")));
         read(
                 transcoder.transcode(
+                        0,
                         Collections.singletonList(
                                 new Record(1L, null, bytes("v"), overwrittenNull)),
                         table),
@@ -243,7 +249,7 @@ class ArrowKafkaRecordTranscoderTest {
                                 new RecordHeader("same", null)));
         if (nullableValue) {
             read(
-                    transcoder.transcode(Collections.singletonList(finalNull), table),
+                    transcoder.transcode(0, Collections.singletonList(finalNull), table),
                     table,
                     1,
                     row ->
@@ -252,12 +258,15 @@ class ArrowKafkaRecordTranscoderTest {
                                     .containsEntry("same", null));
         } else {
             assertThatThrownBy(
-                            () -> transcoder.transcode(Collections.singletonList(finalNull), table))
+                            () ->
+                                    transcoder.transcode(
+                                            0, Collections.singletonList(finalNull), table))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasMessageContaining("NOT NULL _kafka_headers map values");
         }
         read(
                 transcoder.transcode(
+                        0,
                         Collections.singletonList(
                                 new Record(1L, null, bytes("v"), Collections.emptyList())),
                         table),
@@ -282,7 +291,7 @@ class ArrowKafkaRecordTranscoderTest {
             }
         }
         read(
-                transcoder.transcode(records, table),
+                transcoder.transcode(0, records, table),
                 table,
                 records.size(),
                 row -> {
@@ -299,6 +308,7 @@ class ArrowKafkaRecordTranscoderTest {
         TableInfo table = envelope(false, 4);
         BytesView encoded =
                 transcoder.transcode(
+                        0,
                         Collections.singletonList(
                                 new Record(1L, null, value, Collections.emptyList())),
                         table);
@@ -329,6 +339,7 @@ class ArrowKafkaRecordTranscoderTest {
         assertThatThrownBy(
                         () ->
                                 transcoder.transcode(
+                                        0,
                                         Collections.singletonList(
                                                 new Record(
                                                         1L, null, null, Collections.emptyList())),
@@ -339,37 +350,115 @@ class ArrowKafkaRecordTranscoderTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testRejectsMetadataUntilTranscodingIsSupported(boolean string) {
-        DataType metadataType =
-                DataTypes.ROW(
-                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
-                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
-                        DataTypes.FIELD("partition", DataTypes.INT()));
-        for (boolean nullable : new boolean[] {false, true}) {
-            TableDescriptor descriptor =
-                    descriptor(
-                                    Schema.newBuilder()
-                                            .column("_kafka_value", valueType(string))
-                                            .column("_kafka_metadata", metadataType.copy(nullable))
-                                            .build(),
-                                    string)
-                            .build();
-            // DDL accepts the new contract, but encoding must not silently drop its metadata.
-            assertThat(KafkaTableSchema.resolve(descriptor).metadataPosition()).isEqualTo(1);
-            assertThatThrownBy(
-                            () ->
-                                    transcoder.transcode(
-                                            Collections.singletonList(
-                                                    new Record(
-                                                            123L,
-                                                            TimestampType.CREATE_TIME,
-                                                            null,
-                                                            bytes("v"),
-                                                            Collections.emptyList())),
-                                            table(descriptor)))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining("_kafka_metadata conversion is not supported");
+    void testMetadataPreservesInputTimestampBatchTypeAndRequestedPartition(boolean string)
+            throws Exception {
+        long[] timestamps = {Record.NO_TIMESTAMP, 0L, 123L, 1728912345678L, Long.MAX_VALUE};
+        TimestampType[] types = {
+            TimestampType.UNKNOWN, TimestampType.CREATE_TIME, TimestampType.LOG_APPEND_TIME
+        };
+        int[] typeIds = {-1, 0, 1};
+        List<Record> records = new ArrayList<>();
+        for (TimestampType type : types) {
+            for (long timestamp : timestamps) {
+                records.add(new Record(timestamp, type, null, bytes("v"), Collections.emptyList()));
+            }
         }
+        for (boolean nullable : new boolean[] {false, true}) {
+            TableInfo table = metadataTable(string, nullable, true);
+            TableDescriptor before = table.toTableDescriptor();
+            // Reuse the same converter and records across requests without retaining partition
+            // state.
+            for (int partition : new int[] {7, 0, 3}) {
+                AtomicInteger next = new AtomicInteger();
+                read(
+                        transcoder.transcode(partition, records, table),
+                        table,
+                        records.size(),
+                        row -> {
+                            int i = next.getAndIncrement();
+                            assertMetadata(
+                                    row,
+                                    0,
+                                    timestamps[i % timestamps.length],
+                                    typeIds[i / timestamps.length],
+                                    partition);
+                            assertValue(row, 1, string, bytes("v"));
+                        });
+            }
+            assertThat(table.toTableDescriptor()).isEqualTo(before);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testMetadataTimestampNotNullFailureHasNoPartialOutputAndRemainsUsable(boolean string)
+            throws Exception {
+        Record valid =
+                new Record(
+                        0L, TimestampType.CREATE_TIME, null, bytes("v"), Collections.emptyList());
+        for (boolean nullable : new boolean[] {false, true}) {
+            TableInfo table = metadataTable(string, nullable, false);
+            for (TimestampType type : TimestampType.values()) {
+                Record invalid =
+                        new Record(
+                                Record.NO_TIMESTAMP,
+                                type,
+                                null,
+                                bytes("v"),
+                                Collections.emptyList());
+                AtomicReference<BytesView> output = new AtomicReference<>();
+                Throwable failure =
+                        catchThrowable(
+                                () ->
+                                        output.set(
+                                                transcoder.transcode(
+                                                        7, Arrays.asList(valid, invalid), table)));
+                assertThat(failure)
+                        .isInstanceOf(KafkaRecordEncodingException.class)
+                        .hasMessageContaining("NOT NULL _kafka_metadata.timestamp");
+                assertThat(failure.getSuppressed()).isEmpty();
+                assertThat(output).hasNullValue();
+                read(
+                        transcoder.transcode(3, Collections.singletonList(valid), table),
+                        table,
+                        1,
+                        row -> {
+                            assertMetadata(row, 0, 0L, 0, 3);
+                            assertValue(row, 1, string, bytes("v"));
+                        });
+            }
+        }
+    }
+
+    @Test
+    void testLegacyRecordDoesNotInferBatchTimestampType() throws Exception {
+        TableInfo table = metadataTable(true, false, false);
+        read(
+                transcoder.transcode(
+                        7,
+                        Collections.singletonList(
+                                new Record(123L, null, bytes("v"), Collections.emptyList())),
+                        table),
+                table,
+                1,
+                row -> assertMetadata(row, 0, 123L, -1, 7));
+    }
+
+    @Test
+    void testRejectsNegativePartitionId() {
+        assertThatThrownBy(
+                        () ->
+                                transcoder.transcode(
+                                        -1,
+                                        Collections.singletonList(
+                                                new Record(
+                                                        Record.NO_TIMESTAMP,
+                                                        null,
+                                                        bytes("v"),
+                                                        Collections.emptyList())),
+                                        envelope(false, 8)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Kafka partition ID must be non-negative");
     }
 
     @Test
@@ -388,6 +477,7 @@ class ArrowKafkaRecordTranscoderTest {
         assertThatThrownBy(
                         () ->
                                 transcoder.transcode(
+                                        0,
                                         Collections.singletonList(
                                                 new Record(
                                                         123L,
@@ -411,6 +501,7 @@ class ArrowKafkaRecordTranscoderTest {
         assertThatThrownBy(
                         () ->
                                 transcoder.transcode(
+                                        0,
                                         records,
                                         table(
                                                 descriptor(fixed, true)
@@ -423,6 +514,7 @@ class ArrowKafkaRecordTranscoderTest {
         assertThatThrownBy(
                         () ->
                                 transcoder.transcode(
+                                        0,
                                         records,
                                         table(
                                                 descriptor(
@@ -438,6 +530,7 @@ class ArrowKafkaRecordTranscoderTest {
         assertThatThrownBy(
                         () ->
                                 transcoder.transcode(
+                                        0,
                                         records,
                                         table(
                                                 descriptor(fixed, true)
@@ -446,7 +539,8 @@ class ArrowKafkaRecordTranscoderTest {
                                                         .build())))
                 .isInstanceOf(KafkaTopicSchemaException.class)
                 .hasMessageContaining("custom property");
-        assertThatThrownBy(() -> transcoder.transcode(Collections.emptyList(), valueTable(false)))
+        assertThatThrownBy(
+                        () -> transcoder.transcode(0, Collections.emptyList(), valueTable(false)))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("empty");
     }
@@ -470,6 +564,7 @@ class ArrowKafkaRecordTranscoderTest {
             assertThatThrownBy(
                             () ->
                                     transcoder.transcode(
+                                            0,
                                             Collections.singletonList(
                                                     new Record(
                                                             1L,
@@ -486,12 +581,17 @@ class ArrowKafkaRecordTranscoderTest {
     @ValueSource(booleans = {false, true})
     void testStreamingBatchPreservesDistinctRecordsBeyondInitialCapacity(boolean string)
             throws Exception {
-        TableInfo table = envelope(string, 7);
+        TableInfo table = envelope(string, 15);
         List<Record> records = new ArrayList<>();
         for (int i = 0; i < 2050; i++) {
             records.add(
                     new Record(
-                            i,
+                            i % 3 == 0 ? Record.NO_TIMESTAMP : i,
+                            i % 3 == 0
+                                    ? TimestampType.UNKNOWN
+                                    : (i % 3 == 1
+                                            ? TimestampType.CREATE_TIME
+                                            : TimestampType.LOG_APPEND_TIME),
                             bytes("key-" + i),
                             bytes("消息-" + i),
                             Arrays.asList(
@@ -500,7 +600,7 @@ class ArrowKafkaRecordTranscoderTest {
         }
         AtomicInteger next = new AtomicInteger();
         read(
-                transcoder.transcode(records, table),
+                transcoder.transcode(7, records, table),
                 table,
                 records.size(),
                 row -> {
@@ -511,6 +611,7 @@ class ArrowKafkaRecordTranscoderTest {
                     assertThat(map).hasSize(1);
                     assertThat(map.get("duplicate")).isEqualTo(bytes("header-" + i));
                     assertThat(row.isNullAt(1)).isTrue();
+                    assertMetadata(row, 4, i % 3 == 0 ? Record.NO_TIMESTAMP : i, i % 3 - 1, 7);
                 });
     }
 
@@ -523,7 +624,9 @@ class ArrowKafkaRecordTranscoderTest {
         }
         read(
                 transcoder.transcode(
-                        Collections.singletonList(new Record(1L, null, bytes("v"), input)), table),
+                        0,
+                        Collections.singletonList(new Record(1L, null, bytes("v"), input)),
+                        table),
                 table,
                 1,
                 row -> {
@@ -588,6 +691,7 @@ class ArrowKafkaRecordTranscoderTest {
                             () ->
                                     output.set(
                                             transcoder.transcode(
+                                                    0,
                                                     Arrays.asList(
                                                             valid,
                                                             new Record(
@@ -601,7 +705,7 @@ class ArrowKafkaRecordTranscoderTest {
             assertThat(output).hasNullValue();
         }
         read(
-                transcoder.transcode(Collections.singletonList(valid), table),
+                transcoder.transcode(0, Collections.singletonList(valid), table),
                 table,
                 1,
                 row -> assertThat(row.getString(0).toString()).isEqualTo("valid"));
@@ -640,12 +744,12 @@ class ArrowKafkaRecordTranscoderTest {
                         () ->
                                 output.set(
                                         transcoder.transcode(
-                                                Arrays.asList(valid, invalid), table)));
+                                                0, Arrays.asList(valid, invalid), table)));
         assertThat(failure).isInstanceOf(KafkaRecordEncodingException.class);
         assertThat(failure.getSuppressed()).isEmpty();
         assertThat(output).hasNullValue();
         read(
-                transcoder.transcode(Collections.singletonList(valid), table),
+                transcoder.transcode(0, Collections.singletonList(valid), table),
                 table,
                 1,
                 row -> assertThat(headers(row.getMap(1)).get("h")).isEqualTo(bytes("v")));
@@ -706,7 +810,31 @@ class ArrowKafkaRecordTranscoderTest {
         if ((mask & 1) != 0) {
             schema.column("_kafka_key", DataTypes.BYTES());
         }
+        if ((mask & 8) != 0) {
+            schema.column("_kafka_metadata", metadataType(true));
+        }
         return table(descriptor(schema.build(), string).build());
+    }
+
+    private static DataType metadataType(boolean nullableTimestamp) {
+        return DataTypes.ROW(
+                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3).copy(nullableTimestamp)),
+                DataTypes.FIELD("timestamp_type", DataTypes.INT().copy(false)),
+                DataTypes.FIELD("partition", DataTypes.INT().copy(false)));
+    }
+
+    private static TableInfo metadataTable(
+            boolean string, boolean nullableRow, boolean nullableTimestamp) {
+        return table(
+                descriptor(
+                                Schema.newBuilder()
+                                        .column(
+                                                "_kafka_metadata",
+                                                metadataType(nullableTimestamp).copy(nullableRow))
+                                        .column("_kafka_value", valueType(string))
+                                        .build(),
+                                string)
+                        .build());
     }
 
     private static DataType valueType(boolean string) {
@@ -716,7 +844,7 @@ class ArrowKafkaRecordTranscoderTest {
     private static TableDescriptor.Builder descriptor(Schema schema, boolean string) {
         return TableDescriptor.builder()
                 .schema(schema)
-                .distributedBy(1)
+                .distributedBy(8)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                 .property(
@@ -745,6 +873,23 @@ class ArrowKafkaRecordTranscoderTest {
         } else {
             assertThat(row.getBytes(position)).isEqualTo(value);
         }
+    }
+
+    private static void assertMetadata(
+            InternalRow row, int position, long timestamp, int timestampType, int partition) {
+        assertThat(row.isNullAt(position)).isFalse();
+        InternalRow metadata = row.getRow(position, 3);
+        assertThat(metadata.getFieldCount()).isEqualTo(3);
+        if (timestamp == Record.NO_TIMESTAMP) {
+            assertThat(metadata.isNullAt(0)).isTrue();
+        } else {
+            assertThat(metadata.isNullAt(0)).isFalse();
+            assertThat(metadata.getTimestampLtz(0, 3).getEpochMillisecond()).isEqualTo(timestamp);
+        }
+        assertThat(metadata.isNullAt(1)).isFalse();
+        assertThat(metadata.getInt(1)).isEqualTo(timestampType);
+        assertThat(metadata.isNullAt(2)).isFalse();
+        assertThat(metadata.getInt(2)).isEqualTo(partition);
     }
 
     private static void read(
