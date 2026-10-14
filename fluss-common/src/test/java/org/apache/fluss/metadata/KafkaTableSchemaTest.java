@@ -89,7 +89,7 @@ class KafkaTableSchemaTest {
     @ValueSource(strings = {"binary", "string"})
     void testFixedValueColumnWithOptionalSystemFields(String format) {
         DataType valueType = format.equals("binary") ? DataTypes.BYTES() : DataTypes.STRING();
-        for (int mask = 0; mask < 8; mask++) {
+        for (int mask = 0; mask < 16; mask++) {
             Schema.Builder schema =
                     Schema.newBuilder().column("_kafka_value", valueType.copy(false));
             if ((mask & 1) != 0) {
@@ -102,6 +102,9 @@ class KafkaTableSchemaTest {
             if ((mask & 4) != 0) {
                 schema.column("_kafka_rescue", DataTypes.STRING());
             }
+            if ((mask & 8) != 0) {
+                schema.column("_kafka_metadata", metadataType());
+            }
             TableDescriptor table = enabled(schema.build(), format).build();
             byte[] before = table.toJsonBytes();
             KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
@@ -111,6 +114,9 @@ class KafkaTableSchemaTest {
             assertThat(resolved.keyPosition() >= 0).isEqualTo((mask & 1) != 0);
             assertThat(resolved.headersPosition() >= 0).isEqualTo((mask & 2) != 0);
             assertThat(resolved.rescuePosition() >= 0).isEqualTo((mask & 4) != 0);
+            assertThat(resolved.metadataPosition() >= 0).isEqualTo((mask & 8) != 0);
+            assertThat(resolved.metadataPosition())
+                    .isEqualTo(table.getSchema().getRowType().getFieldIndex("_kafka_metadata"));
             assertThat(table.toJsonBytes()).isEqualTo(before);
             assertThat(table.getProperties())
                     .doesNotContainKeys(
@@ -134,6 +140,7 @@ class KafkaTableSchemaTest {
                                 Schema.newBuilder()
                                         .column("id", DataTypes.BIGINT().copy(false))
                                         .column("_kafka_rescue", DataTypes.STRING())
+                                        .column("_kafka_metadata", metadataType())
                                         .column("payload", nested)
                                         .column("_kafka_key", DataTypes.BYTES())
                                         .column(
@@ -147,9 +154,10 @@ class KafkaTableSchemaTest {
         KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
         assertThat(resolved.valueType()).isEqualTo(ValueType.PARSE_JSON);
         assertThat(resolved.valueLayout()).isEqualTo(ValueLayout.FLAT);
-        assertThat(resolved.valueProjection().positions()).containsExactly(0, 2, 5);
+        assertThat(resolved.valueProjection().positions()).containsExactly(0, 3, 6);
         assertThat(resolved.valueProjection().dataTypeAt(1)).isEqualTo(nested);
         assertThat(resolved.rescuePosition()).isEqualTo(1);
+        assertThat(resolved.metadataPosition()).isEqualTo(2);
         assertThat(table.getProperties()).doesNotContainKey("table.kafka.convert.value.layout");
         TableDescriptor noRescue =
                 enabled(
@@ -174,6 +182,7 @@ class KafkaTableSchemaTest {
                 enabled(
                                 Schema.newBuilder()
                                         .column("_kafka_rescue", DataTypes.STRING())
+                                        .column("_kafka_metadata", metadataType())
                                         .column("_kafka_value", row)
                                         .build(),
                                 "parse_json")
@@ -181,9 +190,10 @@ class KafkaTableSchemaTest {
                         .build();
         KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
         assertThat(resolved.valueLayout()).isEqualTo(ValueLayout.NESTED);
-        assertThat(resolved.valueProjection().positions()).containsExactly(1);
+        assertThat(resolved.valueProjection().positions()).containsExactly(2);
         assertThat(resolved.valueProjection().dataTypeAt(0)).isEqualTo(row);
         assertThat(resolved.rescuePosition()).isZero();
+        assertThat(resolved.metadataPosition()).isEqualTo(1);
     }
 
     @ParameterizedTest
@@ -425,33 +435,63 @@ class KafkaTableSchemaTest {
     }
 
     @Test
-    void testMetadataStructureAndUnavailableOffsetPersistence() {
+    void testMetadataPreservesDeclaredNullability() {
         RowType metadata =
                 DataTypes.ROW(
                         DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
-                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
-                        DataTypes.FIELD("partition", DataTypes.INT()),
-                        DataTypes.FIELD("offset", DataTypes.BIGINT()));
-        assertInvalid(withSystem("_kafka_metadata", metadata), "persisting actual per-row offsets");
-        assertInvalid(withSystem("_kafka_metadata", DataTypes.STRING()), "must be ROW");
-        assertInvalid(
-                withSystem(
-                        "_kafka_metadata",
+                        DataTypes.FIELD("timestamp_type", DataTypes.INT().copy(false)),
+                        DataTypes.FIELD("partition", DataTypes.INT().copy(false)));
+        for (boolean nullable : new boolean[] {true, false}) {
+            DataType type = metadata.copy(nullable);
+            TableDescriptor table = withSystem("_kafka_metadata", type);
+            KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
+            assertThat(resolved.rowType().getTypeAt(resolved.metadataPosition())).isEqualTo(type);
+            assertThat(KafkaTableSchema.resolve(TableDescriptor.fromJsonBytes(table.toJsonBytes())))
+                    .isEqualTo(resolved);
+        }
+    }
+
+    @Test
+    void testMetadataRejectsInvalidStructureAndOffsetField() {
+        for (DataType invalid :
+                Arrays.asList(
+                        DataTypes.STRING(),
+                        DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT())),
+                        DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("partition", DataTypes.INT()),
+                                DataTypes.FIELD("offset", DataTypes.BIGINT())),
                         DataTypes.ROW(
                                 DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP(3)),
-                                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
-                                DataTypes.FIELD("partition", DataTypes.INT()),
-                                        DataTypes.FIELD("offset", DataTypes.BIGINT()))),
-                "TIMESTAMP_LTZ(3)");
-        assertInvalid(
-                withSystem(
-                        "_kafka_metadata",
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("partition", DataTypes.INT())),
                         DataTypes.ROW(
-                                DataTypes.FIELD("offset", DataTypes.BIGINT()),
-                                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(6)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("partition", DataTypes.INT())),
+                        DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.STRING()),
+                                DataTypes.FIELD("partition", DataTypes.INT())),
+                        DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("partition", DataTypes.BIGINT())),
+                        DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
                                 DataTypes.FIELD("partition", DataTypes.INT()),
-                                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)))),
-                "must be ROW");
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT())),
+                        DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("bucket", DataTypes.INT())))) {
+            assertInvalid(
+                    withSystem("_kafka_metadata", invalid),
+                    "ROW<timestamp TIMESTAMP_LTZ(3), timestamp_type INT, partition INT>");
+        }
     }
 
     @Test
@@ -508,6 +548,13 @@ class KafkaTableSchemaTest {
                                         TablePath.of(database, tableName + "t"), table))
                 .isInstanceOf(InvalidTableException.class)
                 .hasMessageContaining("Kafka topic");
+    }
+
+    private static RowType metadataType() {
+        return DataTypes.ROW(
+                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                DataTypes.FIELD("partition", DataTypes.INT()));
     }
 
     private static TableDescriptor withSystem(String name, DataType type) {

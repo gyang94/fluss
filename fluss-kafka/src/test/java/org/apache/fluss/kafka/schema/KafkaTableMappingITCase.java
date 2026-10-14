@@ -444,9 +444,62 @@ class KafkaTableMappingITCase {
         assertThat(KafkaTableSchema.isEnabled(stored(path))).isTrue();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"binary", "string"})
+    void testMetadataCanBeCreatedAndEnabledWithoutOffset(String format) throws Exception {
+        Schema schema =
+                Schema.newBuilder()
+                        .column("_kafka_metadata", metadataType())
+                        .column(
+                                "_kafka_value",
+                                "binary".equals(format) ? DataTypes.BYTES() : DataTypes.STRING())
+                        .build();
+        TableDescriptor descriptor =
+                enabled()
+                        .schema(schema)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, format)
+                        .build();
+        TablePath created = TablePath.of("ddl", "metadata_create_" + format);
+        createTable(CLUSTER, created, descriptor);
+        TableDescriptor persisted = stored(created);
+        assertThat(persisted.getSchema()).isEqualTo(schema);
+        assertThat(kafkaProperties(persisted)).isEqualTo(kafkaProperties(descriptor));
+        assertThat(KafkaTableSchema.resolve(persisted).metadataPosition()).isZero();
+
+        TablePath altered = TablePath.of("ddl", "metadata_enable_" + format);
+        createTable(
+                CLUSTER,
+                altered,
+                TableDescriptor.builder(descriptor)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                        .build());
+        int schemaId = info(altered).getSchemaId();
+        set(altered, Collections.singletonMap("table.kafka.enabled", "true"));
+        persisted = stored(altered);
+        assertThat(info(altered).getSchemaId()).isEqualTo(schemaId);
+        assertThat(persisted.getSchema()).isEqualTo(schema);
+        assertThat(kafkaProperties(persisted)).isEqualTo(kafkaProperties(descriptor));
+        assertThat(KafkaTableSchema.resolve(persisted).metadataPosition()).isZero();
+    }
+
     @Test
-    void testUnsupportedMetadataOffsetCannotBeEnabled() throws Exception {
-        TablePath path = TablePath.of("ddl", "offset_capability");
+    void testMetadataCanBeAddedToEnabledTable() throws Exception {
+        TablePath path = TablePath.of("ddl", "metadata_add");
+        createTable(CLUSTER, path, enabled().build());
+        TableDescriptor before = stored(path);
+        addColumn(path, "_kafka_metadata", metadataType());
+        TableDescriptor after = stored(path);
+        KafkaTableSchema resolved = KafkaTableSchema.resolve(after);
+        assertThat(resolved.metadataPosition()).isGreaterThanOrEqualTo(0);
+        assertThat(resolved.rowType().getTypeAt(resolved.metadataPosition()))
+                .isEqualTo(metadataType());
+        assertThat(kafkaProperties(after)).isEqualTo(kafkaProperties(before));
+    }
+
+    @Test
+    void testMetadataOffsetFieldRejectedOnCreateAndEnable() throws Exception {
+        gateway.createDatabase(newCreateDatabaseRequest("ddl", true)).get();
+        TablePath path = TablePath.of("ddl", "metadata_with_offset");
         Schema schema =
                 Schema.newBuilder()
                         .column("_kafka_value", DataTypes.BYTES())
@@ -458,6 +511,18 @@ class KafkaTableMappingITCase {
                                         DataTypes.FIELD("partition", DataTypes.INT()),
                                         DataTypes.FIELD("offset", DataTypes.BIGINT())))
                         .build();
+        assertThatThrownBy(
+                        () ->
+                                gateway.createTable(
+                                                newCreateTableRequest(
+                                                        path,
+                                                        enabled().schema(schema).build(),
+                                                        false))
+                                        .get())
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining(
+                        "ROW<timestamp TIMESTAMP_LTZ(3), timestamp_type INT, partition INT>");
+        assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
         createTable(
                 CLUSTER,
                 path,
@@ -468,7 +533,8 @@ class KafkaTableMappingITCase {
         TableDescriptor before = stored(path);
         assertThatThrownBy(() -> set(path, Collections.singletonMap("table.kafka.enabled", "true")))
                 .hasCauseInstanceOf(InvalidTableException.class)
-                .hasStackTraceContaining("actual per-row offsets");
+                .hasStackTraceContaining(
+                        "ROW<timestamp TIMESTAMP_LTZ(3), timestamp_type INT, partition INT>");
         assertThat(stored(path)).isEqualTo(before);
     }
 
@@ -493,6 +559,13 @@ class KafkaTableMappingITCase {
         assertThatThrownBy(() -> set(path, Collections.singletonMap("table.kafka.enabled", "true")))
                 .hasCauseInstanceOf(InvalidTableException.class);
         assertThat(stored(path)).isEqualTo(before);
+    }
+
+    private static DataType metadataType() {
+        return DataTypes.ROW(
+                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                DataTypes.FIELD("partition", DataTypes.INT()));
     }
 
     private GetTableInfoResponse info(TablePath path) throws Exception {

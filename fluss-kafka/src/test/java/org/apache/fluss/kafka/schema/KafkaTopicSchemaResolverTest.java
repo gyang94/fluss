@@ -34,9 +34,27 @@ class KafkaTopicSchemaResolverTest {
 
     @Test
     void testEnabledContractUsesSharedValidation() {
-        TableDescriptor table = table().property(ConfigOptions.TABLE_KAFKA_ENABLED, true).build();
+        TableDescriptor table =
+                table().schema(
+                                Schema.newBuilder()
+                                        .column(
+                                                "_kafka_metadata",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "timestamp",
+                                                                DataTypes.TIMESTAMP_LTZ(3)),
+                                                        DataTypes.FIELD(
+                                                                "timestamp_type", DataTypes.INT()),
+                                                        DataTypes.FIELD(
+                                                                "partition", DataTypes.INT())))
+                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .build())
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                        .build();
         assertThat(resolver.isEnabled(table)).isTrue();
         assertThat(resolver.resolve(table)).isEqualTo(KafkaTableSchema.resolve(table));
+        assertThat(resolver.resolve(table).metadataPosition()).isZero();
+        assertThat(resolver.resolve(table).valueProjection().positions()).containsExactly(1);
         assertThat(resolver.resolve(TableDescriptor.fromJsonBytes(table.toJsonBytes())))
                 .isEqualTo(resolver.resolve(table));
     }
