@@ -337,8 +337,43 @@ class ArrowKafkaRecordTranscoderTest {
                 .hasMessageContaining("NOT NULL field '_kafka_value'");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testRejectsMetadataUntilTranscodingIsSupported(boolean string) {
+        DataType metadataType =
+                DataTypes.ROW(
+                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                        DataTypes.FIELD("partition", DataTypes.INT()));
+        for (boolean nullable : new boolean[] {false, true}) {
+            TableDescriptor descriptor =
+                    descriptor(
+                                    Schema.newBuilder()
+                                            .column("_kafka_value", valueType(string))
+                                            .column("_kafka_metadata", metadataType.copy(nullable))
+                                            .build(),
+                                    string)
+                            .build();
+            // DDL accepts the new contract, but encoding must not silently drop its metadata.
+            assertThat(KafkaTableSchema.resolve(descriptor).metadataPosition()).isEqualTo(1);
+            assertThatThrownBy(
+                            () ->
+                                    transcoder.transcode(
+                                            Collections.singletonList(
+                                                    new Record(
+                                                            123L,
+                                                            TimestampType.CREATE_TIME,
+                                                            null,
+                                                            bytes("v"),
+                                                            Collections.emptyList())),
+                                            table(descriptor)))
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining("_kafka_metadata conversion is not supported");
+        }
+    }
+
     @Test
-    void testRejectsMetadataUntilActualOffsetsCanBePersisted() {
+    void testRejectsLegacyMetadataOffsetField() {
         Schema schema =
                 Schema.newBuilder()
                         .column("_kafka_value", DataTypes.STRING())
@@ -362,7 +397,9 @@ class ArrowKafkaRecordTranscoderTest {
                                                         Collections.emptyList())),
                                         table(descriptor(schema, true).build())))
                 .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("actual per-row offsets");
+                .hasMessageContaining(
+                        "_kafka_metadata must be ROW<timestamp TIMESTAMP_LTZ(3), "
+                                + "timestamp_type INT, partition INT>");
     }
 
     @Test
