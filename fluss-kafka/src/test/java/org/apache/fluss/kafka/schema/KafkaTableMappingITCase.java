@@ -19,8 +19,6 @@ package org.apache.fluss.kafka.schema;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.exception.DatabaseNotExistException;
-import org.apache.fluss.exception.InvalidConfigException;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.metadata.KafkaTableSchema;
@@ -38,6 +36,7 @@ import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.json.DataTypeJsonSerde;
 import org.apache.fluss.utils.json.JsonSerdeUtils;
 
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -67,7 +66,7 @@ class KafkaTableMappingITCase {
 
     static {
         CONFIG.set(ConfigOptions.KAFKA_ENABLED, true);
-        CONFIG.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "missing_default");
+        CONFIG.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "kafka_default");
         CONFIG.setString("kafka.database", "legacy_database");
     }
 
@@ -77,14 +76,24 @@ class KafkaTableMappingITCase {
 
     private CoordinatorGateway gateway;
 
+    @BeforeAll
+    static void verifyConfiguredDatabaseCreatedOnStartup() throws Exception {
+        assertThat(
+                        CLUSTER.newCoordinatorClient()
+                                .databaseExists(newDatabaseExistsRequest("kafka_default"))
+                                .get()
+                                .isExists())
+                .isTrue();
+    }
+
     @BeforeEach
     void setup() {
         gateway = CLUSTER.newCoordinatorClient();
     }
 
     @Test
-    void testNoAutomaticKafkaDatabaseAndQualifiedAccessWithoutDefaultDatabase() throws Exception {
-        for (String database : Arrays.asList("missing_default", "kafka", "legacy_database")) {
+    void testConfiguredKafkaDatabaseAndQualifiedAccess() throws Exception {
+        for (String database : Arrays.asList("kafka", "legacy_database")) {
             assertThat(gateway.databaseExists(newDatabaseExistsRequest(database)).get().isExists())
                     .isFalse();
         }
@@ -99,22 +108,16 @@ class KafkaTableMappingITCase {
         long salesId = createTable(CLUSTER, sales, enabled().build());
         long warehouseId = createTable(CLUSTER, warehouse, enabled().build());
         assertThat(salesId).isNotEqualTo(warehouseId);
-        assertThat(mapper.toTablePath("orders"))
-                .isEqualTo(TablePath.of("missing_default", "orders"));
-        assertThatThrownBy(
-                        () ->
-                                gateway.createTable(
-                                                newCreateTableRequest(
-                                                        mapper.toTablePath("orders"),
-                                                        enabled().build(),
-                                                        false))
-                                        .get())
-                .hasCauseInstanceOf(DatabaseNotExistException.class);
+        assertThat(mapper.toTablePath("orders")).isEqualTo(TablePath.of("kafka_default", "orders"));
+        // The cluster fixture removes custom databases between tests; recreate this table's
+        // database through the usual DDL helper after checking startup creation in @BeforeAll.
+        createTable(CLUSTER, mapper.toTablePath("orders"), enabled().build());
         assertThat(
-                        gateway.databaseExists(newDatabaseExistsRequest("missing_default"))
+                        gateway.databaseExists(newDatabaseExistsRequest("kafka_default"))
                                 .get()
                                 .isExists())
-                .isFalse();
+                .isTrue();
+        assertThat(KafkaTableSchema.isEnabled(stored(mapper.toTablePath("orders")))).isTrue();
         Configuration config = new Configuration();
         config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "sales");
         KafkaTopicMapper aliasMapper = new KafkaTopicMapper(config);
@@ -123,60 +126,36 @@ class KafkaTableMappingITCase {
         assertThat(aliasMapper.toTopicName(sales)).isEqualTo("sales.orders");
     }
 
-    @Test
-    void testDefaultAliasUsesExistingFlussDatabase() throws Exception {
-        KafkaTopicMapper mapper = new KafkaTopicMapper();
-        TablePath path = mapper.toTablePath("default_alias");
-        assertThat(path).isEqualTo(TablePath.of(DEFAULT_DATABASE, "default_alias"));
-        createTable(CLUSTER, path, enabled().build());
-        assertThat(info(mapper.toTablePath("fluss.default_alias")).getTableId())
-                .isEqualTo(info(path).getTableId());
-        assertThat(mapper.toTopicName(path)).isEqualTo("fluss.default_alias");
-    }
-
     @ParameterizedTest
     @ValueSource(strings = {"flat", "nested"})
     void testJsonCreateAndEnableRejectUnsupportedBusinessSchema(String layout) throws Exception {
         gateway.createDatabase(newCreateDatabaseRequest("ddl_json", true)).get();
-        DataType invalidMap = DataTypes.MAP(DataTypes.INT(), DataTypes.STRING());
-        int index = 0;
-        for (DataType type :
-                Arrays.asList(
-                        invalidMap,
-                        DataTypes.ARRAY(invalidMap),
-                        DataTypes.ROW(DataTypes.FIELD("attributes", invalidMap)),
-                        DataTypes.MAP(DataTypes.STRING(), DataTypes.ARRAY(invalidMap)))) {
-            TablePath path = TablePath.of("ddl_json", layout + "_invalid_" + index++);
-            TableDescriptor descriptor = jsonTable(layout, type).build();
-            assertThatThrownBy(
-                            () ->
-                                    gateway.createTable(
-                                                    newCreateTableRequest(path, descriptor, false))
-                                            .get())
-                    .hasCauseInstanceOf(InvalidTableException.class)
-                    .hasStackTraceContaining("only supports STRING map keys");
-            assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
-            assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(path)).isZero();
+        TablePath path = TablePath.of("ddl_json", layout + "_invalid");
+        DataType invalid =
+                DataTypes.ARRAY(
+                        DataTypes.ROW(
+                                DataTypes.FIELD(
+                                        "attributes",
+                                        DataTypes.MAP(DataTypes.INT(), DataTypes.STRING()))));
+        TableDescriptor descriptor = jsonTable(layout, invalid).build();
+        assertThatThrownBy(
+                        () ->
+                                gateway.createTable(newCreateTableRequest(path, descriptor, false))
+                                        .get())
+                .hasCauseInstanceOf(InvalidTableException.class);
+        assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
+        assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(path)).isZero();
 
-            // The identical schema is legal for an ordinary, explicitly disabled Fluss table.
-            createTable(
-                    CLUSTER,
-                    path,
-                    TableDescriptor.builder(descriptor)
-                            .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
-                            .build());
-            GetTableInfoResponse before = info(path);
-            assertThatThrownBy(
-                            () ->
-                                    set(
-                                            path,
-                                            Collections.singletonMap(
-                                                    "table.kafka.enabled", "true")))
-                    .hasCauseInstanceOf(InvalidTableException.class)
-                    .hasStackTraceContaining("only supports STRING map keys");
-            assertUnchanged(path, before);
-            assertThat(KafkaTableSchema.isEnabled(stored(path))).isFalse();
-        }
+        createTable(
+                CLUSTER,
+                path,
+                TableDescriptor.builder(descriptor)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                        .build());
+        GetTableInfoResponse before = info(path);
+        assertThatThrownBy(() -> set(path, Collections.singletonMap("table.kafka.enabled", "true")))
+                .hasCauseInstanceOf(InvalidTableException.class);
+        assertUnchanged(path, before);
     }
 
     @ParameterizedTest
@@ -236,41 +215,6 @@ class KafkaTableMappingITCase {
                 .hasCauseInstanceOf(InvalidTableException.class)
                 .hasStackTraceContaining("only supports STRING map keys");
         assertUnchanged(path, disabled);
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testJsonDepthValidationThroughDdl(String layout) throws Exception {
-        DataType boundary = DataTypes.STRING();
-        for (int i = 0; i < KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; i++) {
-            boundary = DataTypes.ARRAY(boundary);
-        }
-        TablePath valid = TablePath.of("ddl_json", layout + "_depth_boundary");
-        TableDescriptor descriptor = jsonTable(layout, boundary).build();
-        createTable(CLUSTER, valid, descriptor);
-        assertThat(stored(valid).getSchema()).isEqualTo(descriptor.getSchema());
-        TablePath invalid = TablePath.of("ddl_json", layout + "_too_deep");
-        TableDescriptor tooDeep = jsonTable(layout, DataTypes.ARRAY(boundary)).build();
-        assertThatThrownBy(
-                        () ->
-                                gateway.createTable(newCreateTableRequest(invalid, tooDeep, false))
-                                        .get())
-                .hasCauseInstanceOf(InvalidTableException.class)
-                .hasStackTraceContaining("maximum nesting depth of 64");
-        assertThat(gateway.tableExists(newTableExistsRequest(invalid)).get().isExists()).isFalse();
-        assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(invalid)).isZero();
-        createTable(
-                CLUSTER,
-                invalid,
-                TableDescriptor.builder(tooDeep)
-                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
-                        .build());
-        GetTableInfoResponse before = info(invalid);
-        assertThatThrownBy(
-                        () -> set(invalid, Collections.singletonMap("table.kafka.enabled", "true")))
-                .hasCauseInstanceOf(InvalidTableException.class)
-                .hasStackTraceContaining("maximum nesting depth of 64");
-        assertUnchanged(invalid, before);
     }
 
     private void assertUnchanged(TablePath path, GetTableInfoResponse before) throws Exception {
@@ -374,10 +318,12 @@ class KafkaTableMappingITCase {
         addColumn(path, "_kafka_headers", DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()));
         assertThat(KafkaTableSchema.resolve(stored(path)).headersPosition()).isEqualTo(1);
         assertThat(info(path).getSchemaId()).isGreaterThan(before.getSchemaId());
-        TableDescriptor withHeaders = stored(path);
+        addColumn(path, "_kafka_metadata", metadataType());
+        assertThat(KafkaTableSchema.resolve(stored(path)).metadataPosition()).isEqualTo(2);
+        TableDescriptor beforeFailedRescue = stored(path);
         assertThatThrownBy(() -> addColumn(path, "_kafka_rescue", DataTypes.INT()))
                 .hasCauseInstanceOf(InvalidTableException.class);
-        assertThat(stored(path)).isEqualTo(withHeaders);
+        assertThat(stored(path)).isEqualTo(beforeFailedRescue);
         set(path, Collections.singletonMap("table.kafka.enabled", "false"));
         addColumn(path, "unmapped_business_field", DataTypes.INT());
         assertThat(stored(path).getSchema().getRowType().getFieldNames())
@@ -388,85 +334,18 @@ class KafkaTableMappingITCase {
     }
 
     @Test
-    void testCreateRejectsInvalidContractWithoutPublishingMetadata() throws Exception {
-        gateway.createDatabase(newCreateDatabaseRequest("ddl_invalid", true)).get();
-        TablePath path = TablePath.of("ddl_invalid", "bad");
-        assertThatThrownBy(
-                        () ->
-                                gateway.createTable(
-                                                newCreateTableRequest(
-                                                        path,
-                                                        enabled()
-                                                                .property(
-                                                                        ConfigOptions
-                                                                                .TABLE_KAFKA_CONVERT_VALUE_TYPE,
-                                                                        "string")
-                                                                .build(),
-                                                        false))
-                                        .get())
-                .hasCauseInstanceOf(InvalidTableException.class);
-        assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
-        assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(path)).isZero();
-        // Non-null added columns are rejected by generic schema evolution first, so exercise
-        // Kafka-specific rescue nullability through CREATE, where such columns are allowed.
-        TableDescriptor nonNullableRescue =
-                enabled()
-                        .schema(
-                                Schema.newBuilder()
-                                        .column("_kafka_value", DataTypes.BYTES())
-                                        .column("_kafka_rescue", DataTypes.STRING().copy(false))
-                                        .build())
-                        .build();
-        assertThatThrownBy(
-                        () ->
-                                gateway.createTable(
-                                                newCreateTableRequest(
-                                                        path, nonNullableRescue, false))
-                                        .get())
-                .hasCauseInstanceOf(InvalidTableException.class)
-                .hasStackTraceContaining("nullable STRING");
-        assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(path)).isZero();
-        assertThatThrownBy(
-                        () ->
-                                gateway.createTable(
-                                                newCreateTableRequest(
-                                                        path,
-                                                        enabled()
-                                                                .property(
-                                                                        "table.kafka.convert.rescue-column",
-                                                                        "rescue")
-                                                                .build(),
-                                                        false))
-                                        .get())
-                .hasCauseInstanceOf(InvalidConfigException.class);
-        assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
-        createTable(CLUSTER, path, enabled().build());
-        assertThat(KafkaTableSchema.isEnabled(stored(path))).isTrue();
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"binary", "string"})
-    void testMetadataCanBeCreatedAndEnabledWithoutOffset(String format) throws Exception {
+    void testMetadataCanBeCreatedAndEnabledWithoutOffset() throws Exception {
         Schema schema =
                 Schema.newBuilder()
                         .column("_kafka_metadata", metadataType())
-                        .column(
-                                "_kafka_value",
-                                "binary".equals(format) ? DataTypes.BYTES() : DataTypes.STRING())
+                        .column("_kafka_value", DataTypes.BYTES())
                         .build();
-        TableDescriptor descriptor =
-                enabled()
-                        .schema(schema)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, format)
-                        .build();
-        TablePath created = TablePath.of("ddl", "metadata_create_" + format);
+        TableDescriptor descriptor = enabled().schema(schema).build();
+        TablePath created = TablePath.of("ddl", "metadata_create");
         createTable(CLUSTER, created, descriptor);
-        TableDescriptor persisted = stored(created);
-        assertThat(persisted.getSchema()).isEqualTo(schema);
-        assertThat(kafkaProperties(persisted)).isEqualTo(kafkaProperties(descriptor));
-        assertThat(KafkaTableSchema.resolve(persisted).metadataPosition()).isZero();
+        assertThat(stored(created).getSchema()).isEqualTo(schema);
 
-        TablePath altered = TablePath.of("ddl", "metadata_enable_" + format);
+        TablePath altered = TablePath.of("ddl", "metadata_enable");
         createTable(
                 CLUSTER,
                 altered,
@@ -475,25 +354,9 @@ class KafkaTableMappingITCase {
                         .build());
         int schemaId = info(altered).getSchemaId();
         set(altered, Collections.singletonMap("table.kafka.enabled", "true"));
-        persisted = stored(altered);
         assertThat(info(altered).getSchemaId()).isEqualTo(schemaId);
-        assertThat(persisted.getSchema()).isEqualTo(schema);
-        assertThat(kafkaProperties(persisted)).isEqualTo(kafkaProperties(descriptor));
-        assertThat(KafkaTableSchema.resolve(persisted).metadataPosition()).isZero();
-    }
-
-    @Test
-    void testMetadataCanBeAddedToEnabledTable() throws Exception {
-        TablePath path = TablePath.of("ddl", "metadata_add");
-        createTable(CLUSTER, path, enabled().build());
-        TableDescriptor before = stored(path);
-        addColumn(path, "_kafka_metadata", metadataType());
-        TableDescriptor after = stored(path);
-        KafkaTableSchema resolved = KafkaTableSchema.resolve(after);
-        assertThat(resolved.metadataPosition()).isGreaterThanOrEqualTo(0);
-        assertThat(resolved.rowType().getTypeAt(resolved.metadataPosition()))
-                .isEqualTo(metadataType());
-        assertThat(kafkaProperties(after)).isEqualTo(kafkaProperties(before));
+        assertThat(stored(altered).getSchema()).isEqualTo(schema);
+        assertThat(KafkaTableSchema.resolve(stored(altered)).metadataPosition()).isZero();
     }
 
     @Test

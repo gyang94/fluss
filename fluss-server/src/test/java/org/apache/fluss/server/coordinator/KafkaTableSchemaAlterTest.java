@@ -21,7 +21,6 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
-import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -72,6 +71,9 @@ class KafkaTableSchemaAlterTest {
     @Test
     void testConcurrentSchemaChangePreventsStaleEnablement() throws Exception {
         TablePath path = create("schema_wins");
+        ZooKeeperClient.VersionedData<TableRegistration> before =
+                zk.getTableWithVersion(path).get();
+        int schemaZkVersion = zk.getSchemaZkVersion(path);
         assertThatThrownBy(
                         () ->
                                 enable(
@@ -91,6 +93,10 @@ class KafkaTableSchemaAlterTest {
                                                         epoch)))
                 .isInstanceOf(FlussRuntimeException.class)
                 .hasMessageContaining("Concurrent metadata change");
+        ZooKeeperClient.VersionedData<TableRegistration> after = zk.getTableWithVersion(path).get();
+        assertThat(after.zkVersion()).isEqualTo(before.zkVersion());
+        assertThat(after.data()).isEqualTo(before.data());
+        assertThat(zk.getSchemaZkVersion(path)).isEqualTo(schemaZkVersion + 1);
         assertThat(manager.getTable(path).getTableConfig().isKafkaEnabled()).isFalse();
         assertThat(manager.getTable(path).getSchema().getRowType().getFieldNames())
                 .contains("unmapped");
@@ -101,22 +107,23 @@ class KafkaTableSchemaAlterTest {
         TablePath path = create("enable_wins");
         ZooKeeperClient.VersionedData<TableRegistration> snapshot =
                 zk.getTableWithVersion(path).get();
+        int schemaZkVersion = zk.getSchemaZkVersion(path);
         int schemaId = zk.getCurrentSchemaId(path);
         Schema incompatible =
                 Schema.newBuilder()
                         .column("_kafka_value", DataTypes.BYTES())
                         .column("unmapped", DataTypes.STRING())
                         .build();
-        // This candidate is valid for the disabled snapshot, but not after the competing enable.
-        KafkaTableSchema.validate(
-                TableDescriptor.builder(manager.getTable(path).toTableDescriptor())
-                        .schema(incompatible)
-                        .build());
         enable(path, (oldTable, updated) -> {});
         assertThatThrownBy(
                         () ->
-                                zk.registerSchemaAndBumpTableVersion(
-                                        path, incompatible, schemaId + 1, snapshot, epoch))
+                                zk.registerSchemaWithVersionCheck(
+                                        path,
+                                        incompatible,
+                                        schemaId + 1,
+                                        snapshot.zkVersion(),
+                                        schemaZkVersion,
+                                        epoch))
                 .isInstanceOf(KeeperException.BadVersionException.class);
         assertThat(zk.getCurrentSchemaId(path)).isEqualTo(schemaId);
         assertThat(manager.getTable(path).getTableConfig().isKafkaEnabled()).isTrue();
@@ -125,26 +132,39 @@ class KafkaTableSchemaAlterTest {
     }
 
     @Test
-    void testSchemaFailureDoesNotAdvanceTableVersion() throws Exception {
+    void testSchemaFailureDoesNotAdvanceSchemaVersion() throws Exception {
         TablePath path = create("atomic_failure");
         ZooKeeperClient.VersionedData<TableRegistration> snapshot =
                 zk.getTableWithVersion(path).get();
+        int schemaZkVersion = zk.getSchemaZkVersion(path);
         int schemaId = zk.getCurrentSchemaId(path);
         Schema schema = manager.getTable(path).getSchema();
         assertThatThrownBy(
                         () ->
-                                zk.registerSchemaAndBumpTableVersion(
-                                        path, schema, schemaId, snapshot, epoch))
+                                zk.registerSchemaWithVersionCheck(
+                                        path,
+                                        schema,
+                                        schemaId,
+                                        snapshot.zkVersion(),
+                                        schemaZkVersion,
+                                        epoch))
                 .isInstanceOf(KeeperException.NodeExistsException.class);
         assertThat(zk.getTableWithVersion(path).get().zkVersion()).isEqualTo(snapshot.zkVersion());
+        assertThat(zk.getSchemaZkVersion(path)).isEqualTo(schemaZkVersion);
         assertThat(zk.getCurrentSchemaId(path)).isEqualTo(schemaId);
         zk.fenceBecomeCoordinatorLeader("next-coordinator");
         assertThatThrownBy(
                         () ->
-                                zk.registerSchemaAndBumpTableVersion(
-                                        path, schema, schemaId + 1, snapshot, epoch))
+                                zk.registerSchemaWithVersionCheck(
+                                        path,
+                                        schema,
+                                        schemaId + 1,
+                                        snapshot.zkVersion(),
+                                        schemaZkVersion,
+                                        epoch))
                 .isInstanceOf(KeeperException.BadVersionException.class);
         assertThat(zk.getTableWithVersion(path).get().zkVersion()).isEqualTo(snapshot.zkVersion());
+        assertThat(zk.getSchemaZkVersion(path)).isEqualTo(schemaZkVersion);
         assertThat(zk.getCurrentSchemaId(path)).isEqualTo(schemaId);
     }
 

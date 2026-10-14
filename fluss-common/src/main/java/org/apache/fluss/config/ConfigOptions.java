@@ -2943,7 +2943,8 @@ public class ConfigOptions {
                     .defaultValue("fluss")
                     .withDescription(
                             "Default database for unqualified Kafka topic names. Fully qualified names may "
-                                    + "access other databases. Databases must already exist; this option does not create them.");
+                                    + "access other databases. When Kafka is enabled, the coordinator creates this "
+                                    + "database if it does not exist.");
 
     /**
      * Compaction style for Fluss's kv, which is same to rocksdb's, but help use avoid including

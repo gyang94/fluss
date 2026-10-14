@@ -1159,7 +1159,32 @@ public class ZooKeeperClient implements AutoCloseable {
             Map<String, VersionedData<PartitionRegistration>> partitionBackfills,
             int expectedCoordinatorEpochZkVersion)
             throws Exception {
+        updateTableWithPartitionBucketCountBackfill(
+                tablePath,
+                tableRegistration,
+                expectedTableZkVersion,
+                partitionBackfills,
+                expectedCoordinatorEpochZkVersion,
+                ZkVersion.MATCH_ANY_VERSION.getVersion());
+    }
+
+    /** Updates table properties with an additional fence on the schema used for validation. */
+    public void updateTableWithPartitionBucketCountBackfill(
+            TablePath tablePath,
+            TableRegistration tableRegistration,
+            int expectedTableZkVersion,
+            Map<String, VersionedData<PartitionRegistration>> partitionBackfills,
+            int expectedCoordinatorEpochZkVersion,
+            int expectedSchemaZkVersion)
+            throws Exception {
         List<CuratorOp> ops = new ArrayList<>(partitionBackfills.size() + 1);
+        if (expectedSchemaZkVersion != ZkVersion.MATCH_ANY_VERSION.getVersion()) {
+            ops.add(
+                    zkClient.transactionOp()
+                            .check()
+                            .withVersion(expectedSchemaZkVersion)
+                            .forPath(SchemasZNode.path(tablePath)));
+        }
         for (Map.Entry<String, VersionedData<PartitionRegistration>> entry :
                 partitionBackfills.entrySet()) {
             String partitionPath = PartitionZNode.path(tablePath, entry.getKey());
@@ -1316,25 +1341,29 @@ public class ZooKeeperClient implements AutoCloseable {
     }
 
     /**
-     * Publishes a schema and advances the table registration version in one fenced transaction.
-     * Property ALTER validates against a schema snapshot and compares the table version, so schema
-     * ALTER must participate in the same CAS to prevent enabling an incompatible Kafka contract.
+     * Publishes a schema and advances the schema version in one fenced transaction. The table
+     * registration is checked without being rewritten; property ALTER checks the schema version to
+     * prevent enabling a Kafka contract against a stale schema.
      */
-    public void registerSchemaAndBumpTableVersion(
+    public void registerSchemaWithVersionCheck(
             TablePath tablePath,
             Schema schema,
             int schemaId,
-            VersionedData<TableRegistration> expectedTable,
+            int expectedTableZkVersion,
+            int expectedSchemaZkVersion,
             int expectedCoordinatorEpochZkVersion)
             throws Exception {
         List<CuratorOp> ops = new ArrayList<>();
         ops.add(
                 zkClient.transactionOp()
+                        .check()
+                        .withVersion(expectedTableZkVersion)
+                        .forPath(TableZNode.path(tablePath)));
+        ops.add(
+                zkClient.transactionOp()
                         .setData()
-                        .withVersion(expectedTable.zkVersion())
-                        .forPath(
-                                TableZNode.path(tablePath),
-                                TableZNode.encode(expectedTable.data())));
+                        .withVersion(expectedSchemaZkVersion)
+                        .forPath(SchemasZNode.path(tablePath), new byte[0]));
         ops.add(
                 zkClient.transactionOp()
                         .create()
@@ -1343,6 +1372,13 @@ public class ZooKeeperClient implements AutoCloseable {
                                 SchemaZNode.path(tablePath, schemaId), SchemaZNode.encode(schema)));
         zkClient.transaction()
                 .forOperations(wrapRequestsWithEpochCheck(ops, expectedCoordinatorEpochZkVersion));
+    }
+
+    /** Returns the schema parent znode version, read before loading a schema for DDL validation. */
+    public int getSchemaZkVersion(TablePath tablePath) throws Exception {
+        Stat stat = new Stat();
+        zkClient.getData().storingStatIn(stat).forPath(SchemasZNode.path(tablePath));
+        return stat.getVersion();
     }
 
     /** Get the specific schema by schema id in ZK metadata. */
