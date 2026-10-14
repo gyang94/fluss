@@ -73,7 +73,7 @@ public class KafkaCommandDecoderTest {
             assertThat(parsedRequest.version()).isZero();
 
             TestingTabletGatewayService service = new TestingTabletGatewayService();
-            new KafkaRequestHandler(new Configuration(), service, service).processRequest(request);
+            new KafkaRequestHandler(new Configuration(), service).processRequest(request);
             channel.runPendingTasks();
 
             responseBuffer = channel.readOutbound();

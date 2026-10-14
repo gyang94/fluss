@@ -26,7 +26,6 @@ import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.rpc.RpcGatewayService;
-import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
 
@@ -41,18 +40,14 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
     private final KafkaRequestDispatcher dispatcher;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
-    public KafkaRequestHandler(
-            Configuration conf, RpcGatewayService service, TabletServerGateway gateway) {
-        checkNotNull(service);
-        checkNotNull(gateway);
+    public KafkaRequestHandler(Configuration conf, RpcGatewayService service) {
         KafkaTopicMapper topicMapper = new KafkaTopicMapper(checkNotNull(conf));
         this.registry =
                 new KafkaApiRegistry(
                         Arrays.asList(
                                 new ApiVersionsHandler(this::apiRegistry),
                                 new MetadataHandler(
-                                        new GatewayKafkaMetadataBackend(
-                                                service, gateway, topicMapper),
+                                        new GatewayKafkaMetadataBackend(service, topicMapper),
                                         topicMapper)));
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
