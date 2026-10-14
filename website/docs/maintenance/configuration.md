@@ -259,14 +259,16 @@ Kafka protocol compatibility is still in development.
 |--------------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------|
 | kafka.enabled                  | Boolean  | false   | Whether enable Fluss Kafka. Disabled by default. When this option is set to true, the Fluss Kafka will be enabled. |
 | kafka.listener.names           | String   | KAFKA   | The listener names for Kafka wire protocol communication. Support multiple listener names, separated by comma.     |
-| kafka.default.database         | String   | fluss   | Database used for unqualified Kafka topic names. Fully qualified names can access other databases. This option does not create a database. |
+| kafka.default.database         | String   | fluss   | Database used for unqualified Kafka topic names. Fully qualified names can access other databases. When Kafka is enabled, the coordinator creates this database if it is missing. |
 
 Kafka listeners share `netty.connection.max-idle-time` with native Fluss RPC listeners (see [Netty](#netty)).
 The default is `10min`; connections close when neither reads nor writes occur for the configured duration.
 
 Kafka tables must be created through Fluss or the Flink Fluss catalog. A topic named
 `sales.orders` maps to that table directly; `orders` maps to the same-named table in
-`kafka.default.database` (by default, `fluss.orders`). Databases and tables must already exist. Reverse mapping always uses
+`kafka.default.database` (by default, `fluss.orders`). The coordinator creates the configured default
+database when Kafka is enabled and the database is missing. Existing databases are preserved;
+other databases and all tables must be created explicitly. Reverse mapping always uses
 the fully qualified name. All TabletServers must use the same default database. Changing it
 redirects unqualified names, so migrate clients to fully qualified names before changing the
 configuration. The prototype `kafka.database` option is no longer used.

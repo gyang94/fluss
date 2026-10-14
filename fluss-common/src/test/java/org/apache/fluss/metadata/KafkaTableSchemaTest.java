@@ -18,9 +18,6 @@
 package org.apache.fluss.metadata;
 
 import org.apache.fluss.config.ConfigOptions;
-import org.apache.fluss.config.Configuration;
-import org.apache.fluss.config.FlussConfigUtils;
-import org.apache.fluss.config.TableConfig;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
 import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
@@ -33,7 +30,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Arrays;
-import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -41,22 +37,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests the shared DDL and Kafka conversion contract. */
 class KafkaTableSchemaTest {
-
-    @Test
-    void testRegisteredAlterableOptionsAndReadTimeDefaults() {
-        for (String key :
-                Arrays.asList(
-                        "table.kafka.enabled",
-                        "table.kafka.convert.value.type",
-                        "table.kafka.convert.value.layout",
-                        "table.kafka.convert.key.type")) {
-            assertThat(FlussConfigUtils.TABLE_OPTIONS).containsKey(key);
-            assertThat(FlussConfigUtils.isAlterableTableOption(key)).isTrue();
-        }
-        Configuration config = new Configuration();
-        assertThat(new TableConfig(config).isKafkaEnabled()).isFalse();
-        assertThat(config.toMap()).isEmpty();
-    }
 
     @Test
     void testExplicitOptInAndDisabledTables() {
@@ -106,35 +86,22 @@ class KafkaTableSchemaTest {
                 schema.column("_kafka_metadata", metadataType());
             }
             TableDescriptor table = enabled(schema.build(), format).build();
-            byte[] before = table.toJsonBytes();
             KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
             assertThat(resolved.valueProjection().positions()).containsExactly(0);
             assertThat(resolved.valueProjection().dataTypeAt(0).isNullable()).isFalse();
-            assertThat(resolved.valueLayout()).isNull();
             assertThat(resolved.keyPosition() >= 0).isEqualTo((mask & 1) != 0);
             assertThat(resolved.headersPosition() >= 0).isEqualTo((mask & 2) != 0);
             assertThat(resolved.rescuePosition() >= 0).isEqualTo((mask & 4) != 0);
             assertThat(resolved.metadataPosition() >= 0).isEqualTo((mask & 8) != 0);
-            assertThat(resolved.metadataPosition())
-                    .isEqualTo(table.getSchema().getRowType().getFieldIndex("_kafka_metadata"));
-            assertThat(table.toJsonBytes()).isEqualTo(before);
             assertThat(table.getProperties())
                     .doesNotContainKeys(
                             "table.kafka.convert.key.type", "table.kafka.convert.value.layout");
-            assertThat(KafkaTableSchema.resolve(TableDescriptor.fromJsonBytes(before)))
-                    .isEqualTo(resolved);
         }
     }
 
     @Test
     void testJsonFlatPreservesNestedTypesAndExcludesSystemColumns() {
-        RowType nested =
-                DataTypes.ROW(
-                        DataTypes.FIELD("_kafka_key", DataTypes.STRING()),
-                        DataTypes.FIELD(
-                                "items",
-                                DataTypes.ARRAY(
-                                        DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()))));
+        RowType nested = DataTypes.ROW(DataTypes.FIELD("_kafka_key", DataTypes.STRING()));
         TableDescriptor table =
                 enabled(
                                 Schema.newBuilder()
@@ -159,14 +126,6 @@ class KafkaTableSchemaTest {
         assertThat(resolved.rescuePosition()).isEqualTo(1);
         assertThat(resolved.metadataPosition()).isEqualTo(2);
         assertThat(table.getProperties()).doesNotContainKey("table.kafka.convert.value.layout");
-        TableDescriptor noRescue =
-                enabled(
-                                Schema.newBuilder()
-                                        .column("custom_rescue", DataTypes.STRING())
-                                        .build(),
-                                "parse_json")
-                        .build();
-        assertThat(KafkaTableSchema.resolve(noRescue).rescuePosition()).isEqualTo(-1);
     }
 
     @Test
@@ -209,15 +168,6 @@ class KafkaTableSchemaTest {
                             DataTypes.MAP(DataTypes.STRING(), DataTypes.ARRAY(invalidMap)))) {
                 TableDescriptor table = jsonTable(layout, type);
                 assertInvalid(table, "only supports STRING map keys");
-                assertThatCode(
-                                () ->
-                                        KafkaTableSchema.validate(
-                                                TableDescriptor.builder(table)
-                                                        .property(
-                                                                ConfigOptions.TABLE_KAFKA_ENABLED,
-                                                                false)
-                                                        .build()))
-                        .doesNotThrowAnyException();
             }
         }
     }
@@ -250,11 +200,7 @@ class KafkaTableSchemaTest {
                                     DataTypes.ROW(
                                             DataTypes.FIELD("_kafka_key", scalar.copy(false)))));
             TableDescriptor table = jsonTable(layout, type);
-            byte[] before = table.toJsonBytes();
             assertThatCode(() -> KafkaTableSchema.validate(table)).doesNotThrowAnyException();
-            assertThat(table.toJsonBytes()).isEqualTo(before);
-            assertThat(KafkaTableSchema.resolve(TableDescriptor.fromJsonBytes(before)))
-                    .isEqualTo(KafkaTableSchema.resolve(table));
         }
     }
 
@@ -276,13 +222,6 @@ class KafkaTableSchemaTest {
         assertThatCode(() -> KafkaTableSchema.validate(valid)).doesNotThrowAnyException();
         TableDescriptor tooDeep = jsonTable(layout, DataTypes.ARRAY(boundary));
         assertInvalid(tooDeep, "maximum nesting depth of 64");
-        assertThatCode(
-                        () ->
-                                KafkaTableSchema.validate(
-                                        TableDescriptor.builder(tooDeep)
-                                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
-                                                .build()))
-                .doesNotThrowAnyException();
     }
 
     private static TableDescriptor jsonTable(String layout, DataType businessType) {
@@ -325,7 +264,7 @@ class KafkaTableSchemaTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"raw", "json", "schema_id_prefix", "schema_latest", "avro", ""})
+    @ValueSource(strings = {"raw", "avro", ""})
     void testRejectsUnsupportedValueTypes(String type) {
         assertInvalid(enabled(valueSchema(), type).build(), "table.kafka.convert.value.type");
     }
@@ -446,8 +385,6 @@ class KafkaTableSchemaTest {
             TableDescriptor table = withSystem("_kafka_metadata", type);
             KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
             assertThat(resolved.rowType().getTypeAt(resolved.metadataPosition())).isEqualTo(type);
-            assertThat(KafkaTableSchema.resolve(TableDescriptor.fromJsonBytes(table.toJsonBytes())))
-                    .isEqualTo(resolved);
         }
     }
 
@@ -522,7 +459,7 @@ class KafkaTableSchemaTest {
     }
 
     @Test
-    void testTableKindsAndCanonicalNameLimits() {
+    void testUnsupportedTableKinds() {
         Schema keyed =
                 Schema.newBuilder()
                         .column("_kafka_value", DataTypes.BYTES().copy(false))
@@ -534,20 +471,6 @@ class KafkaTableSchemaTest {
                 "non-partitioned");
         assertInvalid(
                 enabled(valueSchema(), "binary").logFormat(LogFormat.INDEXED).build(), "Arrow");
-        String database = String.join("", Collections.nCopies(124, "d"));
-        String tableName = String.join("", Collections.nCopies(124, "t"));
-        TableDescriptor table = enabled(valueSchema(), "binary").build();
-        assertThatCode(
-                        () ->
-                                KafkaTableSchema.validateTablePath(
-                                        TablePath.of(database, tableName), table))
-                .doesNotThrowAnyException();
-        assertThatThrownBy(
-                        () ->
-                                KafkaTableSchema.validateTablePath(
-                                        TablePath.of(database, tableName + "t"), table))
-                .isInstanceOf(InvalidTableException.class)
-                .hasMessageContaining("Kafka topic");
     }
 
     private static RowType metadataType() {

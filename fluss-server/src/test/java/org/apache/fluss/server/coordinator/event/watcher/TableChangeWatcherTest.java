@@ -42,16 +42,11 @@ import org.apache.fluss.server.coordinator.event.TestingEventManager;
 import org.apache.fluss.server.entity.TablePropertyChanges;
 import org.apache.fluss.server.zk.NOPErrorHandler;
 import org.apache.fluss.server.zk.ZooKeeperClient;
-import org.apache.fluss.server.zk.ZooKeeperClient.VersionedData;
 import org.apache.fluss.server.zk.ZooKeeperExtension;
 import org.apache.fluss.server.zk.data.PartitionAssignment;
 import org.apache.fluss.server.zk.data.TableAssignment;
 import org.apache.fluss.server.zk.data.TableRegistration;
-import org.apache.fluss.server.zk.data.ZkData.TableZNode;
 import org.apache.fluss.server.zk.data.ZkVersion;
-import org.apache.fluss.shaded.curator5.org.apache.curator.framework.recipes.cache.ChildData;
-import org.apache.fluss.shaded.curator5.org.apache.curator.framework.recipes.cache.CuratorCacheListener;
-import org.apache.fluss.shaded.zookeeper3.org.apache.zookeeper.data.Stat;
 import org.apache.fluss.testutils.common.AllCallbackWrapper;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.clock.SystemClock;
@@ -61,13 +56,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -311,7 +302,7 @@ class TableChangeWatcherTest {
     }
 
     @Test
-    void testSchemaChanges() throws Exception {
+    void testSchemaChanges() {
         // create tables, collect create table events
         List<CoordinatorEvent> expectedEvents = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
@@ -358,8 +349,6 @@ class TableChangeWatcherTest {
             }
             CreateTableEvent createTableEvent = (CreateTableEvent) coordinatorEvent;
             TableInfo tableInfo = createTableEvent.getTableInfo();
-            VersionedData<TableRegistration> beforeAlter =
-                    zookeeperClient.getTableWithVersion(tableInfo.getTablePath()).get();
             metadataManager.alterTableSchema(
                     tableInfo.getTablePath(),
                     Collections.singletonList(
@@ -370,10 +359,6 @@ class TableChangeWatcherTest {
                                     TableChange.ColumnPosition.last())),
                     false,
                     null);
-            VersionedData<TableRegistration> afterAlter =
-                    zookeeperClient.getTableWithVersion(tableInfo.getTablePath()).get();
-            assertThat(afterAlter.zkVersion()).isEqualTo(beforeAlter.zkVersion() + 1);
-            assertThat(afterAlter.data()).isEqualTo(beforeAlter.data());
             Schema newSchema =
                     Schema.newBuilder()
                             .fromSchema(tableInfo.getSchema())
@@ -391,62 +376,6 @@ class TableChangeWatcherTest {
                 () ->
                         assertThat(eventManager.getEvents())
                                 .containsExactlyInAnyOrderElementsOf(allEvents));
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testUnchangedTableRegistration(boolean differentJsonFormatting) {
-        tableChangeWatcher.stop();
-        TablePath tablePath = TablePath.of(DEFAULT_DB, "unchanged_table_registration");
-        TableRegistration table = TableRegistration.newTable(1L, remoteDataDir, TEST_TABLE);
-        byte[] oldData = TableZNode.encode(table);
-        byte[] newData =
-                differentJsonFormatting
-                        ? ("\n" + new String(oldData, StandardCharsets.UTF_8))
-                                .getBytes(StandardCharsets.UTF_8)
-                        : oldData;
-
-        // Deliver the callback synchronously so the absence of an event cannot pass before
-        // CuratorCache has observed the version bump.
-        CuratorCacheListener listener = tableChangeWatcher.new TablePathChangeListener();
-        listener.event(
-                CuratorCacheListener.Type.NODE_CHANGED,
-                tableNodeData(tablePath, oldData, 1),
-                tableNodeData(tablePath, newData, 2));
-
-        assertThat(eventManager.getEvents()).isEmpty();
-    }
-
-    @Test
-    void testChangedTableRegistrationContents() {
-        tableChangeWatcher.stop();
-        TablePath tablePath = TablePath.of(DEFAULT_DB, "changed_table_registration");
-        TableRegistration table = TableRegistration.newTable(1L, remoteDataDir, TEST_TABLE);
-        CuratorCacheListener listener = tableChangeWatcher.new TablePathChangeListener();
-        List<CoordinatorEvent> expectedEvents = new ArrayList<>();
-        for (TableRegistration updatedTable :
-                Arrays.asList(
-                        table.newProperties(
-                                Collections.singletonMap(
-                                        ConfigOptions.TABLE_KAFKA_ENABLED.key(), "true"),
-                                table.customProperties),
-                        table.newProperties(
-                                table.properties,
-                                Collections.singletonMap("custom.key", "custom.value")),
-                        table.newBucketCount(4))) {
-            listener.event(
-                    CuratorCacheListener.Type.NODE_CHANGED,
-                    tableNodeData(tablePath, TableZNode.encode(table), 1),
-                    tableNodeData(tablePath, TableZNode.encode(updatedTable), 2));
-            expectedEvents.add(new TableRegistrationChangeEvent(tablePath, updatedTable));
-            assertThat(eventManager.getEvents()).containsExactlyElementsOf(expectedEvents);
-        }
-    }
-
-    private static ChildData tableNodeData(TablePath tablePath, byte[] data, int version) {
-        Stat stat = new Stat();
-        stat.setVersion(version);
-        return new ChildData(TableZNode.path(tablePath), stat, data);
     }
 
     @Test

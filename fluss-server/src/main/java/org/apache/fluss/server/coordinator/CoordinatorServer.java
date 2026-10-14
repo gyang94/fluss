@@ -548,10 +548,26 @@ public class CoordinatorServer extends ServerBase {
     private void createDefaultDatabase() {
         MetadataManager metadataManager =
                 new MetadataManager(zkClient, conf, lakeCatalogDynamicLoader);
+        createDefaultDatabases(metadataManager, conf);
+    }
+
+    @VisibleForTesting
+    static void createDefaultDatabases(MetadataManager metadataManager, Configuration conf) {
         List<String> databases = metadataManager.listDatabases();
         if (databases.isEmpty()) {
             metadataManager.createDatabase(DEFAULT_DATABASE, DatabaseDescriptor.EMPTY, true);
             LOG.info("Created default database '{}' because no database exists.", DEFAULT_DATABASE);
+        }
+        if (conf.get(ConfigOptions.KAFKA_ENABLED)) {
+            String kafkaDatabase = conf.get(ConfigOptions.KAFKA_DEFAULT_DATABASE);
+            // An empty cluster has already created the native default database above.
+            if (DEFAULT_DATABASE.equals(kafkaDatabase) && databases.isEmpty()) {
+                return;
+            }
+            if (!databases.contains(kafkaDatabase)) {
+                metadataManager.createDatabase(kafkaDatabase, DatabaseDescriptor.EMPTY, true);
+                LOG.info("Created default database '{}' for Kafka protocol.", kafkaDatabase);
+            }
         }
     }
 

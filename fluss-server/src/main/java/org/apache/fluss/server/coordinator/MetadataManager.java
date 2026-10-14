@@ -474,7 +474,7 @@ public class MetadataManager {
                 ZkVersion.MATCH_ANY_VERSION.getVersion());
     }
 
-    /** Alters schema with a table-version and coordinator-epoch fence against concurrent ALTER. */
+    /** Alters schema with table, schema and coordinator version checks against concurrent ALTER. */
     public void alterTableSchema(
             TablePath tablePath,
             List<TableChange> schemaChanges,
@@ -485,6 +485,7 @@ public class MetadataManager {
         try {
             ZooKeeperClient.VersionedData<TableRegistration> versionedTable =
                     getTableRegistrationWithVersion(tablePath);
+            int schemaZkVersion = zookeeperClient.getSchemaZkVersion(tablePath);
             TableInfo table = getTable(tablePath);
             TableDescriptor tableDescriptor = table.toTableDescriptor();
 
@@ -505,11 +506,12 @@ public class MetadataManager {
 
                 // Update Fluss schema (ZK) after Lake sync succeeds
                 if (!newSchema.equals(table.getSchema())) {
-                    zookeeperClient.registerSchemaAndBumpTableVersion(
+                    zookeeperClient.registerSchemaWithVersionCheck(
                             tablePath,
                             newSchema,
                             table.getSchemaId() + 1,
-                            versionedTable,
+                            versionedTable.zkVersion(),
+                            schemaZkVersion,
                             coordinatorZkVersion);
                 } else {
                     LOG.info(
@@ -813,10 +815,10 @@ public class MetadataManager {
     }
 
     /**
-     * One attempt of the property ALTER read-modify-write. The ZK write is CAS-guarded by the table
-     * version read here plus the coordinator epoch version. Since {@link #preAlterTableProperties}
-     * may apply external lake side effects, a version conflict is surfaced instead of being retried
-     * automatically.
+     * One attempt of the property ALTER read-modify-write. The ZK write is guarded by the table and
+     * schema versions read here plus the coordinator epoch version. Since {@link
+     * #preAlterTableProperties} may apply external lake side effects, a version conflict is
+     * surfaced instead of being retried automatically.
      */
     private void doAlterTablePropertiesOnce(
             TablePath tablePath,
@@ -832,6 +834,7 @@ public class MetadataManager {
                 getTableRegistrationWithVersion(tablePath);
         TableRegistration tableReg = versionedTableReg.data();
         int tableZkVersion = versionedTableReg.zkVersion();
+        int schemaZkVersion = zookeeperClient.getSchemaZkVersion(tablePath);
         SchemaInfo schemaInfo = getLatestSchema(tablePath);
         // we can't use MetadataManager#getTable here, because it will add the default
         // lake options to the table properties, which may cause the validation failure
@@ -901,7 +904,8 @@ public class MetadataManager {
                         updatedTableRegistration,
                         tableZkVersion,
                         Collections.emptyMap(),
-                        coordinatorZkVersion);
+                        coordinatorZkVersion,
+                        schemaZkVersion);
             } catch (KeeperException.BadVersionException e) {
                 throw new FlussRuntimeException(
                         String.format(

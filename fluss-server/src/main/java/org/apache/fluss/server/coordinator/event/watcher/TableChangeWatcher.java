@@ -17,7 +17,6 @@
 
 package org.apache.fluss.server.coordinator.event.watcher;
 
-import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.TableConfig;
 import org.apache.fluss.metadata.PhysicalTablePath;
@@ -88,8 +87,7 @@ public class TableChangeWatcher {
     }
 
     /** A listener to monitor the changes of table nodes in zookeeper. */
-    @VisibleForTesting
-    final class TablePathChangeListener implements CuratorCacheListener {
+    private final class TablePathChangeListener implements CuratorCacheListener {
 
         @Override
         public void event(Type type, ChildData oldData, ChildData newData) {
@@ -152,13 +150,13 @@ public class TableChangeWatcher {
                             if (tablePath == null) {
                                 break;
                             }
-                            // Distinguish between table creation and registration updates.
+                            // Distinguish between table creation and properties change.
                             // If oldData exists and contains valid table registration data,
-                            // compare its contents; otherwise, it's a table creation.
+                            // it's a properties change; otherwise, it's a table creation.
                             if (oldData != null
                                     && oldData.getData() != null
                                     && oldData.getData().length > 0) {
-                                processTableRegistrationChange(tablePath, oldData, newData);
+                                processTableRegistrationChange(tablePath, newData);
                             } else {
                                 processCreateTable(tablePath, newData);
                             }
@@ -278,16 +276,9 @@ public class TableChangeWatcher {
                             tablePath, tableId, partitionId, partitionName, partitionAssignment));
         }
 
-        private void processTableRegistrationChange(
-                TablePath tablePath, ChildData oldData, ChildData newData) {
-            TableRegistration oldTable = TableZNode.decode(oldData.getData());
+        private void processTableRegistrationChange(TablePath tablePath, ChildData newData) {
             TableRegistration newTable = TableZNode.decode(newData.getData());
-            // Schema ALTER bumps the table znode version to fence concurrent registration updates,
-            // even when its contents are unchanged. Compare decoded registrations so differences
-            // in JSON serialization do not trigger a registration change either.
-            if (!oldTable.equals(newTable)) {
-                eventManager.put(new TableRegistrationChangeEvent(tablePath, newTable));
-            }
+            eventManager.put(new TableRegistrationChangeEvent(tablePath, newTable));
         }
     }
 

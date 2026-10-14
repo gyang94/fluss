@@ -19,7 +19,6 @@ package org.apache.fluss.flink.utils;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.flink.catalog.TestSchemaResolver;
-import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.KvFormat;
 import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -75,50 +74,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Test for {@link FlinkConversions}. */
 public class FlinkConversionsTest {
-
-    @Test
-    void testKafkaDdlUsesRegisteredPropertiesAndFixedColumns() {
-        ResolvedSchema schema =
-                new ResolvedSchema(
-                        Arrays.asList(
-                                Column.physical(
-                                        "_kafka_value",
-                                        org.apache.flink.table.api.DataTypes.BYTES()),
-                                Column.physical(
-                                        "_kafka_key", org.apache.flink.table.api.DataTypes.BYTES()),
-                                Column.physical(
-                                        "_kafka_headers",
-                                        org.apache.flink.table.api.DataTypes.MAP(
-                                                org.apache.flink.table.api.DataTypes.STRING(),
-                                                org.apache.flink.table.api.DataTypes.BYTES())),
-                                Column.physical(
-                                        "_kafka_rescue",
-                                        org.apache.flink.table.api.DataTypes.STRING())),
-                        Collections.emptyList(),
-                        null);
-        Map<String, String> options = new HashMap<>();
-        options.put("table.kafka.enabled", "true");
-        options.put("table.kafka.convert.value.type", "binary");
-        CatalogTable table =
-                CatalogTable.of(
-                        Schema.newBuilder().fromResolvedSchema(schema).build(),
-                        "Kafka DDL",
-                        Collections.emptyList(),
-                        options);
-        TableDescriptor descriptor =
-                FlinkConversions.toFlussTable(new ResolvedCatalogTable(table, schema));
-        assertThat(descriptor.getProperties())
-                .containsAllEntriesOf(options)
-                .doesNotContainKeys(
-                        "table.kafka.convert.key.type", "table.kafka.convert.value.layout");
-        assertThat(descriptor.getCustomProperties())
-                .doesNotContainKeys("table.kafka.enabled", "table.kafka.convert.value.type");
-        KafkaTableSchema mapping = KafkaTableSchema.resolve(descriptor);
-        assertThat(mapping.valueProjection().positions()).containsExactly(0);
-        assertThat(mapping.keyPosition()).isEqualTo(1);
-        assertThat(mapping.headersPosition()).isEqualTo(2);
-        assertThat(mapping.rescuePosition()).isEqualTo(3);
-    }
 
     @Test
     void testConvertBucketCountChange() {

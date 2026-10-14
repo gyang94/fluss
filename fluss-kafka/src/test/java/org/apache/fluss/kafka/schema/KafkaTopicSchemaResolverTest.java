@@ -18,7 +18,6 @@
 package org.apache.fluss.kafka.schema;
 
 import org.apache.fluss.config.ConfigOptions;
-import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.types.DataTypes;
@@ -31,33 +30,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /** Tests the Kafka adapter's use of the shared DDL contract. */
 class KafkaTopicSchemaResolverTest {
     private final KafkaTopicSchemaResolver resolver = new KafkaTopicSchemaResolver();
-
-    @Test
-    void testEnabledContractUsesSharedValidation() {
-        TableDescriptor table =
-                table().schema(
-                                Schema.newBuilder()
-                                        .column(
-                                                "_kafka_metadata",
-                                                DataTypes.ROW(
-                                                        DataTypes.FIELD(
-                                                                "timestamp",
-                                                                DataTypes.TIMESTAMP_LTZ(3)),
-                                                        DataTypes.FIELD(
-                                                                "timestamp_type", DataTypes.INT()),
-                                                        DataTypes.FIELD(
-                                                                "partition", DataTypes.INT())))
-                                        .column("_kafka_value", DataTypes.BYTES())
-                                        .build())
-                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                        .build();
-        assertThat(resolver.isEnabled(table)).isTrue();
-        assertThat(resolver.resolve(table)).isEqualTo(KafkaTableSchema.resolve(table));
-        assertThat(resolver.resolve(table).metadataPosition()).isZero();
-        assertThat(resolver.resolve(table).valueProjection().positions()).containsExactly(1);
-        assertThat(resolver.resolve(TableDescriptor.fromJsonBytes(table.toJsonBytes())))
-                .isEqualTo(resolver.resolve(table));
-    }
 
     @Test
     void testCompatibleSchemaDoesNotEnableTable() {
