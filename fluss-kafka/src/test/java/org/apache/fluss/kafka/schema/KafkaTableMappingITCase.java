@@ -271,7 +271,7 @@ class KafkaTableMappingITCase {
     }
 
     @Test
-    void testEnableDisableAndFailedPropertyAlterAreAtomic() throws Exception {
+    void testEnableDisableAndRejectInvalidProperties() throws Exception {
         TablePath path = TablePath.of("ddl", "enable_disable");
         TableDescriptor disabled =
                 enabled().property(ConfigOptions.TABLE_KAFKA_ENABLED, false).build();

@@ -30,7 +30,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.apache.fluss.server.coordinator.CoordinatorServer.DEFAULT_DATABASE;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -61,8 +61,22 @@ class KafkaDefaultDatabaseTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"fluss,false", "kafka_default,false", "fluss,true", "kafka_default,true"})
-    void testCreateMissingDefaultAndPreserveExisting(String database, boolean exists) {
+    @ValueSource(booleans = {false, true})
+    void testNativeDefaultFollowsClusterInitialization(boolean hasDatabase) {
+        if (hasDatabase) {
+            manager.createDatabase("existing", DatabaseDescriptor.EMPTY, false);
+        }
+        Configuration config = kafkaConfiguration(DEFAULT_DATABASE);
+        CoordinatorServer.createDefaultDatabases(manager, config);
+        CoordinatorServer.createDefaultDatabases(manager, config);
+        assertThat(manager.listDatabases())
+                .containsExactly(hasDatabase ? "existing" : DEFAULT_DATABASE);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testCreateMissingCustomDefaultAndPreserveExisting(boolean exists) {
+        String database = "kafka_default";
         manager.createDatabase("existing", DatabaseDescriptor.EMPTY, false);
         DatabaseDescriptor descriptor =
                 DatabaseDescriptor.builder().comment("existing default").build();
