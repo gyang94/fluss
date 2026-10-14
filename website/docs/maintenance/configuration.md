@@ -295,7 +295,12 @@ disabled, ordinary Fluss tables are not subject to Kafka-specific schema validat
 accepted on enabled tables.
 
 The `_kafka_metadata` contract is
-`ROW<timestamp TIMESTAMP_LTZ(3), timestamp_type INT, partition INT, offset BIGINT>`.
-Enabling tables with this column is currently rejected until native append can assign and
-persist each row's actual offset. Other optional system columns can be used independently.
+`ROW<timestamp TIMESTAMP_LTZ(3), timestamp_type INT, partition INT>`.
+This optional physical column stores the input Kafka record timestamp, the batch timestamp type
+(`-1` for no timestamp, `0` for CreateTime, `1` for LogAppendTime), and the requested partition.
+Without a timestamp, the timestamp field is null; declared NOT NULL constraints still apply
+when converting records. These values are available before Arrow encoding. Log offsets remain
+native log metadata and are not part of this ROW, so enabling the column requires no append-time
+offset backfill. CREATE and ALTER reject extra fields, including the former offset field, and
+incorrect field names, ordering or types.
 These DDL contracts do not by themselves advertise Kafka Metadata or Produce API support.

@@ -93,6 +93,7 @@ public final class KafkaTableSchema {
     private final KafkaFieldProjection valueProjection;
     private final int keyPosition;
     private final int headersPosition;
+    private final int metadataPosition;
     private final int rescuePosition;
 
     private KafkaTableSchema(
@@ -102,6 +103,7 @@ public final class KafkaTableSchema {
             List<Integer> valuePositions,
             int keyPosition,
             int headersPosition,
+            int metadataPosition,
             int rescuePosition) {
         this.rowType = rowType;
         this.valueType = valueType;
@@ -109,6 +111,7 @@ public final class KafkaTableSchema {
         this.valueProjection = new KafkaFieldProjection(rowType, valuePositions);
         this.keyPosition = keyPosition;
         this.headersPosition = headersPosition;
+        this.metadataPosition = metadataPosition;
         this.rescuePosition = rescuePosition;
     }
 
@@ -216,9 +219,6 @@ public final class KafkaTableSchema {
         int metadataPosition = rowType.getFieldIndex(METADATA_COLUMN);
         if (metadataPosition >= 0) {
             validateMetadataType(rowType.getTypeAt(metadataPosition));
-            throw invalid(
-                    "_kafka_metadata requires native append support for persisting actual per-row offsets; "
-                            + "this capability is not available yet.");
         }
 
         List<Integer> valuePositions = new ArrayList<>();
@@ -296,6 +296,7 @@ public final class KafkaTableSchema {
                 valuePositions,
                 keyPosition,
                 headersPosition,
+                metadataPosition,
                 rescuePosition);
     }
 
@@ -382,17 +383,15 @@ public final class KafkaTableSchema {
     private static void validateMetadataType(DataType type) {
         String message =
                 "_kafka_metadata must be ROW<timestamp TIMESTAMP_LTZ(3), "
-                        + "timestamp_type INT, partition INT, offset BIGINT>.";
+                        + "timestamp_type INT, partition INT>.";
         if (!(type instanceof RowType)) {
             throw invalid(message);
         }
         RowType row = (RowType) type;
-        if (!row.getFieldNames()
-                        .equals(Arrays.asList("timestamp", "timestamp_type", "partition", "offset"))
+        if (!row.getFieldNames().equals(Arrays.asList("timestamp", "timestamp_type", "partition"))
                 || !row.getTypeAt(0).copy(true).equals(DataTypes.TIMESTAMP_LTZ(3))
                 || !row.getTypeAt(1).copy(true).equals(DataTypes.INT())
-                || !row.getTypeAt(2).copy(true).equals(DataTypes.INT())
-                || !row.getTypeAt(3).copy(true).equals(DataTypes.BIGINT())) {
+                || !row.getTypeAt(2).copy(true).equals(DataTypes.INT())) {
             throw invalid(message);
         }
     }
@@ -431,6 +430,14 @@ public final class KafkaTableSchema {
     }
 
     /**
+     * Returns the metadata column position, or -1 when absent. The ROW stores the input record
+     * timestamp, batch timestamp type and requested partition; log offsets are not row fields.
+     */
+    public int metadataPosition() {
+        return metadataPosition;
+    }
+
+    /**
      * Returns the rescue column position, or -1 when absent. JSON decoders collect unknown and
      * reserved members here; binary/string decoders write null to this optional column.
      */
@@ -450,6 +457,7 @@ public final class KafkaTableSchema {
                 && valueProjection.equals(that.valueProjection)
                 && keyPosition == that.keyPosition
                 && headersPosition == that.headersPosition
+                && metadataPosition == that.metadataPosition
                 && rescuePosition == that.rescuePosition;
     }
 
@@ -462,6 +470,7 @@ public final class KafkaTableSchema {
                 valueProjection,
                 keyPosition,
                 headersPosition,
+                metadataPosition,
                 rescuePosition);
     }
 
