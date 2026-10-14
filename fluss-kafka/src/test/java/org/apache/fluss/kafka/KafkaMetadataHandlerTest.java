@@ -36,6 +36,7 @@ import org.apache.fluss.rpc.messages.PbTablePath;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.types.DataTypes;
+import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.clients.Metadata;
@@ -426,6 +427,64 @@ public class KafkaMetadataHandlerTest {
                     .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
             assertThat(named.data().topics().find("kafka.no_mapping").errorCode())
                     .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testMetadataColumnContractForEveryVersion(boolean legacyOffset) {
+        RowType metadataType =
+                DataTypes.ROW(
+                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                        DataTypes.FIELD("partition", DataTypes.INT()));
+        if (legacyOffset) {
+            metadataType =
+                    DataTypes.ROW(
+                            DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                            DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                            DataTypes.FIELD("partition", DataTypes.INT()),
+                            DataTypes.FIELD("offset", DataTypes.BIGINT()));
+        }
+        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+        // Also model an invalid historical descriptor that native DDL would now reject.
+        service.putTable(
+                "fluss.metadata_events",
+                777L,
+                TableDescriptor.builder(defaultDescriptor())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .column("_kafka_metadata", metadataType)
+                                        .build())
+                        .build());
+        short expected = legacyOffset ? Errors.INVALID_TOPIC_EXCEPTION.code() : Errors.NONE.code();
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse named =
+                    handle(
+                            service,
+                            topicsRequest(
+                                    version,
+                                    "metadata_events",
+                                    "fluss.metadata_events",
+                                    "kafka.topic"),
+                            version);
+            for (String name : Arrays.asList("metadata_events", "fluss.metadata_events")) {
+                MetadataResponseTopic topic = named.data().topics().find(name);
+                assertThat(topic.errorCode()).isEqualTo(expected);
+                assertThat(topic.partitions()).hasSize(legacyOffset ? 0 : 2);
+            }
+            assertThat(named.data().topics().find("kafka.topic").errorCode())
+                    .isEqualTo(Errors.NONE.code());
+
+            MetadataResponse all = handle(service, allTopicsRequest(version), version);
+            assertThat(all.data().topics().find("fluss.metadata_events").errorCode())
+                    .isEqualTo(expected);
+            assertThat(all.data().topics().find("kafka.topic").errorCode())
+                    .isEqualTo(Errors.NONE.code());
+            assertThat(all.data().topics())
+                    .extracting(MetadataResponseTopic::name)
+                    .doesNotContain("metadata_events");
         }
     }
 

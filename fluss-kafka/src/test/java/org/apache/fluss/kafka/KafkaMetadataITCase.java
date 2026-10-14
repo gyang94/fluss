@@ -114,6 +114,51 @@ public class KafkaMetadataITCase {
     }
 
     @Test
+    public void testOptionalMetadataColumnOverRealListeners() throws Exception {
+        TableDescriptor descriptor =
+                TableDescriptor.builder(topicDescriptor())
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .column(
+                                                "_kafka_metadata",
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "timestamp",
+                                                                DataTypes.TIMESTAMP_LTZ(3)),
+                                                        DataTypes.FIELD(
+                                                                "timestamp_type", DataTypes.INT()),
+                                                        DataTypes.FIELD(
+                                                                "partition", DataTypes.INT())))
+                                        .build())
+                        .build();
+        long tableId = createTable(CLUSTER, TablePath.of("fluss", "metadata_events"), descriptor);
+        CLUSTER.waitUntilTableReady(tableId);
+        for (int serverId = 0; serverId < 2; serverId++) {
+            ServerNode node = CLUSTER.getTabletServerInfos().get(serverId).node("KAFKA");
+            for (short version = 0; version <= 11; version++) {
+                MetadataResponse named =
+                        query(node, named(version, "metadata_events", "fluss.metadata_events"));
+                assertThat(named.errorCounts()).containsOnlyKeys(Errors.NONE);
+                MetadataResponseTopic alias = named.data().topics().find("metadata_events");
+                MetadataResponseTopic canonical =
+                        named.data().topics().find("fluss.metadata_events");
+                assertThat(alias.partitions()).hasSize(2).isEqualTo(canonical.partitions());
+                if (version >= 10) {
+                    assertThat(canonical.topicId())
+                            .isEqualTo(new Uuid(0x466c757373000000L, tableId));
+                    assertThat(alias.topicId()).isEqualTo(new Uuid(0x466c757373410000L, tableId));
+                }
+                MetadataResponse all = query(node, allTopics(version));
+                assertThat(all.data().topics())
+                        .extracting(MetadataResponseTopic::name)
+                        .containsExactly("fluss.metadata_events");
+                assertThat(all.errorCounts()).containsOnlyKeys(Errors.NONE);
+            }
+        }
+    }
+
+    @Test
     public void testDeletedDatabaseDoesNotHideBrokersOrOtherTopics() throws Exception {
         TableDescriptor descriptor = topicDescriptor();
         long existing = createTable(CLUSTER, TablePath.of("existing_db", "events"), descriptor);
