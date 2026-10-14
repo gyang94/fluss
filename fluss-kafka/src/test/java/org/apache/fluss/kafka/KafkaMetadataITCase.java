@@ -28,6 +28,7 @@ import org.apache.fluss.server.testutils.FlussClusterExtension;
 import org.apache.fluss.server.zk.data.TableRegistration;
 import org.apache.fluss.types.DataTypes;
 
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.message.MetadataRequestData;
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponseTopic;
@@ -69,53 +70,54 @@ public class KafkaMetadataITCase {
                     .build();
 
     @Test
-    public void testQualifiedMetadataAcrossDatabases() throws Exception {
+    public void testDeletedDatabaseDoesNotHideBrokersOrOtherTopics() throws Exception {
         TableDescriptor descriptor = topicDescriptor();
-        long first = createTable(CLUSTER, TablePath.of("first_db", "events"), descriptor);
-        long second = createTable(CLUSTER, TablePath.of("second_db", "events"), descriptor);
-        CLUSTER.waitUntilTableReady(first);
-        CLUSTER.waitUntilTableReady(second);
+        long existing = createTable(CLUSTER, TablePath.of("existing_db", "events"), descriptor);
+        long deleted = createTable(CLUSTER, TablePath.of("deleted_db", "events"), descriptor);
+        CLUSTER.waitUntilTableReady(existing);
+        CLUSTER.waitUntilTableReady(deleted);
+        dropDatabase(CLUSTER, "deleted_db");
         ServerNode node = CLUSTER.getTabletServerInfos().get(0).node("KAFKA");
 
         for (short version = 0; version <= 11; version++) {
-            MetadataResponse named =
-                    query(
-                            node,
-                            new MetadataRequest(
-                                    new MetadataRequestData()
-                                            .setTopics(
-                                                    MetadataRequest.convertToMetadataRequestTopic(
-                                                            Arrays.asList(
-                                                                    "first_db.events",
-                                                                    "second_db.events",
-                                                                    "first_db.missing"))),
-                                    version));
-            assertThat(named.data().topics().find("first_db.events").partitions()).hasSize(2);
-            assertThat(named.data().topics().find("second_db.events").partitions()).hasSize(2);
-            assertThat(named.data().topics().find("first_db.missing").errorCode())
+            MetadataResponse missing = query(node, named(version, "deleted_db.events"));
+            assertThat(missing.brokers()).hasSize(2);
+            assertThat(missing.data().topics().find("deleted_db.events").errorCode())
                     .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-            assertThat(named.data().topics().find("first_db.events").topicId())
-                    .isEqualTo(
-                            version >= 10 ? new Uuid(0x466c757373000000L, first) : Uuid.ZERO_UUID);
-            assertThat(named.data().topics().find("second_db.events").topicId())
-                    .isEqualTo(
-                            version >= 10 ? new Uuid(0x466c757373000000L, second) : Uuid.ZERO_UUID);
-            assertThat(named.brokers()).hasSize(2);
-            assertThat(named.brokers().iterator().next().port()).isEqualTo(node.port());
 
-            MetadataRequestData allTopics = new MetadataRequestData();
-            allTopics.setTopics(version == 0 ? Collections.emptyList() : null);
-            MetadataResponse all = query(node, new MetadataRequest(allTopics, version));
+            MetadataResponse mixed =
+                    query(node, named(version, "deleted_db.events", "existing_db.events"));
+            assertThat(mixed.brokers()).hasSize(2);
+            assertThat(mixed.brokers().iterator().next().port()).isEqualTo(node.port());
+            assertThat(mixed.data().topics().find("deleted_db.events").errorCode())
+                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+            assertThat(mixed.data().topics().find("existing_db.events").errorCode())
+                    .isEqualTo(Errors.NONE.code());
+            assertThat(mixed.data().topics().find("existing_db.events").partitions()).hasSize(2);
+
+            MetadataResponse all = query(node, allTopics(version));
+            assertThat(all.brokers()).hasSize(2);
             assertThat(all.data().topics())
                     .extracting(MetadataResponseTopic::name)
-                    .containsExactly("first_db.events", "second_db.events");
+                    .containsExactly("existing_db.events");
             assertThat(all.errorCounts()).containsOnlyKeys(Errors.NONE);
         }
     }
 
     @Test
-    public void testOptionalMetadataColumnOverRealListeners() throws Exception {
-        TableDescriptor descriptor =
+    public void testAliasesAndOptionalMetadataAcrossDatabases() throws Exception {
+        long other = createTable(CLUSTER, TablePath.of("sales", "events"), topicDescriptor());
+        CLUSTER.waitUntilTableReady(other);
+        ServerNode node = CLUSTER.getTabletServerInfos().get(0).node("KAFKA");
+        for (short version = 0; version <= 11; version++) {
+            MetadataResponse before = query(node, named(version, "events", "sales.events"));
+            assertThat(before.data().topics().find("events").errorCode())
+                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+            assertThat(before.data().topics().find("sales.events").errorCode())
+                    .isEqualTo(Errors.NONE.code());
+        }
+        // Exercise PR03's optional metadata column through the same alias and discovery paths.
+        TableDescriptor withMetadata =
                 TableDescriptor.builder(topicDescriptor())
                         .schema(
                                 Schema.newBuilder()
@@ -132,100 +134,7 @@ public class KafkaMetadataITCase {
                                                                 "partition", DataTypes.INT())))
                                         .build())
                         .build();
-        long tableId = createTable(CLUSTER, TablePath.of("fluss", "metadata_events"), descriptor);
-        CLUSTER.waitUntilTableReady(tableId);
-        for (int serverId = 0; serverId < 2; serverId++) {
-            ServerNode node = CLUSTER.getTabletServerInfos().get(serverId).node("KAFKA");
-            for (short version = 0; version <= 11; version++) {
-                MetadataResponse named =
-                        query(node, named(version, "metadata_events", "fluss.metadata_events"));
-                assertThat(named.errorCounts()).containsOnlyKeys(Errors.NONE);
-                MetadataResponseTopic alias = named.data().topics().find("metadata_events");
-                MetadataResponseTopic canonical =
-                        named.data().topics().find("fluss.metadata_events");
-                assertThat(alias.partitions()).hasSize(2).isEqualTo(canonical.partitions());
-                if (version >= 10) {
-                    assertThat(canonical.topicId())
-                            .isEqualTo(new Uuid(0x466c757373000000L, tableId));
-                    assertThat(alias.topicId()).isEqualTo(new Uuid(0x466c757373410000L, tableId));
-                }
-                MetadataResponse all = query(node, allTopics(version));
-                assertThat(all.data().topics())
-                        .extracting(MetadataResponseTopic::name)
-                        .containsExactly("fluss.metadata_events");
-                assertThat(all.errorCounts()).containsOnlyKeys(Errors.NONE);
-            }
-        }
-    }
-
-    @Test
-    public void testDeletedDatabaseDoesNotHideBrokersOrOtherTopics() throws Exception {
-        TableDescriptor descriptor = topicDescriptor();
-        long existing = createTable(CLUSTER, TablePath.of("existing_db", "events"), descriptor);
-        long deleted = createTable(CLUSTER, TablePath.of("deleted_db", "events"), descriptor);
-        CLUSTER.waitUntilTableReady(existing);
-        CLUSTER.waitUntilTableReady(deleted);
-        dropDatabase(CLUSTER, "deleted_db");
-        ServerNode node = CLUSTER.getTabletServerInfos().get(0).node("KAFKA");
-
-        for (short version = 0; version <= 11; version++) {
-            MetadataResponse missing =
-                    query(
-                            node,
-                            new MetadataRequest(
-                                    new MetadataRequestData()
-                                            .setTopics(
-                                                    MetadataRequest.convertToMetadataRequestTopic(
-                                                            Collections.singletonList(
-                                                                    "deleted_db.events"))),
-                                    version));
-            assertThat(missing.brokers()).hasSize(2);
-            assertThat(missing.data().topics().find("deleted_db.events").errorCode())
-                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-
-            MetadataResponse mixed =
-                    query(
-                            node,
-                            new MetadataRequest(
-                                    new MetadataRequestData()
-                                            .setTopics(
-                                                    MetadataRequest.convertToMetadataRequestTopic(
-                                                            Arrays.asList(
-                                                                    "deleted_db.events",
-                                                                    "existing_db.events"))),
-                                    version));
-            assertThat(mixed.brokers()).hasSize(2);
-            assertThat(mixed.brokers().iterator().next().port()).isEqualTo(node.port());
-            assertThat(mixed.data().topics().find("deleted_db.events").errorCode())
-                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-            assertThat(mixed.data().topics().find("existing_db.events").errorCode())
-                    .isEqualTo(Errors.NONE.code());
-            assertThat(mixed.data().topics().find("existing_db.events").partitions()).hasSize(2);
-
-            MetadataRequestData allTopics = new MetadataRequestData();
-            allTopics.setTopics(version == 0 ? Collections.emptyList() : null);
-            MetadataResponse all = query(node, new MetadataRequest(allTopics, version));
-            assertThat(all.brokers()).hasSize(2);
-            assertThat(all.data().topics())
-                    .extracting(MetadataResponseTopic::name)
-                    .containsExactly("existing_db.events");
-            assertThat(all.errorCounts()).containsOnlyKeys(Errors.NONE);
-        }
-    }
-
-    @Test
-    public void testDefaultAliasesAndNoFallbackOverRealListeners() throws Exception {
-        long other = createTable(CLUSTER, TablePath.of("sales", "events"), topicDescriptor());
-        CLUSTER.waitUntilTableReady(other);
-        ServerNode node = CLUSTER.getTabletServerInfos().get(0).node("KAFKA");
-        for (short version = 0; version <= 11; version++) {
-            MetadataResponse before = query(node, named(version, "events", "sales.events"));
-            assertThat(before.data().topics().find("events").errorCode())
-                    .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-            assertThat(before.data().topics().find("sales.events").errorCode())
-                    .isEqualTo(Errors.NONE.code());
-        }
-        long tableId = createTable(CLUSTER, TablePath.of("fluss", "events"), topicDescriptor());
+        long tableId = createTable(CLUSTER, TablePath.of("fluss", "events"), withMetadata);
         CLUSTER.waitUntilTableReady(tableId);
         for (short version = 0; version <= 11; version++) {
             for (ServerNode broker : CLUSTER.getTabletServerNodes("KAFKA")) {
@@ -239,7 +148,20 @@ public class KafkaMetadataITCase {
                                         "events",
                                         "fluss.events",
                                         "sales.events",
+                                        "fluss.missing",
                                         "missing_db.events"));
+                assertThat(response.brokers()).hasSize(2);
+                assertThat(response.brokers()).extracting(Node::port).contains(broker.port());
+                for (String name : Arrays.asList("fluss.events", "sales.events")) {
+                    MetadataResponseTopic topic = response.data().topics().find(name);
+                    assertThat(topic.errorCode()).isEqualTo(Errors.NONE.code());
+                    assertThat(topic.partitions()).hasSize(2);
+                }
+                assertThat(response.data().topics().find("sales.events").topicId())
+                        .isEqualTo(
+                                version >= 10
+                                        ? new Uuid(0x466c757373000000L, other)
+                                        : Uuid.ZERO_UUID);
                 MetadataResponseTopic alias = response.data().topics().find("events");
                 MetadataResponseTopic canonical = response.data().topics().find("fluss.events");
                 assertThat(alias.errorCode()).isEqualTo(Errors.NONE.code());
@@ -264,11 +186,15 @@ public class KafkaMetadataITCase {
                             .isNotEqualTo(alias.topicId())
                             .isNotEqualTo(response.data().topics().find("sales.events").topicId());
                 }
-                assertThat(response.data().topics().find("missing_db.events").errorCode())
-                        .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-                assertThat(query(broker, allTopics(version)).data().topics())
+                for (String missing : Arrays.asList("fluss.missing", "missing_db.events")) {
+                    assertThat(response.data().topics().find(missing).errorCode())
+                            .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+                }
+                MetadataResponse all = query(broker, allTopics(version));
+                assertThat(all.data().topics())
                         .extracting(MetadataResponseTopic::name)
                         .containsExactly("fluss.events", "sales.events");
+                assertThat(all.errorCounts()).containsOnlyKeys(Errors.NONE);
             }
         }
     }
@@ -359,7 +285,7 @@ public class KafkaMetadataITCase {
     }
 
     @Test
-    public void testCustomDefaultDatabaseIsInjectedAndNeverCreatedByMetadata() throws Exception {
+    public void testCustomDefaultDatabaseAliasAndNoRecreationByMetadata() throws Exception {
         Configuration config = clusterConfiguration();
         config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "custom_default");
         config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 1);
@@ -375,12 +301,13 @@ public class KafkaMetadataITCase {
                     createTable(cluster, TablePath.of("fluss", "events"), topicDescriptor());
             cluster.waitUntilTableReady(nativeDefaultId);
             ServerNode node = cluster.getTabletServerInfos().get(0).node("KAFKA");
+            // PR03 creates the configured database at startup, before any Metadata request.
             assertThat(
                             cluster.newCoordinatorClient()
                                     .databaseExists(newDatabaseExistsRequest("custom_default"))
                                     .get()
                                     .isExists())
-                    .isFalse();
+                    .isTrue();
             for (short version = 0; version <= 11; version++) {
                 MetadataResponse response = query(node, named(version, "events", "fluss.events"));
                 assertThat(response.data().topics().find("events").errorCode())

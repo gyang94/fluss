@@ -300,6 +300,6 @@ public class KafkaRequestHandlerTest {
 
     private static KafkaRequestHandler createKafkaRequestHandler() {
         TestingTabletGatewayService service = new TestingTabletGatewayService();
-        return new KafkaRequestHandler(new Configuration(), service, service);
+        return new KafkaRequestHandler(new Configuration(), service);
     }
 }
