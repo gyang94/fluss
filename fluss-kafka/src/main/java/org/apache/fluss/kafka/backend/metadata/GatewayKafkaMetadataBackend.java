@@ -62,6 +62,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 
+import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Adapts the existing Fluss metadata RPC to the Kafka Metadata backend contract. */
@@ -75,11 +76,19 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
     private final KafkaTopicMapper topicMapper;
     private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
 
-    /** Creates a metadata backend backed by the local TabletServer gateway. */
-    public GatewayKafkaMetadataBackend(
-            RpcGatewayService service, TabletServerGateway gateway, KafkaTopicMapper topicMapper) {
+    /**
+     * Creates a metadata backend backed by the local TabletServer gateway.
+     *
+     * @throws IllegalArgumentException if the service does not implement {@link
+     *     TabletServerGateway}
+     */
+    public GatewayKafkaMetadataBackend(RpcGatewayService service, KafkaTopicMapper topicMapper) {
         this.service = checkNotNull(service);
-        this.gateway = checkNotNull(gateway);
+        checkArgument(
+                service instanceof TabletServerGateway,
+                "Kafka protocol endpoints can only be enabled on TabletServers, but the service is %s",
+                service.getClass().getSimpleName());
+        this.gateway = (TabletServerGateway) service;
         this.topicMapper = checkNotNull(topicMapper);
     }
 
