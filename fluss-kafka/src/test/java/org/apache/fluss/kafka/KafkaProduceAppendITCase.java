@@ -29,6 +29,7 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalRow;
@@ -106,6 +107,10 @@ class KafkaProduceAppendITCase {
                 String topic = path.toString();
                 admin.createTable(path, descriptor(format), false).get();
                 CLUSTER.waitUntilAllGatewayHasSameMetadata();
+                // Node discovery does not wait for table replicas. With acks=0 the producer
+                // cannot observe or retry a write rejected before the leader is ready.
+                CLUSTER.waitUntilAllReplicaReady(
+                        new TableBucket(admin.getTableInfo(path).get().getTableId(), 0));
                 try (KafkaProducer<byte[], byte[]> producer = producer(acks)) {
                     assertThat(producer.partitionsFor(topic)).hasSize(1);
                     ProducerRecord<byte[], byte[]> record =
@@ -495,7 +500,7 @@ class KafkaProduceAppendITCase {
                     count++;
                 }
             }
-            assertThat(count).isEqualTo(expectedCount);
+            assertThat(count).as("native readback for %s", path).isEqualTo(expectedCount);
         }
     }
 
