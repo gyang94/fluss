@@ -18,16 +18,17 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.types.MapType;
-
-import javax.annotation.Nullable;
+import org.apache.fluss.types.RowType;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -35,7 +36,7 @@ import java.util.Map;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Assembles decoded values, raw keys and headers using the shared fixed-column contract. */
+/** Assembles decoded values and system columns using the shared fixed-column contract. */
 @Internal
 public final class KafkaRowAssembler {
 
@@ -44,24 +45,21 @@ public final class KafkaRowAssembler {
     /** Creates an assembler for the resolved topic schema. */
     public KafkaRowAssembler(KafkaTableSchema topicSchema) {
         this.topicSchema = checkNotNull(topicSchema);
-        if (topicSchema.metadataPosition() >= 0) {
-            throw new KafkaTopicSchemaException(
-                    "_kafka_metadata conversion is not supported by this transcoder yet.");
-        }
     }
 
     /**
-     * Assembles one Fluss row for immediate synchronous encoding.
+     * Assembles one Fluss row from a record and its requested partition for immediate synchronous
+     * encoding.
      *
-     * <p>The row borrows decoded values and header payloads; it must not modify them or retain them
-     * after conversion.
+     * <p>The row borrows decoded values, keys and header payloads; it must not modify them or
+     * retain them after conversion.
      */
-    public GenericRow assemble(
-            Object[] valueValues, @Nullable byte[] key, List<RecordHeader> headers) {
+    public GenericRow assemble(Object[] valueValues, Record record, int partitionId) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
         setProjectedFields(row, topicSchema.valueProjection(), valueValues);
         if (topicSchema.keyPosition() >= 0) {
             int position = topicSchema.keyPosition();
+            byte[] key = record.borrowedKey();
             if (key == null && !topicSchema.rowType().getTypeAt(position).isNullable()) {
                 throw new KafkaRecordEncodingException(
                         "Null Kafka key cannot populate NOT NULL _kafka_key.");
@@ -72,10 +70,42 @@ public final class KafkaRowAssembler {
             int position = topicSchema.headersPosition();
             row.setField(
                     position,
-                    toHeaders(headers, (MapType) topicSchema.rowType().getTypeAt(position)));
+                    toHeaders(
+                            record.headers(), (MapType) topicSchema.rowType().getTypeAt(position)));
+        }
+        if (topicSchema.metadataPosition() >= 0) {
+            int position = topicSchema.metadataPosition();
+            RowType type = (RowType) topicSchema.rowType().getTypeAt(position);
+            if (!record.hasTimestamp() && !type.getTypeAt(0).isNullable()) {
+                throw new KafkaRecordEncodingException(
+                        "Missing Kafka timestamp cannot populate NOT NULL _kafka_metadata.timestamp.");
+            }
+            row.setField(
+                    position,
+                    GenericRow.of(
+                            record.hasTimestamp()
+                                    ? TimestampLtz.fromEpochMillis(record.timestamp())
+                                    : null,
+                            timestampTypeId(record.timestampType()),
+                            partitionId));
         }
         // A declared _kafka_rescue stays null for binary/string; omitted columns do not exist.
         return row;
+    }
+
+    private static int timestampTypeId(TimestampType type) {
+        // Preserve batch provenance even when a record's timestamp is absent. The legacy record
+        // constructor supplies UNKNOWN, so a present timestamp alone cannot imply CreateTime.
+        switch (type) {
+            case UNKNOWN:
+                return -1;
+            case CREATE_TIME:
+                return 0;
+            case LOG_APPEND_TIME:
+                return 1;
+            default:
+                throw new KafkaRecordEncodingException("Unsupported Kafka timestamp type: " + type);
+        }
     }
 
     private static void setProjectedFields(
