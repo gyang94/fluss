@@ -43,7 +43,9 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final FlussArrowRecordEncoder arrowRecordEncoder = new FlussArrowRecordEncoder();
 
     @Override
-    public BytesView transcode(List<Record> records, TableInfo tableInfo) throws Exception {
+    public BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
+            throws Exception {
+        checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTableSchema schema = schemaResolver.resolve(tableInfo.toTableDescriptor());
         if (schema.valueType() != ValueType.BINARY && schema.valueType() != ValueType.STRING) {
@@ -59,8 +61,8 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                                         new Object[] {
                                             decode(schema.valueType(), record.borrowedValue())
                                         },
-                                        record.borrowedKey(),
-                                        record.headers()));
+                                        record,
+                                        partitionId));
                     }
                 },
                 tableInfo);
