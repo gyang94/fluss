@@ -27,6 +27,10 @@ import java.util.List;
 /** Converts copied Kafka records into the native Fluss log representation. */
 @Internal
 public interface KafkaRecordTranscoder {
-    /** Transcodes records according to the target Fluss table schema and log format. */
-    BytesView transcode(List<Record> records, TableInfo tableInfo) throws Exception;
+    /**
+     * Transcodes records from the requested Kafka partition according to the target Fluss table
+     * schema and log format.
+     */
+    BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
+            throws Exception;
 }
