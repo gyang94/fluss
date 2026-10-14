@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
@@ -43,6 +44,10 @@ public final class KafkaRowAssembler {
     /** Creates an assembler for the resolved topic schema. */
     public KafkaRowAssembler(KafkaTableSchema topicSchema) {
         this.topicSchema = checkNotNull(topicSchema);
+        if (topicSchema.metadataPosition() >= 0) {
+            throw new KafkaTopicSchemaException(
+                    "_kafka_metadata conversion is not supported by this transcoder yet.");
+        }
     }
 
     /**
