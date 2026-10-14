@@ -560,11 +560,8 @@ public class CoordinatorServer extends ServerBase {
         }
         if (conf.get(ConfigOptions.KAFKA_ENABLED)) {
             String kafkaDatabase = conf.get(ConfigOptions.KAFKA_DEFAULT_DATABASE);
-            // An empty cluster has already created the native default database above.
-            if (DEFAULT_DATABASE.equals(kafkaDatabase) && databases.isEmpty()) {
-                return;
-            }
-            if (!databases.contains(kafkaDatabase)) {
+            // The native default database follows the cluster initialization logic above.
+            if (!DEFAULT_DATABASE.equals(kafkaDatabase) && !databases.contains(kafkaDatabase)) {
                 metadataManager.createDatabase(kafkaDatabase, DatabaseDescriptor.EMPTY, true);
                 LOG.info("Created default database '{}' for Kafka protocol.", kafkaDatabase);
             }

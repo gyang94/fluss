@@ -615,8 +615,7 @@ public final class CoordinatorService extends RpcServiceBase implements Coordina
                     tablePath,
                     alterSchemaChanges,
                     request.isIgnoreIfNotExists(),
-                    currentSession().getPrincipal(),
-                    coordinatorZkVersionSupplier.get());
+                    currentSession().getPrincipal());
         }
 
         if (hasConfigChanges) {
