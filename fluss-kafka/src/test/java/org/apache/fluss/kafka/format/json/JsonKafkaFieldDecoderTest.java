@@ -189,6 +189,49 @@ class JsonKafkaFieldDecoderTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testFloatingPointUnderflowPreservesSignAndRoundsOnce(boolean nested) {
+        JsonKafkaFieldDecoder decoder =
+                decoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("floatValue", DataTypes.FLOAT()),
+                                DataTypes.FIELD("doubleValue", DataTypes.DOUBLE())),
+                        nested);
+        // The final two pairs straddle half of the smallest subnormal for each target.
+        // Converting the FLOAT token through DOUBLE first rounds both to the same midpoint.
+        String[][] tokens = {
+            {"0", "0"},
+            {"0.0", "0.0"},
+            {"1e-1000", "1e-1000"},
+            {"7.006492321624085e-46", "2.4703282292062327e-324"},
+            {"7.006492321624086e-46", "2.4703282292062328e-324"}
+        };
+        for (boolean negative : new boolean[] {false, true}) {
+            String sign = negative ? "-" : "";
+            for (int i = 0; i < tokens.length; i++) {
+                Object[] decoded =
+                        decoder.decode(
+                                bytes(
+                                        "{\"floatValue\":"
+                                                + sign
+                                                + tokens[i][0]
+                                                + ",\"doubleValue\":"
+                                                + sign
+                                                + tokens[i][1]
+                                                + "}"));
+                GenericRow row = nested ? (GenericRow) decoded[0] : GenericRow.of(decoded);
+                int magnitude = i == tokens.length - 1 ? 1 : 0;
+                assertThat(Float.floatToRawIntBits(row.getFloat(0)))
+                        .as("FLOAT %s%s, nested=%s", sign, tokens[i][0], nested)
+                        .isEqualTo((negative ? Integer.MIN_VALUE : 0) | magnitude);
+                assertThat(Double.doubleToRawLongBits(row.getDouble(1)))
+                        .as("DOUBLE %s%s, nested=%s", sign, tokens[i][1], nested)
+                        .isEqualTo((negative ? Long.MIN_VALUE : 0L) | magnitude);
+            }
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"", "-"})
     void testFloatingPointRoundingAndExactDecimalParsing(String sign) {
         JsonKafkaFieldDecoder decoder =
