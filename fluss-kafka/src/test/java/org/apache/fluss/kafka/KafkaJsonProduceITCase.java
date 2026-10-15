@@ -54,7 +54,10 @@ import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceRespo
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
+import org.apache.kafka.common.record.MemoryRecordsBuilder;
+import org.apache.kafka.common.record.RecordBatch;
 import org.apache.kafka.common.record.SimpleRecord;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
@@ -63,6 +66,7 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -158,6 +162,7 @@ class KafkaJsonProduceITCase {
                                         new ProducerRecord<byte[], byte[]>(
                                                 path.getTableName(),
                                                 0,
+                                                456L,
                                                 null,
                                                 bytes(scalarJson(8, true))))
                                 .get(30, TimeUnit.SECONDS);
@@ -188,7 +193,9 @@ class KafkaJsonProduceITCase {
                                                         ? 1
                                                         : SCALAR_TYPE.getFieldCount());
                                 assertHeaders(row.getMap(headersPosition), index == 0);
-                                assertThat(row.isNullAt(headersPosition + 1)).isTrue();
+                                assertMetadata(
+                                        row, headersPosition + 1, index == 0 ? 123L : 456L, 0, 0);
+                                assertThat(row.isNullAt(headersPosition + 2)).isTrue();
                             }
                         });
             } finally {
@@ -223,7 +230,11 @@ class KafkaJsonProduceITCase {
                     KafkaTableSchema.VALUE_COLUMN
                 }) {
             // This also rejects the erroneous nested payload wrapper {"_kafka_value":{...}}.
-            invalidValues.add("{\"id\":1,\"" + reserved + "\":{\"id\":2}}");
+            String value =
+                    reserved.equals(KafkaTableSchema.METADATA_COLUMN)
+                            ? "{\"timestamp\":0,\"timestamp_type\":1,\"partition\":99}"
+                            : "{\"id\":2}";
+            invalidValues.add("{\"id\":1,\"" + reserved + "\":" + value + "}");
         }
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
@@ -265,6 +276,7 @@ class KafkaJsonProduceITCase {
                                                 new ProducerRecord<>(
                                                         path.toString(),
                                                         0,
+                                                        123L,
                                                         KEY,
                                                         bytes("{\"id\":-1}")))
                                         .get(30, TimeUnit.SECONDS)
@@ -275,17 +287,166 @@ class KafkaJsonProduceITCase {
                         path,
                         0,
                         1,
-                        (row, index) -> assertThat(valueId(row, layout)).isEqualTo(-1));
+                        (row, index) -> {
+                            assertThat(valueId(row, layout)).isEqualTo(-1);
+                            assertMetadata(row, 3, 123L, 0, 0);
+                        });
                 read(
                         connection,
                         path,
                         1,
                         invalidValues.size(),
-                        (row, index) -> assertThat(valueId(row, layout)).isEqualTo(index));
+                        (row, index) -> {
+                            assertThat(valueId(row, layout)).isEqualTo(index);
+                            assertMetadata(row, 3, 123L, 0, 1);
+                        });
             } finally {
                 admin.dropTable(path, true).get();
             }
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testBatchMetadataRoundTripWithAndWithoutTimestamps(String layout) throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_metadata_" + layout);
+        RowType valueType = RowType.builder().field("id", DataTypes.INT().copy(false)).build();
+        // Magic v2 batches carry CREATE_TIME or LOG_APPEND_TIME even without a timestamp.
+        TimestampType[] types = {
+            TimestampType.CREATE_TIME,
+            TimestampType.LOG_APPEND_TIME,
+            TimestampType.CREATE_TIME,
+            TimestampType.LOG_APPEND_TIME
+        };
+        long[] expectedTimestamps = {0L, 456L, 123L, 123L, -1L, -1L, -1L, -1L};
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor(valueType, layout, true, false, 2));
+            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port())) {
+                for (int batch = 0; batch < types.length; batch++) {
+                    long firstTimestamp = batch < 2 ? 0L : RecordBatch.NO_TIMESTAMP;
+                    long secondTimestamp = batch < 2 ? 456L : RecordBatch.NO_TIMESTAMP;
+                    long appendTimestamp = batch == 1 ? 123L : RecordBatch.NO_TIMESTAMP;
+                    MemoryRecords records =
+                            timestampedRecords(
+                                    types[batch],
+                                    appendTimestamp,
+                                    new SimpleRecord(
+                                            firstTimestamp,
+                                            KEY,
+                                            bytes("{\"id\":" + (batch * 2) + "}")),
+                                    new SimpleRecord(
+                                            secondTimestamp,
+                                            KEY,
+                                            bytes("{\"id\":" + (batch * 2 + 1) + "}")));
+                    String topic = batch % 2 == 0 ? path.toString() : path.getTableName();
+                    ProduceResponse response = produce(socket, topic, records, records);
+                    for (int partition = 0; partition < 2; partition++) {
+                        PartitionProduceResponse result = partition(response, topic, partition);
+                        assertThat(result.errorCode()).isEqualTo(Errors.NONE.code());
+                        assertThat(result.baseOffset()).isEqualTo(batch * 2L);
+                    }
+                }
+                for (int partition = 0; partition < 2; partition++) {
+                    int expectedPartition = partition;
+                    read(
+                            connection,
+                            path,
+                            partition,
+                            expectedTimestamps.length,
+                            (row, index) -> {
+                                assertThat(valueId(row, layout)).isEqualTo(index);
+                                assertMetadata(
+                                        row,
+                                        3,
+                                        expectedTimestamps[index],
+                                        (index / 2) % 2,
+                                        expectedPartition);
+                            });
+                }
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testMissingRequiredMetadataTimestampIsPartitionAtomic(String layout) throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_required_timestamp_" + layout);
+        RowType valueType = RowType.builder().field("id", DataTypes.INT().copy(false)).build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor(valueType, layout, true, false, 2, false));
+            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port());
+                    KafkaProducer<byte[], byte[]> producer = producer()) {
+                ProduceResponse response =
+                        produce(
+                                socket,
+                                path.toString(),
+                                timestampedRecords(
+                                        TimestampType.CREATE_TIME,
+                                        RecordBatch.NO_TIMESTAMP,
+                                        record("{\"id\":1000}"),
+                                        new SimpleRecord(
+                                                RecordBatch.NO_TIMESTAMP,
+                                                KEY,
+                                                bytes("{\"id\":1001}"))),
+                                MemoryRecords.withRecords(Compression.NONE, record("{\"id\":1}")));
+                PartitionProduceResponse rejected = partition(response, path.toString(), 0);
+                assertThat(rejected.errorCode()).isEqualTo(Errors.INVALID_RECORD.code());
+                assertThat(rejected.baseOffset()).isEqualTo(-1L);
+                PartitionProduceResponse accepted = partition(response, path.toString(), 1);
+                assertThat(accepted.errorCode()).isEqualTo(Errors.NONE.code());
+                assertThat(accepted.baseOffset()).isZero();
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<>(
+                                                        path.getTableName(),
+                                                        0,
+                                                        789L,
+                                                        KEY,
+                                                        bytes("{\"id\":-1}")))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        0,
+                        1,
+                        (row, index) -> {
+                            assertThat(valueId(row, layout)).isEqualTo(-1);
+                            assertMetadata(row, 3, 789L, 0, 0);
+                        });
+                read(
+                        connection,
+                        path,
+                        1,
+                        1,
+                        (row, index) -> {
+                            assertThat(valueId(row, layout)).isEqualTo(1);
+                            assertMetadata(row, 3, 123L, 0, 1);
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    private static void assertMetadata(
+            InternalRow row, int position, long timestamp, int timestampType, int partition) {
+        assertThat(row.isNullAt(position)).isFalse();
+        InternalRow metadata = row.getRow(position, 3);
+        if (timestamp == RecordBatch.NO_TIMESTAMP) {
+            assertThat(metadata.isNullAt(0)).isTrue();
+        } else {
+            assertThat(metadata.getTimestampLtz(0, 3).getEpochMillisecond()).isEqualTo(timestamp);
+        }
+        assertThat(metadata.getInt(1)).isEqualTo(timestampType);
+        assertThat(metadata.getInt(2)).isEqualTo(partition);
     }
 
     private static int valueId(InternalRow row, String layout) {
@@ -357,6 +518,16 @@ class KafkaJsonProduceITCase {
             boolean withSystemColumns,
             boolean withRescue,
             int buckets) {
+        return descriptor(valueType, layout, withSystemColumns, withRescue, buckets, true);
+    }
+
+    private static TableDescriptor descriptor(
+            RowType valueType,
+            String layout,
+            boolean withSystemColumns,
+            boolean withRescue,
+            int buckets,
+            boolean nullableTimestamp) {
         Schema.Builder schema = Schema.newBuilder();
         if (withSystemColumns) {
             schema.column(KafkaTableSchema.KEY_COLUMN, DataTypes.BYTES());
@@ -372,6 +543,15 @@ class KafkaJsonProduceITCase {
             schema.column(
                     KafkaTableSchema.HEADERS_COLUMN,
                     DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()));
+            schema.column(
+                    KafkaTableSchema.METADATA_COLUMN,
+                    DataTypes.ROW(
+                                    DataTypes.FIELD(
+                                            "timestamp",
+                                            DataTypes.TIMESTAMP_LTZ(3).copy(nullableTimestamp)),
+                                    DataTypes.FIELD("timestamp_type", DataTypes.INT().copy(false)),
+                                    DataTypes.FIELD("partition", DataTypes.INT().copy(false)))
+                            .copy(false));
         }
         if (withRescue) {
             schema.column(KafkaTableSchema.RESCUE_COLUMN, DataTypes.STRING());
@@ -384,6 +564,23 @@ class KafkaJsonProduceITCase {
                 .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
                 .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
                 .build();
+    }
+
+    private static MemoryRecords timestampedRecords(
+            TimestampType timestampType, long logAppendTime, SimpleRecord... records) {
+        try (MemoryRecordsBuilder builder =
+                MemoryRecords.builder(
+                        ByteBuffer.allocate(1024),
+                        RecordBatch.MAGIC_VALUE_V2,
+                        Compression.NONE,
+                        timestampType,
+                        0L,
+                        logAppendTime)) {
+            for (SimpleRecord record : records) {
+                builder.append(record);
+            }
+            return builder.build();
+        }
     }
 
     private static SimpleRecord record(String json) {
