@@ -147,20 +147,22 @@ class KafkaJsonProduceITCase {
 
     @ParameterizedTest
     @CsvSource({"flat", "nested"})
-    void testComplexJsonRoundTripPreservesNumericValues(String layout) throws Exception {
+    void testComplexJsonRoundTripPreservesNumericValuesAndMetadata(String layout) throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_complex_" + layout);
+        int metadataPosition = layout.equals("nested") ? 3 : COMPLEX_TYPE.getFieldCount() + 2;
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(COMPLEX_TYPE, layout, true, false, 1));
+            create(admin, path, descriptor(COMPLEX_TYPE, layout, true, false, 2));
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
-                assertThat(producer.partitionsFor(path.toString())).hasSize(1);
+                assertThat(producer.partitionsFor(path.toString())).hasSize(2);
                 String[] negativeZeros = {"-0", "-0.0", "-0e0"};
                 for (int index = 0; index < negativeZeros.length; index++) {
                     assertThat(
                                     producer.send(
                                                     new ProducerRecord<>(
                                                             path.toString(),
-                                                            0,
+                                                            1,
+                                                            123L + index,
                                                             KEY,
                                                             bytes(
                                                                     complexJson(
@@ -173,10 +175,12 @@ class KafkaJsonProduceITCase {
                 read(
                         connection,
                         path,
-                        0,
+                        1,
                         negativeZeros.length,
                         (row, index) -> {
                             assertThat(row.getBytes(0)).isEqualTo(KEY);
+                            assertHeaders(row.getMap(metadataPosition - 1), false);
+                            assertMetadata(row, metadataPosition, 123L + index, 0, 1);
                             InternalRow value =
                                     layout.equals("nested")
                                             ? row.getRow(1, COMPLEX_TYPE.getFieldCount())
@@ -231,6 +235,7 @@ class KafkaJsonProduceITCase {
             String layout, boolean withRescue) throws Exception {
         TablePath path =
                 TablePath.of(DATABASE, "json_complex_rejections_" + layout + "_" + withRescue);
+        int metadataPosition = layout.equals("nested") ? 3 : COMPLEX_TYPE.getFieldCount() + 2;
         List<String> invalidValues =
                 Arrays.asList(
                         "{\"id\":1,\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
@@ -285,6 +290,7 @@ class KafkaJsonProduceITCase {
                                                 new ProducerRecord<>(
                                                         path.toString(),
                                                         0,
+                                                        789L,
                                                         KEY,
                                                         bytes(complexJson(-1, "-0.0"))))
                                         .get(30, TimeUnit.SECONDS)
@@ -295,15 +301,25 @@ class KafkaJsonProduceITCase {
                         path,
                         0,
                         1,
-                        (row, index) ->
-                                assertThat(valueId(row, layout, COMPLEX_TYPE)).isEqualTo(-1));
+                        (row, index) -> {
+                            assertThat(valueId(row, layout, COMPLEX_TYPE)).isEqualTo(-1);
+                            assertMetadata(row, metadataPosition, 789L, 0, 0);
+                            if (withRescue) {
+                                assertThat(row.isNullAt(metadataPosition + 1)).isTrue();
+                            }
+                        });
                 read(
                         connection,
                         path,
                         1,
                         invalidValues.size(),
-                        (row, index) ->
-                                assertThat(valueId(row, layout, COMPLEX_TYPE)).isEqualTo(index));
+                        (row, index) -> {
+                            assertThat(valueId(row, layout, COMPLEX_TYPE)).isEqualTo(index);
+                            assertMetadata(row, metadataPosition, 123L, 0, 1);
+                            if (withRescue) {
+                                assertThat(row.isNullAt(metadataPosition + 1)).isTrue();
+                            }
+                        });
             } finally {
                 admin.dropTable(path, true).get();
             }
@@ -836,7 +852,6 @@ class KafkaJsonProduceITCase {
         return layout.equals("nested")
                 ? row.getRow(1, valueType.getFieldCount()).getInt(0)
                 : row.getInt(1);
-
     }
 
     private static int valueId(InternalRow row, String layout) {
