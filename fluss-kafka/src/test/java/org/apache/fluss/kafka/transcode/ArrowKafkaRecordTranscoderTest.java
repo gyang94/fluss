@@ -557,22 +557,26 @@ class ArrowKafkaRecordTranscoderTest {
                                 DataTypes.MAP(
                                         DataTypes.STRING(),
                                         DataTypes.ROW(DataTypes.FIELD("count", DataTypes.INT())))));
-        Schema schema =
+        Schema.Builder schema =
                 nested
-                        ? Schema.newBuilder().column("_kafka_value", business).build()
-                        : Schema.newBuilder().fromRowType(business).build();
+                        ? Schema.newBuilder().column("_kafka_value", business)
+                        : Schema.newBuilder().fromRowType(business);
+        schema.column("_kafka_metadata", metadataType(true));
         TableInfo table =
                 table(
-                        descriptor(schema, false)
+                        descriptor(schema.build(), false)
                                 .property(
                                         ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
                                 .property(
                                         ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
                                         nested ? "nested" : "flat")
                                 .build());
+        KafkaTopicWritePlan plan = transcoder.prepare(table);
+        int partitionId = 3;
         Record valid =
                 new Record(
                         1L,
+                        TimestampType.CREATE_TIME,
                         null,
                         bytes(
                                 "{\"customer\":{\"name\":\"Alice\"},\"items\":[1,2],"
@@ -591,6 +595,7 @@ class ArrowKafkaRecordTranscoderTest {
                             () ->
                                     output.set(
                                             transcoder.transcode(
+                                                    partitionId,
                                                     Arrays.asList(
                                                             valid,
                                                             new Record(
@@ -598,12 +603,12 @@ class ArrowKafkaRecordTranscoderTest {
                                                                     null,
                                                                     bytes(invalid),
                                                                     Collections.emptyList())),
-                                                    table)));
+                                                    plan)));
             assertThat(failure).isInstanceOf(KafkaRecordEncodingException.class);
             assertThat(failure.getSuppressed()).isEmpty();
             assertThat(output).hasNullValue();
             read(
-                    transcoder.transcode(Collections.singletonList(valid), table),
+                    transcoder.transcode(partitionId, Collections.singletonList(valid), plan),
                     table,
                     1,
                     physical -> {
@@ -613,6 +618,7 @@ class ArrowKafkaRecordTranscoderTest {
                         assertThat(row.getArray(1).getInt(1)).isEqualTo(2);
                         assertThat(row.getMap(2).keyArray().getString(0).toString()).isEqualTo("?");
                         assertThat(row.getMap(2).valueArray().getRow(0, 1).getInt(0)).isEqualTo(3);
+                        assertMetadata(physical, nested ? 1 : 3, 1L, 0, partitionId);
                     });
         }
     }

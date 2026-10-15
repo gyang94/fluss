@@ -439,6 +439,37 @@ class JsonKafkaComplexTypesTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void testFloatingPointUnderflowPreservesSignAndRoundsOnceInEveryContainer(boolean nested) {
+        // The last two pairs straddle half of the smallest subnormal for each target.
+        // Parsing FLOAT through DOUBLE first would round both tokens to the same midpoint.
+        String[][] tokens = {
+            {"1e-1000", "1e-1000"},
+            {"7.006492321624085e-46", "2.4703282292062327e-324"},
+            {"7.006492321624086e-46", "2.4703282292062328e-324"}
+        };
+        for (boolean negative : new boolean[] {false, true}) {
+            String sign = negative ? "-" : "";
+            for (int i = 0; i < tokens.length; i++) {
+                int magnitude = i == tokens.length - 1 ? 1 : 0;
+                String floatToken = sign + tokens[i][0];
+                for (Object value : numericContainerValues(DataTypes.FLOAT(), floatToken, nested)) {
+                    assertThat(Float.floatToRawIntBits((Float) value))
+                            .as("FLOAT %s, nested=%s", floatToken, nested)
+                            .isEqualTo((negative ? Integer.MIN_VALUE : 0) | magnitude);
+                }
+                String doubleToken = sign + tokens[i][1];
+                for (Object value :
+                        numericContainerValues(DataTypes.DOUBLE(), doubleToken, nested)) {
+                    assertThat(Double.doubleToRawLongBits((Double) value))
+                            .as("DOUBLE %s, nested=%s", doubleToken, nested)
+                            .isEqualTo((negative ? Long.MIN_VALUE : 0L) | magnitude);
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void testPreservesOriginalNumericRoundingAndExactDecimalsInEveryContainer(boolean nested) {
         for (String sign : new String[] {"", "-"}) {
             float direction = sign.isEmpty() ? 1.0F : -1.0F;
