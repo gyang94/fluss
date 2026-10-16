@@ -23,9 +23,14 @@ import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.rpc.netty.server.RpcRequest;
 import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
+import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelOutboundHandlerAdapter;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelPromise;
 import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.codec.LengthFieldPrepender;
+import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
 
 import org.apache.kafka.common.message.ApiVersionsRequestData;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
@@ -48,12 +53,17 @@ import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.requests.SaslHandshakeRequest;
 import org.apache.kafka.common.requests.SaslHandshakeResponse;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Tests response ordering and ownership in {@link KafkaCommandDecoder}. */
 public class KafkaCommandDecoderTest {
@@ -85,6 +95,7 @@ public class KafkaCommandDecoderTest {
 
             TestingTabletGatewayService service = new TestingTabletGatewayService();
             new KafkaRequestHandler(new Configuration(), service).processRequest(request);
+            request.releaseBuffer();
             channel.runPendingTasks();
 
             responseBuffer = channel.readOutbound();
@@ -164,9 +175,9 @@ public class KafkaCommandDecoderTest {
                         new SaslHandshakeRequestData().setMechanism("PLAIN"), handshakeVersion);
         ByteBuf handshakeBuffer = serialize(handshakeHeader, handshakeRequest);
 
-        short unsupportedVersion = (short) (ApiKeys.API_VERSIONS.latestVersion() + 1);
+        short supportedVersion = ApiKeys.API_VERSIONS.oldestVersion();
         RequestHeader apiVersionsHeader =
-                new RequestHeader(ApiKeys.API_VERSIONS, unsupportedVersion, "client", 17);
+                new RequestHeader(ApiKeys.API_VERSIONS, supportedVersion, "client", 17);
         ByteBuf apiVersionsBuffer = serializeHeaderOnly(apiVersionsHeader);
 
         try {
@@ -370,6 +381,131 @@ public class KafkaCommandDecoderTest {
             assertThat(apiVersionsBuffer.refCnt()).isZero();
         } finally {
             channel.finishAndReleaseAll();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testResponseOrderingAndWriteFailureCleanup(boolean failWrite) {
+        RequestChannel requests = new RequestChannel(100);
+        EmbeddedChannel channel =
+                new EmbeddedChannel(
+                        new ChannelOutboundHandlerAdapter() {
+                            @Override
+                            public void write(
+                                    ChannelHandlerContext ctx,
+                                    Object message,
+                                    ChannelPromise promise) {
+                                if (failWrite) {
+                                    ReferenceCountUtil.release(message);
+                                    promise.setFailure(
+                                            new IOException("simulated transport write failure"));
+                                } else {
+                                    ctx.write(message, promise);
+                                }
+                            }
+                        },
+                        new KafkaCommandDecoder(new RequestChannel[] {requests}, "KAFKA"));
+        ApiVersionsRequest body = new ApiVersionsRequest.Builder().build((short) 0);
+        ByteBuf firstBuffer =
+                serialize(new RequestHeader(ApiKeys.API_VERSIONS, (short) 0, "client", 71), body);
+        ByteBuf secondBuffer =
+                serialize(new RequestHeader(ApiKeys.API_VERSIONS, (short) 0, "client", 72), body);
+        KafkaRequest first = null;
+        KafkaRequest second = null;
+        try {
+            channel.writeInbound(firstBuffer, secondBuffer);
+            first = (KafkaRequest) requests.pollRequest(1000);
+            second = (KafkaRequest) requests.pollRequest(1000);
+            assertThat(first).isNotNull();
+            assertThat(second).isNotNull();
+            first.releaseBuffer();
+            second.releaseBuffer();
+            if (!failWrite) {
+                second.complete(new ApiVersionsResponse(new ApiVersionsResponseData()));
+                channel.runPendingTasks();
+                assertThat((Object) channel.readOutbound()).isNull();
+            }
+            first.complete(new ApiVersionsResponse(new ApiVersionsResponseData()));
+            channel.runPendingTasks();
+            if (failWrite) {
+                assertThat(channel.isActive()).isFalse();
+                assertThat(second.cancelled()).isTrue();
+                assertThat(secondBuffer.refCnt()).isZero();
+                second.complete(new ApiVersionsResponse(new ApiVersionsResponseData()));
+                channel.runPendingTasks();
+            } else {
+                for (int id : new int[] {71, 72}) {
+                    ByteBuf response = channel.readOutbound();
+                    try {
+                        assertThat(response).isNotNull();
+                        assertThat(
+                                        ResponseHeader.parse(response.nioBuffer(), (short) 0)
+                                                .correlationId())
+                                .isEqualTo(id);
+                    } finally {
+                        ReferenceCountUtil.release(response);
+                    }
+                }
+                assertThat(channel.isActive()).isTrue();
+            }
+            assertThat((Object) channel.readOutbound()).isNull();
+            assertThat(firstBuffer.refCnt()).isZero();
+            assertThat(secondBuffer.refCnt()).isZero();
+        } finally {
+            channel.finishAndReleaseAll();
+            if (first != null) {
+                first.releaseBuffer();
+            }
+            if (second != null) {
+                second.releaseBuffer();
+            }
+        }
+    }
+
+    @Test
+    void testResponseEncodingFailureClosesAndPreservesQueuedWorkerReference() {
+        RequestChannel requests = new RequestChannel(100);
+        EmbeddedChannel channel =
+                new EmbeddedChannel(
+                        new KafkaCommandDecoder(new RequestChannel[] {requests}, "KAFKA"));
+        ApiVersionsRequest body = new ApiVersionsRequest.Builder().build((short) 0);
+        ByteBuf firstBuffer =
+                serialize(new RequestHeader(ApiKeys.API_VERSIONS, (short) 0, "client", 81), body);
+        ByteBuf secondBuffer =
+                serialize(new RequestHeader(ApiKeys.API_VERSIONS, (short) 0, "client", 82), body);
+        KafkaRequest first = null;
+        KafkaRequest second = null;
+        try {
+            channel.writeInbound(firstBuffer, secondBuffer);
+            first = (KafkaRequest) requests.pollRequest(1000);
+            second = (KafkaRequest) requests.pollRequest(1000);
+            assertThat(first).isNotNull();
+            assertThat(second).isNotNull();
+            first.releaseBuffer();
+            ByteBufAllocator allocator = mock(ByteBufAllocator.class);
+            when(allocator.buffer(anyInt()))
+                    .thenThrow(new IllegalStateException("simulated response allocation failure"));
+            channel.config().setAllocator(allocator);
+            first.complete(new ApiVersionsResponse(new ApiVersionsResponseData()));
+            channel.runPendingTasks();
+            assertThat(channel.isActive()).isFalse();
+            assertThat(firstBuffer.refCnt()).isZero();
+            assertThat(second.cancelled()).isTrue();
+            assertThat(secondBuffer.refCnt()).isOne();
+            second.releaseBuffer();
+            second.complete(new ApiVersionsResponse(new ApiVersionsResponseData()));
+            channel.runPendingTasks();
+            assertThat(secondBuffer.refCnt()).isZero();
+            assertThat((Object) channel.readOutbound()).isNull();
+        } finally {
+            channel.finishAndReleaseAll();
+            if (first != null) {
+                first.releaseBuffer();
+            }
+            if (second != null) {
+                second.releaseBuffer();
+            }
         }
     }
 

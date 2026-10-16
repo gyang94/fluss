@@ -198,6 +198,17 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     }
 
     private void sendResponse(ChannelHandlerContext ctx) {
+        try {
+            writeCompletedResponses(ctx);
+        } catch (Throwable failure) {
+            // This runs in a future callback, outside Netty's exceptionCaught propagation.
+            // Closing also releases response ownership for requests still waiting in order.
+            LOG.error("Error sending Kafka response on listener {}", listenerName, failure);
+            close();
+        }
+    }
+
+    private void writeCompletedResponses(ChannelHandlerContext ctx) {
         KafkaRequest request;
         while ((request = inflightResponses.peekFirst()) != null) {
             CompletableFuture<AbstractResponse> f = request.future();
@@ -228,7 +239,9 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             inflightResponses.pollFirst();
             if (isActive.get()) {
                 ByteBuf buffer = request.responseBuffer();
-                ChannelFuture responseFuture = ctx.writeAndFlush(buffer);
+                ChannelFuture responseFuture =
+                        ctx.writeAndFlush(buffer)
+                                .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
                 if (request.shouldCloseConnectionAfterResponse()) {
                     isActive.set(false);
                     saslConnection.close();

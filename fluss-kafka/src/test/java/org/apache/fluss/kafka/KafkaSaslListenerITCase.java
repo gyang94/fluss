@@ -35,10 +35,12 @@ import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
+import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.RequestUtils;
 import org.apache.kafka.common.requests.ResponseHeader;
 import org.apache.kafka.common.requests.SaslAuthenticateRequest;
+import org.apache.kafka.common.requests.SaslAuthenticateResponse;
 import org.apache.kafka.common.requests.SaslHandshakeRequest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -120,18 +122,137 @@ class KafkaSaslListenerITCase {
         }
     }
 
+    @Test
+    void testNativeRpcUsesSharedIdleTimeout() throws Exception {
+        try (Fixture fixture = new Fixture(Duration.ofSeconds(1), "FLUSS")) {
+            assertThat(fixture.input.read()).isEqualTo(-1);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2})
+    void testFramedAuthenticationFailureIsFlushedAndRedacted(short version) throws Exception {
+        try (Fixture fixture = new Fixture(Duration.ofSeconds(30))) {
+            fixture.handshake((short) 1);
+            RequestHeader header =
+                    fixture.send(
+                            ApiKeys.SASL_AUTHENTICATE,
+                            new SaslAuthenticateRequest(
+                                    new SaslAuthenticateRequestData()
+                                            .setAuthBytes(token("private-wrong-secret")),
+                                    version));
+            SaslAuthenticateResponse response = (SaslAuthenticateResponse) fixture.response(header);
+            assertThat(response.data().errorCode())
+                    .isEqualTo(Errors.SASL_AUTHENTICATION_FAILED.code());
+            assertThat(response.data().errorMessage())
+                    .doesNotContain("private-wrong-secret", "writer-secret");
+            assertThat(response.data().authBytes()).isEmpty();
+            assertThat(fixture.input.read()).isEqualTo(-1);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, 2, 3, 4})
+    void testSupportedApiVersionsDuringAuthenticationFlushesThenCloses(short version)
+            throws Exception {
+        try (Fixture fixture = new Fixture(Duration.ofSeconds(30))) {
+            fixture.handshake((short) 1);
+            RequestHeader header =
+                    fixture.send(
+                            ApiKeys.API_VERSIONS, new ApiVersionsRequest.Builder().build(version));
+            ApiVersionsResponse response = (ApiVersionsResponse) fixture.response(header);
+            assertThat(response.data().errorCode()).isEqualTo(Errors.ILLEGAL_SASL_STATE.code());
+            assertThat(response.data().apiKeys()).isEmpty();
+            assertThat(fixture.input.read()).isEqualTo(-1);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testUnsupportedApiVersionsCanRetryBeforeOrDuringAuthentication(boolean authenticating)
+            throws Exception {
+        try (Fixture fixture = new Fixture(Duration.ofSeconds(30))) {
+            if (authenticating) {
+                fixture.handshake((short) 1);
+            }
+            short unsupported = (short) (ApiKeys.API_VERSIONS.latestVersion() + 1);
+            RequestHeader header =
+                    new RequestHeader(ApiKeys.API_VERSIONS, unsupported, "client", 42);
+            ObjectSerializationCache cache = new ObjectSerializationCache();
+            ByteBuffer bytes =
+                    ByteBuffer.allocate(header.data().size(cache, header.headerVersion()));
+            header.data().write(new ByteBufferAccessor(bytes), cache, header.headerVersion());
+            bytes.flip();
+            fixture.writeFrame(bytes);
+            ApiVersionsResponse response =
+                    (ApiVersionsResponse)
+                            fixture.response(
+                                    new RequestHeader(
+                                            ApiKeys.API_VERSIONS, (short) 0, "client", 42));
+            assertThat(response.data().errorCode()).isEqualTo(Errors.UNSUPPORTED_VERSION.code());
+            assertThat(response.data().apiKeys()).hasSize(1);
+            assertThat(response.data().apiKeys().iterator().next().apiKey())
+                    .isEqualTo(ApiKeys.API_VERSIONS.id);
+            if (!authenticating) {
+                RequestHeader retry =
+                        fixture.send(
+                                ApiKeys.API_VERSIONS,
+                                new ApiVersionsRequest.Builder().build((short) 4));
+                assertThat(fixture.response(retry).errorCounts()).containsOnlyKeys(Errors.NONE);
+                fixture.handshake((short) 1);
+            }
+            fixture.authenticate((short) 1);
+            RequestHeader ready =
+                    fixture.send(
+                            ApiKeys.API_VERSIONS,
+                            new ApiVersionsRequest.Builder().build((short) 4));
+            assertThat(fixture.response(ready).errorCounts()).containsOnlyKeys(Errors.NONE);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    void testFailedConnectionDoesNotAffectAnotherAuthenticator(short failedVersion)
+            throws Exception {
+        try (Fixture failed = new Fixture(Duration.ofSeconds(30));
+                Fixture healthy = new Fixture(failed)) {
+            short healthyVersion = (short) (1 - failedVersion);
+            failed.handshake(failedVersion);
+            healthy.handshake(healthyVersion);
+            if (failedVersion == 0) {
+                failed.writeFrame(ByteBuffer.wrap(token("wrong-password")));
+            } else {
+                RequestHeader header = failed.sendAuthentication(token("wrong-password"));
+                assertThat(failed.response(header).errorCounts())
+                        .containsOnlyKeys(Errors.SASL_AUTHENTICATION_FAILED);
+            }
+            assertThat(failed.input.read()).isEqualTo(-1);
+            healthy.authenticate(healthyVersion);
+            RequestHeader request =
+                    healthy.send(
+                            ApiKeys.API_VERSIONS,
+                            new ApiVersionsRequest.Builder().build((short) 4));
+            assertThat(healthy.response(request).errorCounts()).containsOnlyKeys(Errors.NONE);
+        }
+    }
+
     private static byte[] token(String password) {
         return ("\u0000writer\u0000" + password).getBytes(StandardCharsets.UTF_8);
     }
 
     private static final class Fixture implements AutoCloseable {
         private final NettyServer server;
+        private boolean ownsServer = true;
         private final Socket socket = new Socket();
         private final DataInputStream input;
         private final DataOutputStream output;
         private int correlationId;
 
         private Fixture(Duration idleTimeout) throws Exception {
+            this(idleTimeout, "KAFKA");
+        }
+
+        private Fixture(Duration idleTimeout, String listenerName) throws Exception {
             Configuration conf = new Configuration();
             conf.set(ConfigOptions.KAFKA_ENABLED, true);
             conf.set(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS, 1);
@@ -150,7 +271,7 @@ class KafkaSaslListenerITCase {
             server =
                     new NettyServer(
                             conf,
-                            Collections.singletonList(new Endpoint("localhost", 0, "KAFKA")),
+                            Collections.singletonList(new Endpoint("localhost", 0, listenerName)),
                             new TestingTabletGatewayService(),
                             metrics,
                             RequestsMetrics.createCoordinatorServerRequestMetrics(metrics));
@@ -164,6 +285,22 @@ class KafkaSaslListenerITCase {
                 output = new DataOutputStream(socket.getOutputStream());
             } catch (Exception failure) {
                 close();
+                throw failure;
+            }
+        }
+
+        private Fixture(Fixture existing) throws Exception {
+            server = existing.server;
+            ownsServer = false;
+            try {
+                Endpoint endpoint = server.getBindEndpoints().get(0);
+                socket.connect(
+                        new InetSocketAddress(endpoint.getHost(), endpoint.getPort()), 10_000);
+                socket.setSoTimeout(10_000);
+                input = new DataInputStream(socket.getInputStream());
+                output = new DataOutputStream(socket.getOutputStream());
+            } catch (Exception failure) {
+                socket.close();
                 throw failure;
             }
         }
@@ -235,7 +372,9 @@ class KafkaSaslListenerITCase {
             try {
                 socket.close();
             } finally {
-                server.close();
+                if (ownsServer) {
+                    server.close();
+                }
             }
         }
     }
