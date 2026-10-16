@@ -20,6 +20,7 @@ package org.apache.fluss.kafka.backend.produce;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaKeyConversionType;
+import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.exception.DatabaseNotExistException;
@@ -915,8 +916,10 @@ class GatewayKafkaProduceBackendTest {
         assertThat(service.appends).isEmpty();
     }
 
-    @Test
-    void testLegacyMetadataOffsetsRejectedAndJsonNullValuesPersisted() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testLegacyMetadataOffsetsRejectedAndJsonNullValuesPersisted(boolean nested)
+            throws Exception {
         TestingProduceService service = new TestingProduceService();
         TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
         TableDescriptor unsupportedMetadata =
@@ -945,19 +948,38 @@ class GatewayKafkaProduceBackendTest {
         assertErrors(
                 backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
                 Errors.INVALID_TOPIC_EXCEPTION);
+        Schema jsonSchema =
+                nested
+                        ? Schema.newBuilder()
+                                .column(
+                                        "_kafka_value",
+                                        DataTypes.ROW(
+                                                DataTypes.FIELD(
+                                                        "business",
+                                                        DataTypes.STRING().copy(false))))
+                                .build()
+                        : Schema.newBuilder().column("business", DataTypes.STRING()).build();
         TableDescriptor json =
                 TableDescriptor.builder(original)
-                        .schema(Schema.newBuilder().column("business", DataTypes.STRING()).build())
+                        .schema(jsonSchema)
                         .property(
                                 ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
                                 KafkaValueConversionType.PARSE_JSON)
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                nested
+                                        ? KafkaValueConversionLayout.NESTED
+                                        : KafkaValueConversionLayout.FLAT)
                         .build();
         service.pendingMetadata =
                 CompletableFuture.completedFuture(metadata(false).setTableJson(json.toJsonBytes()));
-        assertErrors(
-                backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
-                Errors.NONE);
-        assertThat(service.appends).isEmpty();
+        KafkaProduceResult result =
+                backend.write(command((short) 1, topic("topic", nullValue(0)))).join();
+        assertErrors(result, Errors.NONE);
+        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
+        assertThat(service.appends).hasSize(1);
+        assertThat(service.append.getBucketsReqsList()).hasSize(1);
+        assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isZero();
         assertThat(service.writeChecks).isEqualTo(1);
     }
 
@@ -1012,15 +1034,13 @@ class GatewayKafkaProduceBackendTest {
                 assertThat(service.append.getBucketsReqsList()).hasSize(1);
                 assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
                 assertThat(result.topics().get(0).partitions().get(1).baseOffset()).isEqualTo(17L);
-                assertThat(service.drains).isEqualTo(1);
             }
         }
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testUnsupportedJsonSchemaIsInvalidTopicEvenForFilteredRecords(boolean nested)
-            throws Exception {
+    void testUnsupportedJsonSchemaIsInvalidTopicEvenForNullValues(boolean nested) throws Exception {
         TestingProduceService service = new TestingProduceService();
         Schema schema =
                 nested
