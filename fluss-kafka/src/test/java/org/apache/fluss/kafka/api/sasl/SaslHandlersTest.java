@@ -368,7 +368,8 @@ public class SaslHandlersTest {
         @Override
         public byte[] evaluateResponse(byte[] token) {
             if (!java.util.Arrays.equals(token, "valid-token".getBytes(StandardCharsets.UTF_8))) {
-                throw new AuthenticationException("Rejected token contents");
+                throw new AuthenticationException(
+                        "Rejected token: " + new String(token, StandardCharsets.UTF_8));
             }
             completed = true;
             return new byte[0];
