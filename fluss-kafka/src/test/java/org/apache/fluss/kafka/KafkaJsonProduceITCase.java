@@ -72,7 +72,6 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -99,6 +98,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class KafkaJsonProduceITCase {
     private static final String DATABASE = "fluss";
     private static final byte[] KEY = new byte[] {(byte) 0xff, 1};
+    private static final String FORGED_METADATA =
+            "\"_kafka_metadata\":{\"timestamp\":0,\"timestamp_type\":-1,\"partition\":99}";
     private static final RowType SCALAR_TYPE =
             RowType.builder()
                     .field("id", DataTypes.INT())
@@ -592,6 +593,7 @@ class KafkaJsonProduceITCase {
                 invalidValues.add("{\"id\":1,\"" + reserved + "\":" + value + "}");
             }
         }
+        invalidValues.add("{" + FORGED_METADATA + ",\"id\":\"bad\"}");
         invalidValues.add("{\"id\":2147483648}");
         invalidValues.add("{\"id\":1,\"_kafka_rescue\":\"\\ud800\"}");
         invalidValues.add("{\"id\":1,\"extra\":{\"x\":1,\"x\":2}}");
@@ -679,9 +681,10 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testBatchMetadataRoundTripWithAndWithoutTimestamps(String layout) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_metadata_" + layout);
+    @CsvSource({"flat,false", "flat,true", "nested,false", "nested,true"})
+    void testBatchMetadataRoundTripWithAndWithoutTimestamps(String layout, boolean withRescue)
+            throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_metadata_" + layout + "_" + withRescue);
         RowType valueType = RowType.builder().field("id", DataTypes.INT()).build();
         // Magic v2 batches carry CREATE_TIME or LOG_APPEND_TIME even without a timestamp.
         TimestampType[] types = {
@@ -693,7 +696,7 @@ class KafkaJsonProduceITCase {
         long[] expectedTimestamps = {0L, 456L, 123L, 123L, -1L, -1L, -1L, -1L};
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(valueType, layout, true, false, 2));
+            create(admin, path, descriptor(valueType, layout, true, withRescue, 2));
             ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
             try (Socket socket = new Socket(node.host(), node.port())) {
                 for (int batch = 0; batch < types.length; batch++) {
@@ -707,11 +710,11 @@ class KafkaJsonProduceITCase {
                                     new SimpleRecord(
                                             firstTimestamp,
                                             KEY,
-                                            bytes("{\"id\":" + (batch * 2) + "}")),
+                                            bytes(idJson(batch * 2, withRescue))),
                                     new SimpleRecord(
                                             secondTimestamp,
                                             KEY,
-                                            bytes("{\"id\":" + (batch * 2 + 1) + "}")));
+                                            bytes(idJson(batch * 2 + 1, withRescue))));
                     String topic = batch % 2 == 0 ? path.toString() : path.getTableName();
                     ProduceResponse response = produce(socket, topic, records, records);
                     for (int partition = 0; partition < 2; partition++) {
@@ -735,6 +738,10 @@ class KafkaJsonProduceITCase {
                                         expectedTimestamps[index],
                                         (index / 2) % 2,
                                         expectedPartition);
+                                if (withRescue) {
+                                    assertThat(row.getString(4).toString())
+                                            .isEqualTo("{" + FORGED_METADATA + "}");
+                                }
                             });
                 }
             } finally {
@@ -744,13 +751,15 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testMissingMetadataTimestampPersistsAsNull(String layout) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_required_timestamp_" + layout);
+    @CsvSource({"flat,false", "flat,true", "nested,false", "nested,true"})
+    void testMissingMetadataTimestampPersistsAsNull(String layout, boolean withRescue)
+            throws Exception {
+        TablePath path =
+                TablePath.of(DATABASE, "json_required_timestamp_" + layout + "_" + withRescue);
         RowType valueType = RowType.builder().field("id", DataTypes.INT()).build();
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(valueType, layout, true, false, 2));
+            create(admin, path, descriptor(valueType, layout, true, withRescue, 2));
             ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
             try (Socket socket = new Socket(node.host(), node.port());
                     KafkaProducer<byte[], byte[]> producer = producer()) {
@@ -761,11 +770,11 @@ class KafkaJsonProduceITCase {
                                 timestampedRecords(
                                         TimestampType.CREATE_TIME,
                                         RecordBatch.NO_TIMESTAMP,
-                                        record("{\"id\":1000}"),
+                                        record(idJson(1000, withRescue)),
                                         new SimpleRecord(
                                                 RecordBatch.NO_TIMESTAMP,
                                                 KEY,
-                                                bytes("{\"id\":1001}"))),
+                                                bytes(idJson(1001, withRescue)))),
                                 MemoryRecords.withRecords(Compression.NONE, record("{\"id\":1}")));
                 PartitionProduceResponse missingTimestamp = partition(response, path.toString(), 0);
                 assertThat(missingTimestamp.errorCode()).isEqualTo(Errors.NONE.code());
@@ -814,6 +823,10 @@ class KafkaJsonProduceITCase {
                 admin.dropTable(path, true).get();
             }
         }
+    }
+
+    private static String idJson(int id, boolean forgedMetadata) {
+        return "{\"id\":" + id + (forgedMetadata ? "," + FORGED_METADATA : "") + "}";
     }
 
     private static void assertMetadata(
@@ -865,7 +878,8 @@ class KafkaJsonProduceITCase {
                                             + "}");
             String collisions =
                     "\"_kafka_key\":{\"id\":2},\"_kafka_headers\":null,"
-                            + "\"_kafka_metadata\":{\"id\":2},\"_kafka_value\":{\"id\":2},"
+                            + FORGED_METADATA
+                            + ",\"_kafka_value\":{\"id\":2},"
                             + "\"_kafka_rescue\":"
                             + rescueValues[i];
             payloads.add(json.substring(0, json.length() - 1) + "," + collisions + "}");
@@ -892,13 +906,13 @@ class KafkaJsonProduceITCase {
                 Admin admin = connection.getAdmin()) {
             create(admin, path, descriptor);
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
-                assertThat(producer.partitionsFor(path.toString())).hasSize(1);
+                assertThat(producer.partitionsFor(path.toString())).hasSize(2);
                 for (int i = 0; i < payloads.size(); i++) {
                     assertThat(
                                     producer.send(
                                                     new ProducerRecord<>(
                                                             path.toString(),
-                                                            0,
+                                                            1,
                                                             123L,
                                                             KEY,
                                                             bytes(payloads.get(i)),
@@ -915,7 +929,7 @@ class KafkaJsonProduceITCase {
                 read(
                         connection,
                         path,
-                        0,
+                        1,
                         payloads.size(),
                         (physical, index) -> {
                             InternalRow value = jsonBusinessRow(physical, contract);
@@ -956,6 +970,7 @@ class KafkaJsonProduceITCase {
                                 assertThat(physical.getBytes(contract.keyPosition()))
                                         .isEqualTo(KEY);
                                 assertHeaders(physical.getMap(contract.headersPosition()), true);
+                                assertMetadata(physical, contract.metadataPosition(), 123L, 0, 1);
                             }
                         });
             } finally {
@@ -985,7 +1000,7 @@ class KafkaJsonProduceITCase {
             String layout, boolean withSystemColumns, boolean rescueFirst) {
         List<Schema.Column> columns =
                 new ArrayList<>(
-                        descriptor(COMPLEX_TYPE, layout, withSystemColumns, false, 1)
+                        descriptor(COMPLEX_TYPE, layout, withSystemColumns, false, 2)
                                 .getSchema()
                                 .getColumns());
         Schema.Builder schema = Schema.newBuilder();
@@ -1000,7 +1015,7 @@ class KafkaJsonProduceITCase {
         }
         return TableDescriptor.builder()
                 .schema(schema.build())
-                .distributedBy(1)
+                .distributedBy(2)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                 .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
