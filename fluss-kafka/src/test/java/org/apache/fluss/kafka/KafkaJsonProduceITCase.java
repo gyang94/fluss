@@ -454,9 +454,11 @@ class KafkaJsonProduceITCase {
                                     + "\"}"
                             : null;
             if (index == 5) {
-                json = "{\"id\":null,\"label\":null}";
+                json = "{\"id\":null,\"label\":null,\"extra\":{\"index\":5}}";
             } else if (index == 6) {
-                json = "{}";
+                json = "{\"extra\":{\"index\":6}}";
+            } else if (index == 2) {
+                json = "{\"extra\":{\"index\":2}," + json.substring(1);
             }
             records[index] =
                     new SimpleRecord(
@@ -519,7 +521,13 @@ class KafkaJsonProduceITCase {
                                         (index + 1) * 10L,
                                         0,
                                         expectedPartition);
-                                assertThat(row.isNullAt(headersPosition + 2)).isTrue();
+                                if (index == 2 || index == 5 || index == 6) {
+                                    assertThat(row.getString(headersPosition + 2).toString())
+                                            .isEqualTo("{\"extra\":{\"index\":" + index + "}}");
+                                } else {
+                                    // A following null or known-only value must not reuse rescue.
+                                    assertThat(row.isNullAt(headersPosition + 2)).isTrue();
+                                }
                             });
                 }
             } finally {
@@ -530,18 +538,29 @@ class KafkaJsonProduceITCase {
 
     @ParameterizedTest
     @CsvSource({
-        "flat,scalar",
-        "nested,scalar",
-        "flat,row",
-        "nested,row",
-        "flat,array",
-        "nested,array",
-        "flat,map",
-        "nested,map"
+        "flat,scalar,false",
+        "nested,scalar,false",
+        "flat,row,false",
+        "nested,row,false",
+        "flat,array,false",
+        "nested,array,false",
+        "flat,map,false",
+        "nested,map,false",
+        "flat,scalar,true",
+        "nested,scalar,true",
+        "flat,row,true",
+        "nested,row,true",
+        "flat,array,true",
+        "nested,array,true",
+        "flat,map,true",
+        "nested,map,true"
     })
-    void testNotNullBusinessFieldsAreRejectedAtTableCreation(String layout, String fieldType)
-            throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout + "_" + fieldType);
+    void testNotNullBusinessFieldsAreRejectedAtTableCreation(
+            String layout, String fieldType, boolean withRescue) throws Exception {
+        TablePath path =
+                TablePath.of(
+                        DATABASE,
+                        "json_required_value_" + layout + "_" + fieldType + "_" + withRescue);
         RowType valueType =
                 RowType.builder(false)
                         .field("id", nullValueBusinessType(fieldType).copy(false))
@@ -553,7 +572,7 @@ class KafkaJsonProduceITCase {
                                     create(
                                             admin,
                                             path,
-                                            descriptor(valueType, layout, true, false, 2)))
+                                            descriptor(valueType, layout, true, withRescue, 2)))
                     .hasCauseInstanceOf(InvalidTableException.class)
                     .hasStackTraceContaining("nullable fields");
         }
