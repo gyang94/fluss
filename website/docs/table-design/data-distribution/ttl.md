@@ -71,18 +71,14 @@ expires. Reads beyond the remaining local window access remote storage.
 All three table options support `ALTER TABLE ... SET` and `ALTER TABLE ... RESET`.
 See [Updating Configs](../../maintenance/operations/updating-configs.md#updating-table-configs).
 
-<!-- TODO: remove this section when we change `log.retention.roll-active-segment.enabled` default to true in next version -->
 ### Active-segment Rolling
 
-For low-traffic tables, enable the server option `log.retention.roll-active-segment.enabled` to
-allow expired active logs to become eligible for upload and cleanup even when no new data arrives.
-It is **disabled by default** and supports
-[dynamic cluster updates](../../maintenance/operations/updating-configs.md#updating-cluster-configs).
-The expiration time follows the effective local log TTL described above.
+By default, a non-empty active log segment is rolled after its effective local log TTL expires
+and all records are committed. This allows expired active logs to become eligible for upload and
+cleanup even when no new data arrives.
 
-When upgrading from v0.9, keep this option disabled until every CoordinatorServer and TabletServer
-has been upgraded to v1.0 and the upgrade is complete. Then enable it dynamically as described in
-the [1.0 Upgrade Notes](../../maintenance/operations/upgrade-notes-1.0.md#active-segment-retention-rollout).
+The server option `log.retention.roll-active-segment.enabled` controls this behavior and supports
+[dynamic cluster updates](../../maintenance/operations/updating-configs.md#updating-cluster-configs).
 
 ## KV Retention
 

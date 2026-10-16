@@ -685,16 +685,24 @@ public class RemoteLogITCase {
         retry(
                 Duration.ofMinutes(2),
                 () -> assertThat(remoteLogTablet.allRemoteLogSegments().size()).isGreaterThan(0));
-        int stageBSegmentCount = remoteLogTablet.allRemoteLogSegments().size();
-        long stageBRemoteLogEndOffset = remoteLogTablet.getRemoteLogEndOffset().orElse(-1L);
-        assertThat(stageBRemoteLogEndOffset).isGreaterThan(0L);
+        List<RemoteLogSegment> stageBSegments = remoteLogTablet.allRemoteLogSegments();
+        long stageBLogEndOffset = logTablet.localLogEndOffset();
+        assertThat(stageBLogEndOffset).isGreaterThan(0L);
 
         // Advance time past TTL (1 hour + buffer)
         MANUAL_CLOCK.advanceTime(Duration.ofHours(1).plusMinutes(30));
 
+        // Wait for the expired active segment to be rolled and uploaded before taking the
+        // snapshot used to verify partial and complete cleanup.
+        retry(
+                Duration.ofMinutes(2),
+                () ->
+                        assertThat(remoteLogTablet.getRemoteLogEndOffset())
+                                .hasValue(stageBLogEndOffset));
+
         // Since lake is enabled but no data has been tiered (lakeLogEndOffset = -1),
         // the expired segments should NOT be deleted
-        assertThat(remoteLogTablet.allRemoteLogSegments()).hasSize(stageBSegmentCount);
+        assertThat(remoteLogTablet.allRemoteLogSegments()).containsAll(stageBSegments);
 
         // ==================== Stage C: Lake Progress Update (Cleanup) ====================
         // Step 1: Partially update lake log end offset to trigger partial cleanup
@@ -734,7 +742,7 @@ public class RemoteLogITCase {
                 });
 
         // Step 2: Fully update lake log end offset to trigger complete cleanup
-        logTablet.updateLakeLogEndOffset(stageBRemoteLogEndOffset);
+        logTablet.updateLakeLogEndOffset(stageBLogEndOffset);
 
         // Wait for complete cleanup - all segments should be deleted
         retry(

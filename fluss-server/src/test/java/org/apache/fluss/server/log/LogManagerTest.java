@@ -191,20 +191,20 @@ final class LogManagerTest extends LogTestBase {
     void testReconfigureRollExpiredActiveSegment() throws Exception {
         initTableBuckets(null);
         LogTablet existingLog = getOrCreateLog(tablePath1, null, tableBucket1);
-        assertThat(existingLog.isRollExpiredActiveSegmentEnabled()).isFalse();
+        assertThat(existingLog.isRollExpiredActiveSegmentEnabled()).isTrue();
 
         Configuration newConfig = new Configuration(conf);
-        newConfig.set(ConfigOptions.LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED, true);
-        logManager.reconfigure(newConfig);
-
-        assertThat(existingLog.isRollExpiredActiveSegmentEnabled()).isTrue();
-        LogTablet newLog = getOrCreateLog(tablePath2, null, tableBucket2);
-        assertThat(newLog.isRollExpiredActiveSegmentEnabled()).isTrue();
-
         newConfig.set(ConfigOptions.LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED, false);
         logManager.reconfigure(newConfig);
+
         assertThat(existingLog.isRollExpiredActiveSegmentEnabled()).isFalse();
+        LogTablet newLog = getOrCreateLog(tablePath2, null, tableBucket2);
         assertThat(newLog.isRollExpiredActiveSegmentEnabled()).isFalse();
+
+        newConfig.set(ConfigOptions.LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED, true);
+        logManager.reconfigure(newConfig);
+        assertThat(existingLog.isRollExpiredActiveSegmentEnabled()).isTrue();
+        assertThat(newLog.isRollExpiredActiveSegmentEnabled()).isTrue();
     }
 
     @ParameterizedTest
