@@ -125,14 +125,6 @@ class KafkaJsonProduceITCase {
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
                 assertThat(producer.partitionsFor(path.toString())).hasSize(1);
                 assertThat(producer.partitionsFor(path.getTableName())).hasSize(1);
-                // Null values are filtered before validating required JSON business fields.
-                assertThat(
-                                producer.send(
-                                                new ProducerRecord<byte[], byte[]>(
-                                                        path.toString(), 0, null, null))
-                                        .get(30, TimeUnit.SECONDS)
-                                        .offset())
-                        .isEqualTo(-1L);
                 RecordMetadata first =
                         producer.send(
                                         new ProducerRecord<>(
@@ -149,13 +141,6 @@ class KafkaJsonProduceITCase {
                                 .get(30, TimeUnit.SECONDS);
                 assertThat(first.topic()).isEqualTo(path.toString());
                 assertThat(first.offset()).isZero();
-                assertThat(
-                                producer.send(
-                                                new ProducerRecord<byte[], byte[]>(
-                                                        path.getTableName(), 0, KEY, null))
-                                        .get(30, TimeUnit.SECONDS)
-                                        .offset())
-                        .isEqualTo(-1L);
                 // A bare alias and the full name append to the same native table and bucket.
                 RecordMetadata second =
                         producer.send(
@@ -197,6 +182,161 @@ class KafkaJsonProduceITCase {
                                         row, headersPosition + 1, index == 0 ? 123L : 456L, 0, 0);
                                 assertThat(row.isNullAt(headersPosition + 2)).isTrue();
                             }
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testNullValuesPersistWithSystemColumnsAndContinuousOffsets(String layout)
+            throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_null_values_" + layout);
+        // A nullable nested parent accepts null even when its business child is NOT NULL.
+        RowType valueType =
+                RowType.builder()
+                        .field("id", DataTypes.INT().copy(layout.equals("flat")))
+                        .field("label", DataTypes.STRING())
+                        .build();
+        Header[] headers = {
+            new RecordHeader("source", bytes("old")),
+            new RecordHeader("source", new byte[] {1, 2}),
+            new RecordHeader("nullable", null)
+        };
+        SimpleRecord[] records = new SimpleRecord[5];
+        for (int index = 0; index < records.length; index++) {
+            String json =
+                    index == 2 || index == 4
+                            ? "{\"id\":" + index + ",\"label\":\"v" + index + "\"}"
+                            : null;
+            records[index] =
+                    new SimpleRecord(
+                            (index + 1) * 10L,
+                            index % 2 == 0 ? KEY : null,
+                            json == null ? null : bytes(json),
+                            headers);
+        }
+        MemoryRecords[] batches = {
+            MemoryRecords.withRecords(Compression.NONE, records[0], records[1]),
+            MemoryRecords.withRecords(Compression.NONE, records[2], records[3], records[4])
+        };
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor(valueType, layout, true, true, 2));
+            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port())) {
+                for (int batch = 0; batch < batches.length; batch++) {
+                    String topic = batch == 0 ? path.toString() : path.getTableName();
+                    ProduceResponse response =
+                            produce(socket, topic, batches[batch], batches[batch]);
+                    for (int partition = 0; partition < 2; partition++) {
+                        PartitionProduceResponse result = partition(response, topic, partition);
+                        assertThat(result.errorCode()).isEqualTo(Errors.NONE.code());
+                        assertThat(result.baseOffset()).isEqualTo(batch == 0 ? 0L : 2L);
+                    }
+                }
+                for (int partition = 0; partition < 2; partition++) {
+                    int expectedPartition = partition;
+                    read(
+                            connection,
+                            path,
+                            partition,
+                            records.length,
+                            (row, index) -> {
+                                if (index % 2 == 0) {
+                                    assertThat(row.getBytes(0)).isEqualTo(KEY);
+                                } else {
+                                    assertThat(row.isNullAt(0)).isTrue();
+                                }
+                                if (index == 2 || index == 4) {
+                                    InternalRow value =
+                                            layout.equals("nested") ? row.getRow(1, 2) : row;
+                                    int start = layout.equals("nested") ? 0 : 1;
+                                    assertThat(value.getInt(start)).isEqualTo(index);
+                                    assertThat(value.getString(start + 1).toString())
+                                            .isEqualTo("v" + index);
+                                } else {
+                                    assertThat(row.isNullAt(1)).isTrue();
+                                    if (layout.equals("flat")) {
+                                        assertThat(row.isNullAt(2)).isTrue();
+                                    }
+                                }
+                                int headersPosition = layout.equals("nested") ? 2 : 3;
+                                assertHeaders(row.getMap(headersPosition), true);
+                                assertMetadata(
+                                        row,
+                                        headersPosition + 1,
+                                        (index + 1) * 10L,
+                                        0,
+                                        expectedPartition);
+                                assertThat(row.isNullAt(headersPosition + 2)).isTrue();
+                            });
+                }
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"flat", "nested"})
+    void testNullValueViolatingRequiredBusinessTypeIsPartitionAtomic(String layout)
+            throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout);
+        // Flat checks the business field; nested checks the parent even with nullable children.
+        RowType valueType =
+                RowType.builder(false)
+                        .field("id", DataTypes.INT().copy(layout.equals("nested")))
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor(valueType, layout, true, false, 2));
+            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
+            try (Socket socket = new Socket(node.host(), node.port());
+                    KafkaProducer<byte[], byte[]> producer = producer()) {
+                ProduceResponse response =
+                        produce(
+                                socket,
+                                path.toString(),
+                                MemoryRecords.withRecords(
+                                        Compression.NONE, record("{\"id\":1000}"), record(null)),
+                                MemoryRecords.withRecords(Compression.NONE, record("{\"id\":1}")));
+                PartitionProduceResponse rejected = partition(response, path.toString(), 0);
+                assertThat(rejected.errorCode()).isEqualTo(Errors.INVALID_RECORD.code());
+                assertThat(rejected.baseOffset()).isEqualTo(-1L);
+                PartitionProduceResponse accepted = partition(response, path.toString(), 1);
+                assertThat(accepted.errorCode()).isEqualTo(Errors.NONE.code());
+                assertThat(accepted.baseOffset()).isZero();
+                assertThat(
+                                producer.send(
+                                                new ProducerRecord<>(
+                                                        path.getTableName(),
+                                                        0,
+                                                        789L,
+                                                        KEY,
+                                                        bytes("{\"id\":-1}")))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        0,
+                        1,
+                        (row, index) -> {
+                            assertThat(valueId(row, layout)).isEqualTo(-1);
+                            assertMetadata(row, 3, 789L, 0, 0);
+                        });
+                read(
+                        connection,
+                        path,
+                        1,
+                        1,
+                        (row, index) -> {
+                            assertThat(valueId(row, layout)).isEqualTo(1);
+                            assertMetadata(row, 3, 123L, 0, 1);
                         });
             } finally {
                 admin.dropTable(path, true).get();
@@ -584,7 +724,7 @@ class KafkaJsonProduceITCase {
     }
 
     private static SimpleRecord record(String json) {
-        return new SimpleRecord(123L, KEY, bytes(json), new Header[0]);
+        return new SimpleRecord(123L, KEY, json == null ? null : bytes(json), new Header[0]);
     }
 
     private static byte[] bytes(String value) {
