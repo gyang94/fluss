@@ -24,6 +24,8 @@ import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.Decimal;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.StreamReadConstraints;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.exc.StreamConstraintsException;
 import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -298,6 +300,29 @@ class JsonKafkaFieldDecoderTest {
                 "{\"doubleValue\":" + sign + "1e309}",
                 "$[\"doubleValue\"]",
                 "overflowing number");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testRawFloatingPointTokensStillEnforceNumberLengthLimit(boolean nested) {
+        JsonKafkaFieldDecoder decoder =
+                decoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("floatValue", DataTypes.FLOAT()),
+                                DataTypes.FIELD("doubleValue", DataTypes.DOUBLE())),
+                        nested);
+        // This token underflows to zero rather than overflowing the target. It must still be
+        // rejected by the parser before the direct FLOAT/DOUBLE token conversion.
+        StringBuilder number = new StringBuilder("-0.");
+        for (int i = 0; i < StreamReadConstraints.DEFAULT_MAX_NUM_LEN; i++) {
+            number.append('0');
+        }
+        number.append('1');
+        for (String field : new String[] {"floatValue", "doubleValue"}) {
+            assertThatThrownBy(() -> decoder.decode(bytes("{\"" + field + "\":" + number + "}")))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasRootCauseInstanceOf(StreamConstraintsException.class);
+        }
     }
 
     @Test
