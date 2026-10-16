@@ -362,7 +362,17 @@ class JsonKafkaRescueTest {
                         DataTypes.FIELD("_kafka_rescue", DataTypes.STRING()));
         String decimal = "12345678901234567890.123456789012345678";
         for (String token :
-                new String[] {"-0", "-0.0", "-0e0", "1.0000000596046448", "-1.0000000596046448"}) {
+                new String[] {
+                    "-0",
+                    "-0.0",
+                    "-0e0",
+                    "1.0000000596046448",
+                    "-1.0000000596046448",
+                    "-1e-100",
+                    "-1e-400",
+                    "7.006492321624085e-46",
+                    "-7.006492321624085e-46"
+                }) {
             String row =
                     "{\"f\":"
                             + token
