@@ -240,6 +240,48 @@ class KafkaProduceCommandTest {
         assertThatThrownBy(copied::clear).isInstanceOf(UnsupportedOperationException.class);
     }
 
+    @Test
+    void testNullValuesPreserveRecordIdentityAndTimestampProvenance() {
+        Record nullRecord =
+                new Record(
+                        123L,
+                        TimestampType.CREATE_TIME,
+                        ByteBuffer.wrap(new byte[] {1}),
+                        null,
+                        Collections.emptyList());
+        Record retained =
+                new Record(
+                        456L,
+                        TimestampType.LOG_APPEND_TIME,
+                        ByteBuffer.wrap(new byte[] {2}),
+                        ByteBuffer.wrap(new byte[] {3}),
+                        Collections.emptyList());
+        Record empty =
+                new Record(
+                        Record.NO_TIMESTAMP,
+                        TimestampType.CREATE_TIME,
+                        null,
+                        ByteBuffer.allocate(0),
+                        Collections.emptyList());
+        List<Record> source = new ArrayList<>(Arrays.asList(nullRecord, retained, empty));
+        PartitionWrite partition = new PartitionWrite(0, source);
+        source.clear();
+
+        assertThat(partition.records()).containsExactly(nullRecord, retained, empty);
+        assertThat(partition.records().get(0)).isSameAs(nullRecord);
+        assertThat(partition.records().get(0).value()).isNull();
+        assertThat(partition.records().get(0).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
+        assertThat(partition.records().get(0).timestamp()).isEqualTo(123L);
+        assertThat(partition.records().get(1)).isSameAs(retained);
+        assertThat(partition.records().get(1).timestampType())
+                .isEqualTo(TimestampType.LOG_APPEND_TIME);
+        assertThat(partition.records().get(1).timestamp()).isEqualTo(456L);
+        assertThat(partition.records().get(2).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
+        assertThat(partition.records().get(2).hasTimestamp()).isFalse();
+        assertThatThrownBy(() -> partition.records().clear())
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
     private static void assertReadOnlyViews(Supplier<ByteBuffer> accessor, byte... expected) {
         ByteBuffer first = accessor.get();
         ByteBuffer second = accessor.get();

@@ -252,13 +252,8 @@ public final class TabletService extends RpcServiceBase implements TabletServerG
     public void shutdown() {}
 
     @Override
-    public void authorizeTableWrite(long tableId) {
-        authorizeTable(WRITE, tableId);
-    }
-
-    @Override
     public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
-        authorizeTableWrite(request.getTableId());
+        authorizeTable(WRITE, request.getTableId());
         long tableId = request.getTableId();
         Map<TableBucket, ProduceLogResultForBucket> routingErrors = new HashMap<>();
         collectRoutingErrors(
