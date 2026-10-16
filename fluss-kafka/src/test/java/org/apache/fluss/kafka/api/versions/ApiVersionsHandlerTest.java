@@ -52,8 +52,18 @@ import static org.mockito.Mockito.when;
 class ApiVersionsHandlerTest {
 
     @ParameterizedTest
-    @CsvSource({"0, false", "1, false", "2, false", "3, false", "4, false",
-        "0, true", "1, true", "2, true", "3, true", "4, true"})
+    @CsvSource({
+        "0, false",
+        "1, false",
+        "2, false",
+        "3, false",
+        "4, false",
+        "0, true",
+        "1, true",
+        "2, true",
+        "3, true",
+        "4, true"
+    })
     void testAdvertiseRegisteredRangesAndExcludeHiddenApis(short version, boolean saslEnabled) {
         AtomicReference<KafkaApiRegistry> registryReference = new AtomicReference<>();
         ApiVersionsHandler handler =

@@ -24,7 +24,6 @@ import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.common.errors.UnsupportedVersionException;
-import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 
@@ -57,8 +56,7 @@ public final class KafkaRequestDispatcher {
         }
 
         KafkaApiSpec spec = handler.apiSpec();
-        if (!spec.supportsVersion(request.apiVersion())
-                && !shouldDispatchBeforeVersionValidation(request)) {
+        if (!spec.supportsVersion(request.apiVersion())) {
             return completedErrorResponse(
                     abstractRequest,
                     new UnsupportedVersionException(
@@ -103,11 +101,6 @@ public final class KafkaRequestDispatcher {
                     }
                 });
         return result;
-    }
-
-    private static boolean shouldDispatchBeforeVersionValidation(KafkaRequest request) {
-        return request.apiKey() == ApiKeys.API_VERSIONS
-                && request.saslConnection().isAuthenticating();
     }
 
     @SuppressWarnings("unchecked")

@@ -90,26 +90,23 @@ public class KafkaRequestHandlerTest {
                         tuple(ApiKeys.SASL_AUTHENTICATE.id, (short) 0, (short) 2));
     }
 
-    @Test
-    public void testApiVersionsDuringSaslAuthenticationReturnsIllegalState() {
-        assertApiVersionsDuringSaslAuthenticationReturnsIllegalState(
-                ApiKeys.API_VERSIONS.oldestVersion());
-    }
-
-    @Test
-    public void testUnsupportedApiVersionsDuringSaslAuthenticationReturnsIllegalState() {
-        assertApiVersionsDuringSaslAuthenticationReturnsIllegalState(
-                (short) (ApiKeys.API_VERSIONS.latestVersion() + 1));
-    }
-
-    private static void assertApiVersionsDuringSaslAuthenticationReturnsIllegalState(
-            short requestVersion) {
+    @ParameterizedTest
+    @CsvSource({"0, false", "4, false", "5, false", "0, true", "4, true", "5, true"})
+    public void testApiVersionsValidatesVersionBeforeAuthenticationState(
+            short requestVersion, boolean authenticating) {
         KafkaRequestHandler handler = createKafkaRequestHandler();
-        short parsedVersion = ApiKeys.API_VERSIONS.oldestVersion();
+        boolean unsupported = !ApiKeys.API_VERSIONS.isVersionSupported(requestVersion);
+        short parsedVersion = unsupported ? 0 : requestVersion;
         KafkaSaslConnection connection =
                 KafkaSaslConnection.sasl(() -> mock(ServerAuthenticator.class));
-        connection.beginAuthentication("PLAIN", "KAFKA", null);
-        ApiVersionsRequest requestBody = new ApiVersionsRequest.Builder().build(parsedVersion);
+        if (authenticating) {
+            connection.beginAuthentication("PLAIN", "KAFKA", null);
+        }
+        ApiVersionsRequest requestBody =
+                unsupported
+                        ? new ApiVersionsRequest(
+                                new ApiVersionsRequestData(), parsedVersion, requestVersion)
+                        : new ApiVersionsRequest.Builder().build(parsedVersion);
         ByteBuf input = ByteBufAllocator.DEFAULT.buffer();
         KafkaRequest request =
                 new KafkaRequest(
@@ -122,16 +119,30 @@ public class KafkaRequestHandlerTest {
                         input,
                         new TestingChannelHandlerContext(),
                         new CompletableFuture<>());
-
         input.release();
-        handler.processRequest(request);
-
-        ApiVersionsResponse response = (ApiVersionsResponse) parseResponse(request);
-        assertThat(response.errorCounts())
-                .containsExactlyEntriesOf(Collections.singletonMap(Errors.ILLEGAL_SASL_STATE, 1));
-        assertThat(response.data().apiKeys()).isEmpty();
-        assertThat(request.shouldCloseConnectionAfterResponse()).isTrue();
-        assertThat(request.header().correlationId()).isEqualTo(17);
+        try {
+            handler.processRequest(request);
+            ApiVersionsResponse response = (ApiVersionsResponse) parseResponse(request);
+            Errors expected =
+                    unsupported
+                            ? Errors.UNSUPPORTED_VERSION
+                            : authenticating ? Errors.ILLEGAL_SASL_STATE : Errors.NONE;
+            assertThat(response.data().errorCode()).isEqualTo(expected.code());
+            assertThat(request.shouldCloseConnectionAfterResponse())
+                    .isEqualTo(authenticating && !unsupported);
+            assertThat(request.header().correlationId()).isEqualTo(17);
+            if (unsupported) {
+                assertThat(response.data().apiKeys())
+                        .extracting(
+                                ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
+                        .containsExactly(tuple(ApiKeys.API_VERSIONS.id, (short) 0, (short) 4));
+            } else if (authenticating) {
+                assertThat(response.data().apiKeys()).isEmpty();
+            }
+        } finally {
+            request.releaseBuffer();
+            connection.close();
+        }
     }
 
     @Test
