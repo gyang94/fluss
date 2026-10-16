@@ -603,6 +603,50 @@ class JsonKafkaComplexTypesTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testNullValueRespectsComplexContainerAndParentNullability(boolean nested) {
+        DataType[] containers = {
+            DataTypes.ROW(DataTypes.FIELD("required", DataTypes.INT().copy(false))),
+            DataTypes.ARRAY(DataTypes.INT().copy(false)),
+            DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().copy(false))
+        };
+        for (DataType container : containers) {
+            RowType business = DataTypes.ROW(DataTypes.FIELD("value", container));
+            assertThat(decoder(business, nested).decode(null)).containsExactly((Object) null);
+            assertThat(decodeBusinessFields(business, "{}", nested)).containsExactly((Object) null);
+            assertThat(decodeBusinessFields(business, "{\"value\":null}", nested))
+                    .containsExactly((Object) null);
+            assertThatThrownBy(() -> decoder(business, nested).decode(bytes("null")))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("object root");
+
+            RowType requiredContainer =
+                    DataTypes.ROW(DataTypes.FIELD("value", container.copy(false)));
+            for (String json : new String[] {"{}", "{\"value\":null}"}) {
+                assertThatThrownBy(() -> decoder(requiredContainer, nested).decode(bytes(json)))
+                        .isInstanceOf(KafkaRecordEncodingException.class)
+                        .hasMessageContaining("$[\"value\"]")
+                        .hasMessageContaining("missing or null");
+            }
+            if (nested) {
+                // An absent parent does not require values for its non-nullable children.
+                assertThat(decoder(requiredContainer, true).decode(null))
+                        .containsExactly((Object) null);
+                RowType requiredParent = (RowType) business.copy(false);
+                assertThatThrownBy(() -> decoder(requiredParent, true).decode(null))
+                        .isInstanceOf(KafkaRecordEncodingException.class)
+                        .hasMessageContaining("NOT NULL field '_kafka_value'");
+                assertThat(decodeBusinessFields(requiredParent, "{}", true))
+                        .containsExactly((Object) null);
+            } else {
+                assertThatThrownBy(() -> decoder(requiredContainer, false).decode(null))
+                        .isInstanceOf(KafkaRecordEncodingException.class)
+                        .hasMessageContaining("NOT NULL field 'value'");
+            }
+        }
+    }
+
     private static Object[] numericContainerValues(DataType type, String token, boolean nested) {
         RowType business =
                 DataTypes.ROW(
