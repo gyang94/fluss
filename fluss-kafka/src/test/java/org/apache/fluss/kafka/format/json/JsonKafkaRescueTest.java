@@ -60,6 +60,24 @@ import static org.mockito.Mockito.when;
 /** Tests unknown-field rescue while keeping known-field and resource violations fatal. */
 class JsonKafkaRescueTest {
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testOtherStringColumnDoesNotEnableRescue(boolean nested) {
+        JsonKafkaFieldDecoder decoder =
+                decoder(
+                        DataTypes.ROW(DataTypes.FIELD("custom_rescue", DataTypes.STRING())),
+                        nested);
+        Object[] values = decoder.decode(bytes("{\"custom_rescue\":\"business\"}"));
+        assertThat(values).hasSize(1);
+        assertThat(nested ? ((GenericRow) values[0]).getString(0).toString() : values[0].toString())
+                .isEqualTo("business");
+        for (String json :
+                new String[] {"{\"extra\":1}", "{\"_kafka_rescue\":1}", "{\"_kafka_key\":1}"}) {
+            assertThatThrownBy(() -> decoder.decode(bytes(json)))
+                    .isInstanceOf(KafkaRecordEncodingException.class);
+        }
+    }
+
     @Test
     void testUnexpectedConversionFailureIsNotRescued() {
         JsonNode broken = mock(JsonNode.class);

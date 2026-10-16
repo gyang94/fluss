@@ -453,9 +453,11 @@ class KafkaJsonProduceITCase {
                                     + "\"}"
                             : null;
             if (index == 5) {
-                json = "{\"id\":null,\"label\":null}";
+                json = "{\"id\":null,\"label\":null,\"extra\":{\"index\":5}}";
             } else if (index == 6) {
-                json = "{}";
+                json = "{\"extra\":{\"index\":6}}";
+            } else if (index == 2) {
+                json = "{\"extra\":{\"index\":2}," + json.substring(1);
             }
             records[index] =
                     new SimpleRecord(
@@ -518,7 +520,13 @@ class KafkaJsonProduceITCase {
                                         (index + 1) * 10L,
                                         0,
                                         expectedPartition);
-                                assertThat(row.isNullAt(headersPosition + 2)).isTrue();
+                                if (index == 2 || index == 5 || index == 6) {
+                                    assertThat(row.getString(headersPosition + 2).toString())
+                                            .isEqualTo("{\"extra\":{\"index\":" + index + "}}");
+                                } else {
+                                    // A following null or known-only value must not reuse rescue.
+                                    assertThat(row.isNullAt(headersPosition + 2)).isTrue();
+                                }
                             });
                 }
             } finally {
@@ -529,18 +537,29 @@ class KafkaJsonProduceITCase {
 
     @ParameterizedTest
     @CsvSource({
-        "flat,scalar",
-        "nested,scalar",
-        "flat,row",
-        "nested,row",
-        "flat,array",
-        "nested,array",
-        "flat,map",
-        "nested,map"
+        "flat,scalar,false",
+        "nested,scalar,false",
+        "flat,row,false",
+        "nested,row,false",
+        "flat,array,false",
+        "nested,array,false",
+        "flat,map,false",
+        "nested,map,false",
+        "flat,scalar,true",
+        "nested,scalar,true",
+        "flat,row,true",
+        "nested,row,true",
+        "flat,array,true",
+        "nested,array,true",
+        "flat,map,true",
+        "nested,map,true"
     })
     void testNullValueViolatingRequiredBusinessTypeIsPartitionAtomic(
-            String layout, String fieldType) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout + "_" + fieldType);
+            String layout, String fieldType, boolean withRescue) throws Exception {
+        TablePath path =
+                TablePath.of(
+                        DATABASE,
+                        "json_required_value_" + layout + "_" + fieldType + "_" + withRescue);
         // Flat checks the business field; nested checks the parent even with nullable children.
         RowType valueType =
                 RowType.builder(false)
@@ -548,18 +567,26 @@ class KafkaJsonProduceITCase {
                         .build();
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(valueType, layout, true, false, 2));
+            create(admin, path, descriptor(valueType, layout, true, withRescue, 2));
             ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
             try (Socket socket = new Socket(node.host(), node.port());
                     KafkaProducer<byte[], byte[]> producer = producer()) {
+                String rescueMember = withRescue ? "\"extra\":1," : "";
                 SimpleRecord validRecord =
-                        record("{\"id\":" + nullValueBusinessJson(fieldType, 1) + "}");
+                        record(
+                                "{"
+                                        + rescueMember
+                                        + "\"id\":"
+                                        + nullValueBusinessJson(fieldType, 1)
+                                        + "}");
                 // A required parent ROW still accepts an object whose nullable child is null
                 // or missing; this differs from a null Kafka Value making the parent null.
                 SimpleRecord[] acceptedRecords =
                         layout.equals("nested")
                                 ? new SimpleRecord[] {
-                                    validRecord, record("{\"id\":null}"), record("{}")
+                                    validRecord,
+                                    record("{" + rescueMember + "\"id\":null}"),
+                                    record(withRescue ? "{\"extra\":1}" : "{}")
                                 }
                                 : new SimpleRecord[] {validRecord};
                 ProduceResponse response =
@@ -569,7 +596,9 @@ class KafkaJsonProduceITCase {
                                 MemoryRecords.withRecords(
                                         Compression.NONE,
                                         record(
-                                                "{\"id\":"
+                                                "{"
+                                                        + rescueMember
+                                                        + "\"id\":"
                                                         + nullValueBusinessJson(fieldType, 1000)
                                                         + "}"),
                                         record(null)),
@@ -588,7 +617,9 @@ class KafkaJsonProduceITCase {
                                                         789L,
                                                         KEY,
                                                         bytes(
-                                                                "{\"id\":"
+                                                                "{"
+                                                                        + rescueMember
+                                                                        + "\"id\":"
                                                                         + nullValueBusinessJson(
                                                                                 fieldType, -1)
                                                                         + "}")))
@@ -605,6 +636,9 @@ class KafkaJsonProduceITCase {
                             assertNullValueBusinessId(
                                     value, layout.equals("nested") ? 0 : 1, fieldType, -1);
                             assertMetadata(row, 3, 789L, 0, 0);
+                            if (withRescue) {
+                                assertThat(row.getString(4).toString()).isEqualTo("{\"extra\":1}");
+                            }
                         });
                 read(
                         connection,
@@ -621,6 +655,9 @@ class KafkaJsonProduceITCase {
                                 assertThat(value.isNullAt(0)).isTrue();
                             }
                             assertMetadata(row, 3, 123L, 0, 1);
+                            if (withRescue) {
+                                assertThat(row.getString(4).toString()).isEqualTo("{\"extra\":1}");
+                            }
                         });
             } finally {
                 admin.dropTable(path, true).get();
