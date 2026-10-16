@@ -37,6 +37,7 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
+import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
@@ -404,14 +405,23 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testNullValuesPersistWithSystemColumnsAndContinuousOffsets(String layout)
+    @CsvSource({
+        "flat,scalar",
+        "nested,scalar",
+        "flat,row",
+        "nested,row",
+        "flat,array",
+        "nested,array",
+        "flat,map",
+        "nested,map"
+    })
+    void testNullValuesPersistWithSystemColumnsAndContinuousOffsets(String layout, String fieldType)
             throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_null_values_" + layout);
+        TablePath path = TablePath.of(DATABASE, "json_null_values_" + layout + "_" + fieldType);
         // A nullable nested parent accepts null even when its business child is NOT NULL.
         RowType valueType =
                 RowType.builder()
-                        .field("id", DataTypes.INT().copy(layout.equals("flat")))
+                        .field("id", nullValueBusinessType(fieldType).copy(layout.equals("flat")))
                         .field("label", DataTypes.STRING())
                         .build();
         Header[] headers = {
@@ -419,12 +429,22 @@ class KafkaJsonProduceITCase {
             new RecordHeader("source", new byte[] {1, 2}),
             new RecordHeader("nullable", null)
         };
-        SimpleRecord[] records = new SimpleRecord[5];
+        // Nullable flat fields also accept explicit JSON null and missing fields.
+        SimpleRecord[] records = new SimpleRecord[layout.equals("flat") ? 7 : 5];
         for (int index = 0; index < records.length; index++) {
             String json =
                     index == 2 || index == 4
-                            ? "{\"id\":" + index + ",\"label\":\"v" + index + "\"}"
+                            ? "{\"id\":"
+                                    + nullValueBusinessJson(fieldType, index)
+                                    + ",\"label\":\"v"
+                                    + index
+                                    + "\"}"
                             : null;
+            if (index == 5) {
+                json = "{\"id\":null,\"label\":null}";
+            } else if (index == 6) {
+                json = "{}";
+            }
             records[index] =
                     new SimpleRecord(
                             (index + 1) * 10L,
@@ -434,7 +454,8 @@ class KafkaJsonProduceITCase {
         }
         MemoryRecords[] batches = {
             MemoryRecords.withRecords(Compression.NONE, records[0], records[1]),
-            MemoryRecords.withRecords(Compression.NONE, records[2], records[3], records[4])
+            MemoryRecords.withRecords(
+                    Compression.NONE, Arrays.copyOfRange(records, 2, records.length))
         };
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
@@ -468,7 +489,7 @@ class KafkaJsonProduceITCase {
                                     InternalRow value =
                                             layout.equals("nested") ? row.getRow(1, 2) : row;
                                     int start = layout.equals("nested") ? 0 : 1;
-                                    assertThat(value.getInt(start)).isEqualTo(index);
+                                    assertNullValueBusinessId(value, start, fieldType, index);
                                     assertThat(value.getString(start + 1).toString())
                                             .isEqualTo("v" + index);
                                 } else {
@@ -495,14 +516,23 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testNullValueViolatingRequiredBusinessTypeIsPartitionAtomic(String layout)
-            throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout);
+    @CsvSource({
+        "flat,scalar",
+        "nested,scalar",
+        "flat,row",
+        "nested,row",
+        "flat,array",
+        "nested,array",
+        "flat,map",
+        "nested,map"
+    })
+    void testNullValueViolatingRequiredBusinessTypeIsPartitionAtomic(
+            String layout, String fieldType) throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout + "_" + fieldType);
         // Flat checks the business field; nested checks the parent even with nullable children.
         RowType valueType =
                 RowType.builder(false)
-                        .field("id", DataTypes.INT().copy(layout.equals("nested")))
+                        .field("id", nullValueBusinessType(fieldType).copy(layout.equals("nested")))
                         .build();
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
@@ -510,13 +540,28 @@ class KafkaJsonProduceITCase {
             ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
             try (Socket socket = new Socket(node.host(), node.port());
                     KafkaProducer<byte[], byte[]> producer = producer()) {
+                SimpleRecord validRecord =
+                        record("{\"id\":" + nullValueBusinessJson(fieldType, 1) + "}");
+                // A required parent ROW still accepts an object whose nullable child is null
+                // or missing; this differs from a null Kafka Value making the parent null.
+                SimpleRecord[] acceptedRecords =
+                        layout.equals("nested")
+                                ? new SimpleRecord[] {
+                                    validRecord, record("{\"id\":null}"), record("{}")
+                                }
+                                : new SimpleRecord[] {validRecord};
                 ProduceResponse response =
                         produce(
                                 socket,
                                 path.toString(),
                                 MemoryRecords.withRecords(
-                                        Compression.NONE, record("{\"id\":1000}"), record(null)),
-                                MemoryRecords.withRecords(Compression.NONE, record("{\"id\":1}")));
+                                        Compression.NONE,
+                                        record(
+                                                "{\"id\":"
+                                                        + nullValueBusinessJson(fieldType, 1000)
+                                                        + "}"),
+                                        record(null)),
+                                MemoryRecords.withRecords(Compression.NONE, acceptedRecords));
                 PartitionProduceResponse rejected = partition(response, path.toString(), 0);
                 assertThat(rejected.errorCode()).isEqualTo(Errors.INVALID_RECORD.code());
                 assertThat(rejected.baseOffset()).isEqualTo(-1L);
@@ -530,7 +575,11 @@ class KafkaJsonProduceITCase {
                                                         0,
                                                         789L,
                                                         KEY,
-                                                        bytes("{\"id\":-1}")))
+                                                        bytes(
+                                                                "{\"id\":"
+                                                                        + nullValueBusinessJson(
+                                                                                fieldType, -1)
+                                                                        + "}")))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
                         .isZero();
@@ -540,16 +589,25 @@ class KafkaJsonProduceITCase {
                         0,
                         1,
                         (row, index) -> {
-                            assertThat(valueId(row, layout)).isEqualTo(-1);
+                            InternalRow value = layout.equals("nested") ? row.getRow(1, 1) : row;
+                            assertNullValueBusinessId(
+                                    value, layout.equals("nested") ? 0 : 1, fieldType, -1);
                             assertMetadata(row, 3, 789L, 0, 0);
                         });
                 read(
                         connection,
                         path,
                         1,
-                        1,
+                        acceptedRecords.length,
                         (row, index) -> {
-                            assertThat(valueId(row, layout)).isEqualTo(1);
+                            InternalRow value = layout.equals("nested") ? row.getRow(1, 1) : row;
+                            if (index == 0) {
+                                assertNullValueBusinessId(
+                                        value, layout.equals("nested") ? 0 : 1, fieldType, 1);
+                            } else {
+                                assertThat(row.isNullAt(1)).isFalse();
+                                assertThat(value.isNullAt(0)).isTrue();
+                            }
                             assertMetadata(row, 3, 123L, 0, 1);
                         });
             } finally {
@@ -890,6 +948,59 @@ class KafkaJsonProduceITCase {
         assertThat(values).containsOnlyKeys("source", "nullable");
         assertThat(values.get("source")).containsExactly(1, 2);
         assertThat(values.get("nullable")).isNull();
+    }
+
+    private static DataType nullValueBusinessType(String fieldType) {
+        switch (fieldType) {
+            case "scalar":
+                return DataTypes.INT();
+            case "row":
+                return DataTypes.ROW(DataTypes.FIELD("value", DataTypes.INT().copy(false)));
+            case "array":
+                return DataTypes.ARRAY(DataTypes.INT().copy(false));
+            case "map":
+                return DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().copy(false));
+            default:
+                throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
+        }
+    }
+
+    private static String nullValueBusinessJson(String fieldType, int id) {
+        switch (fieldType) {
+            case "scalar":
+                return Integer.toString(id);
+            case "row":
+            case "map":
+                return "{\"value\":" + id + "}";
+            case "array":
+                return "[" + id + "]";
+            default:
+                throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
+        }
+    }
+
+    private static void assertNullValueBusinessId(
+            InternalRow row, int position, String fieldType, int id) {
+        switch (fieldType) {
+            case "scalar":
+                assertThat(row.getInt(position)).isEqualTo(id);
+                break;
+            case "row":
+                assertThat(row.getRow(position, 1).getInt(0)).isEqualTo(id);
+                break;
+            case "array":
+                assertThat(row.getArray(position).size()).isEqualTo(1);
+                assertThat(row.getArray(position).getInt(0)).isEqualTo(id);
+                break;
+            case "map":
+                InternalMap map = row.getMap(position);
+                assertThat(map.size()).isEqualTo(1);
+                assertThat(map.keyArray().getString(0).toString()).isEqualTo("value");
+                assertThat(map.valueArray().getInt(0)).isEqualTo(id);
+                break;
+            default:
+                throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
+        }
     }
 
     private static String scalarJson(int id, boolean explicitNull) {
