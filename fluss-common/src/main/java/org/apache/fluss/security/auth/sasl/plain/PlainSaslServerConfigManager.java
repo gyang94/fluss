@@ -154,10 +154,9 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
         try {
             return copyCredentials(configuration.get(ConfigOptions.SERVER_SASL_CREDENTIALS));
         } catch (IllegalArgumentException | IllegalStateException e) {
-            throw new ConfigException(
-                    String.format(
-                            "Failed to parse %s: %s", PLAIN_CREDENTIALS_CONFIG, e.getMessage()),
-                    e);
+            // Parsing errors, such as duplicate map keys, may include passwords in their
+            // messages or causes. Do not retain them in an exception that can be logged.
+            throw new ConfigException("Failed to parse " + PLAIN_CREDENTIALS_CONFIG + '.');
         }
     }
 
