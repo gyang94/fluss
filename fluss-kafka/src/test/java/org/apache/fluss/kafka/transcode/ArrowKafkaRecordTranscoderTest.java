@@ -131,7 +131,6 @@ class ArrowKafkaRecordTranscoderTest {
     @ValueSource(booleans = {false, true})
     void testNullAndEmptyPayloadsRemainDistinct(boolean string) throws Exception {
         TableInfo table = envelope(string, 7);
-        // This converter retains its existing nullability checks; ingress filtering is separate.
         List<Record> records =
                 Arrays.asList(
                         new Record(Record.NO_TIMESTAMP, null, null, Collections.emptyList()),
