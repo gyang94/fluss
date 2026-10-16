@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRowAssembler;
@@ -203,6 +204,13 @@ class KafkaFormatFactoryRegistryTest {
             schema.column("_kafka_rescue", DataTypes.STRING());
         }
         schema.column("_kafka_key", DataTypes.BYTES());
+        schema.column(
+                "_kafka_metadata",
+                DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT().copy(false)),
+                                DataTypes.FIELD("partition", DataTypes.INT().copy(false)))
+                        .copy(false));
         if (!first) {
             schema.column("_kafka_rescue", DataTypes.STRING());
         }
@@ -224,13 +232,21 @@ class KafkaFormatFactoryRegistryTest {
                                 .build());
         KafkaFieldDecoder decoder = formats.createDecoder(contract);
         KafkaRowAssembler assembler = new KafkaRowAssembler(contract);
-        Object[] values = decoder.decode("{\"id\":7,\"extra\":2}".getBytes(StandardCharsets.UTF_8));
+        String rescued = "{\"extra\":2,\"_kafka_metadata\":{\"timestamp\":0,\"partition\":99}}";
+        Object[] values =
+                decoder.decode(
+                        ("{\"id\":7," + rescued.substring(1)).getBytes(StandardCharsets.UTF_8));
         assertThat(values).hasSize(2);
         byte[] key = {(byte) 0xff};
-        Record record = new Record(123L, key, null, Collections.emptyList());
+        Record record =
+                new Record(123L, TimestampType.LOG_APPEND_TIME, key, null, Collections.emptyList());
         InternalRow row = assembler.assemble(values, record, 7);
-        assertThat(row.getString(contract.rescuePosition()).toString()).isEqualTo("{\"extra\":2}");
+        assertThat(row.getString(contract.rescuePosition()).toString()).isEqualTo(rescued);
         assertThat(row.getBytes(contract.keyPosition())).isEqualTo(key);
+        InternalRow metadata = row.getRow(contract.metadataPosition(), 3);
+        assertThat(metadata.getTimestampLtz(0, 3).getEpochMillisecond()).isEqualTo(123L);
+        assertThat(metadata.getInt(1)).isEqualTo(1);
+        assertThat(metadata.getInt(2)).isEqualTo(7);
         int valuePosition = contract.valueProjection().positionAt(0);
         assertThat(
                         layout.equals("nested")
