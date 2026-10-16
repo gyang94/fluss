@@ -60,7 +60,9 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Tests append admission, error isolation, session propagation and delayed-fetch completion. */
+/**
+ * Tests append admission, error isolation, session propagation and asynchronous acknowledgements.
+ */
 class GatewayKafkaProduceBackendTest {
 
     @Test
@@ -74,7 +76,6 @@ class GatewayKafkaProduceBackendTest {
         assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(-1L);
         assertThat(service.writeChecks).isEqualTo(1);
         assertThat(service.append).isNull();
-        assertThat(service.drains).isZero();
         service.denyWrite = true;
         assertErrors(
                 backend(service)
@@ -168,7 +169,6 @@ class GatewayKafkaProduceBackendTest {
         assertErrors(result, Errors.NONE);
         assertThat(seen).containsExactly(empty, valid);
         assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(-1L);
-        assertThat(service.drains).isEqualTo(1);
     }
 
     private static PartitionWrite nullValue(int partition) {
@@ -179,7 +179,7 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testDrainsImmediatelyWhileAcksAllResponseIsPending() throws Exception {
+    void testAcksAllWaitsForNativeAppendResponse() throws Exception {
         TestingProduceService service = new TestingProduceService();
         service.pendingAppend = new CompletableFuture<>();
         CompletableFuture<KafkaProduceResult> result =
@@ -187,22 +187,19 @@ class GatewayKafkaProduceBackendTest {
         assertThat(service.append.getAcks()).isEqualTo(-1);
         assertThat(service.append.getTimeoutMs()).isEqualTo(4321);
         assertThat(service.append.getTableId()).isEqualTo(42L);
-        assertThat(service.drains).isEqualTo(1);
         assertThat(result).isNotDone();
         assertThat(service.pendingAppend).isNotDone();
         service.pendingAppend.complete(success(0));
         assertThat(result.join().topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
-        assertThat(service.drains).isEqualTo(1);
     }
 
     @Test
-    void testDrainsAfterSynchronousAppendFailure() throws Exception {
+    void testMapsSynchronousAppendFailure() throws Exception {
         TestingProduceService service = new TestingProduceService();
         service.throwAppend = true;
         assertErrors(
                 backend(service).write(command((short) 1, topic("kafka.topic", good(0)))).join(),
                 Errors.UNKNOWN_SERVER_ERROR);
-        assertThat(service.drains).isEqualTo(1);
     }
 
     @Test
@@ -228,7 +225,6 @@ class GatewayKafkaProduceBackendTest {
         assertErrors(result, Errors.INVALID_RECORD, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
         assertThat(service.append.getBucketsReqsList()).hasSize(1);
         assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
-        assertThat(service.drains).isEqualTo(1);
     }
 
     @Test
@@ -251,18 +247,16 @@ class GatewayKafkaProduceBackendTest {
             assertThat(result.topics().get(1).partitions().get(0).error())
                     .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION);
             assertThat(result.topics().get(2).partitions().get(0).error()).isEqualTo(Errors.NONE);
-            assertThat(service.drains).isEqualTo(1);
         }
     }
 
     @Test
-    void testNoAppendOrDrainWhenAllPartitionsFailConversion() throws Exception {
+    void testNoAppendWhenAllPartitionsFailConversion() throws Exception {
         TestingProduceService service = new TestingProduceService();
         KafkaProduceResult result =
                 backend(service).write(command((short) 1, topic("kafka.topic", good(8)))).join();
         assertErrors(result, Errors.UNKNOWN_TOPIC_OR_PARTITION);
         assertThat(service.append).isNull();
-        assertThat(service.drains).isZero();
     }
 
     @Test
@@ -316,7 +310,6 @@ class GatewayKafkaProduceBackendTest {
         CompletableFuture.runAsync(() -> service.pendingMetadata.complete(metadata(false))).join();
         assertErrors(result.join(), Errors.NONE);
         assertThat(service.append.getAcks()).isZero();
-        assertThat(service.drains).isEqualTo(1);
     }
 
     @Test
@@ -566,7 +559,6 @@ class GatewayKafkaProduceBackendTest {
             assertErrors(completed, Errors.NONE);
             assertThat(completed.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
             assertThat(service.appends).hasSize(1);
-            assertThat(service.drains).isEqualTo(1);
         } finally {
             executor.closeAsync().get(10, TimeUnit.SECONDS);
         }
@@ -804,7 +796,6 @@ class GatewayKafkaProduceBackendTest {
                         .join(),
                 Errors.INVALID_RECORD);
         assertThat(service.appends).isEmpty();
-        assertThat(service.drains).isZero();
     }
 
     @Test
@@ -944,7 +935,6 @@ class GatewayKafkaProduceBackendTest {
         private CompletableFuture<GetTableInfoResponse> pendingMetadata;
         private boolean throwAppend;
         private boolean asyncMissing;
-        private int drains;
         private int writeChecks;
         private boolean denyWrite;
         private CountDownLatch metadataEntered;
@@ -1002,18 +992,13 @@ class GatewayKafkaProduceBackendTest {
             if (throwAppend) {
                 throw new IllegalStateException("append failed");
             }
+            if (appended != null) {
+                appended.countDown();
+            }
             return pendingAppend == null
                     ? CompletableFuture.completedFuture(
                             success(request.getBucketsReqsList().get(0).getBucketId()))
                     : pendingAppend;
-        }
-
-        @Override
-        public void tryCompleteActions() {
-            drains++;
-            if (appended != null) {
-                appended.countDown();
-            }
         }
     }
 }
