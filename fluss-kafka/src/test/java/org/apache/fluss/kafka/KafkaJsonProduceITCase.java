@@ -38,6 +38,7 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
+import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
@@ -406,14 +407,23 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testNullValuesPersistWithSystemColumnsAndContinuousOffsets(String layout)
+    @CsvSource({
+        "flat,scalar",
+        "nested,scalar",
+        "flat,row",
+        "nested,row",
+        "flat,array",
+        "nested,array",
+        "flat,map",
+        "nested,map"
+    })
+    void testNullValuesPersistWithSystemColumnsAndContinuousOffsets(String layout, String fieldType)
             throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_null_values_" + layout);
+        TablePath path = TablePath.of(DATABASE, "json_null_values_" + layout + "_" + fieldType);
         // Null Kafka values populate nullable flat fields or the nullable nested value container.
         RowType valueType =
                 RowType.builder()
-                        .field("id", DataTypes.INT())
+                        .field("id", nullValueBusinessType(fieldType).copy(layout.equals("flat")))
                         .field("label", DataTypes.STRING())
                         .build();
         Header[] headers = {
@@ -421,12 +431,22 @@ class KafkaJsonProduceITCase {
             new RecordHeader("source", new byte[] {1, 2}),
             new RecordHeader("nullable", null)
         };
-        SimpleRecord[] records = new SimpleRecord[5];
+        // Nullable flat fields also accept explicit JSON null and missing fields.
+        SimpleRecord[] records = new SimpleRecord[layout.equals("flat") ? 7 : 5];
         for (int index = 0; index < records.length; index++) {
             String json =
                     index == 2 || index == 4
-                            ? "{\"id\":" + index + ",\"label\":\"v" + index + "\"}"
+                            ? "{\"id\":"
+                                    + nullValueBusinessJson(fieldType, index)
+                                    + ",\"label\":\"v"
+                                    + index
+                                    + "\"}"
                             : null;
+            if (index == 5) {
+                json = "{\"id\":null,\"label\":null}";
+            } else if (index == 6) {
+                json = "{}";
+            }
             records[index] =
                     new SimpleRecord(
                             (index + 1) * 10L,
@@ -436,7 +456,8 @@ class KafkaJsonProduceITCase {
         }
         MemoryRecords[] batches = {
             MemoryRecords.withRecords(Compression.NONE, records[0], records[1]),
-            MemoryRecords.withRecords(Compression.NONE, records[2], records[3], records[4])
+            MemoryRecords.withRecords(
+                    Compression.NONE, Arrays.copyOfRange(records, 2, records.length))
         };
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
@@ -470,7 +491,7 @@ class KafkaJsonProduceITCase {
                                     InternalRow value =
                                             layout.equals("nested") ? row.getRow(1, 2) : row;
                                     int start = layout.equals("nested") ? 0 : 1;
-                                    assertThat(value.getInt(start)).isEqualTo(index);
+                                    assertNullValueBusinessId(value, start, fieldType, index);
                                     assertThat(value.getString(start + 1).toString())
                                             .isEqualTo("v" + index);
                                 } else {
@@ -497,10 +518,24 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testNotNullBusinessFieldsAreRejectedAtTableCreation(String layout) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout);
-        RowType valueType = RowType.builder(false).field("id", DataTypes.INT().copy(false)).build();
+    @CsvSource({
+        "flat,scalar",
+        "nested,scalar",
+        "flat,row",
+        "nested,row",
+        "flat,array",
+        "nested,array",
+        "flat,map",
+        "nested,map"
+    })
+    void testNotNullBusinessFieldsAreRejectedAtTableCreation(String layout, String fieldType)
+            throws Exception {
+        TablePath path =
+                TablePath.of(DATABASE, "json_required_value_" + layout + "_" + fieldType);
+        RowType valueType =
+                RowType.builder(false)
+                        .field("id", nullValueBusinessType(fieldType).copy(false))
+                        .build();
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
             assertThatThrownBy(
@@ -853,6 +888,59 @@ class KafkaJsonProduceITCase {
         assertThat(values).containsOnlyKeys("source", "nullable");
         assertThat(values.get("source")).containsExactly(1, 2);
         assertThat(values.get("nullable")).isNull();
+    }
+
+    private static DataType nullValueBusinessType(String fieldType) {
+        switch (fieldType) {
+            case "scalar":
+                return DataTypes.INT();
+            case "row":
+                return DataTypes.ROW(DataTypes.FIELD("value", DataTypes.INT().copy(false)));
+            case "array":
+                return DataTypes.ARRAY(DataTypes.INT().copy(false));
+            case "map":
+                return DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().copy(false));
+            default:
+                throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
+        }
+    }
+
+    private static String nullValueBusinessJson(String fieldType, int id) {
+        switch (fieldType) {
+            case "scalar":
+                return Integer.toString(id);
+            case "row":
+            case "map":
+                return "{\"value\":" + id + "}";
+            case "array":
+                return "[" + id + "]";
+            default:
+                throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
+        }
+    }
+
+    private static void assertNullValueBusinessId(
+            InternalRow row, int position, String fieldType, int id) {
+        switch (fieldType) {
+            case "scalar":
+                assertThat(row.getInt(position)).isEqualTo(id);
+                break;
+            case "row":
+                assertThat(row.getRow(position, 1).getInt(0)).isEqualTo(id);
+                break;
+            case "array":
+                assertThat(row.getArray(position).size()).isEqualTo(1);
+                assertThat(row.getArray(position).getInt(0)).isEqualTo(id);
+                break;
+            case "map":
+                InternalMap map = row.getMap(position);
+                assertThat(map.size()).isEqualTo(1);
+                assertThat(map.keyArray().getString(0).toString()).isEqualTo("value");
+                assertThat(map.valueArray().getInt(0)).isEqualTo(id);
+                break;
+            default:
+                throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
+        }
     }
 
     private static String scalarJson(int id, boolean explicitNull) {
