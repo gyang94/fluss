@@ -66,23 +66,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 class GatewayKafkaProduceBackendTest {
 
     @Test
-    void testAllNullValuesRequireAuthorizationWithoutAppend() throws Exception {
+    void testAllNullValuesUseNativeAppendAndAuthorization() throws Exception {
         TestingProduceService service = new TestingProduceService();
         KafkaProduceResult result =
                 backend(service)
                         .write(command((short) 1, topic("kafka.topic", nullValue(0), nullValue(8))))
                         .join();
         assertErrors(result, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
-        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(-1L);
+        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
         assertThat(service.writeChecks).isEqualTo(1);
-        assertThat(service.append).isNull();
+        assertThat(service.appends).hasSize(1);
+        assertThat(service.append.getBucketsReqsList()).hasSize(1);
+        assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isZero();
         service.denyWrite = true;
         assertErrors(
                 backend(service)
                         .write(command((short) 1, topic("kafka.topic", nullValue(0))))
                         .join(),
                 Errors.TOPIC_AUTHORIZATION_FAILED);
-        assertThat(service.append).isNull();
+        assertThat(service.appends).hasSize(1);
+        assertThat(service.writeChecks).isEqualTo(2);
     }
 
     @ParameterizedTest
@@ -138,7 +141,7 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testMixedNullValuesAreRemovedBeforeDecodingAndHideOffsets() throws Exception {
+    void testMixedNullValuesPreserveRecordOrderAndNativeOffsets() throws Exception {
         TestingProduceService service = new TestingProduceService();
         List<Record> seen = new ArrayList<>();
         ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
@@ -151,6 +154,7 @@ class GatewayKafkaProduceBackendTest {
                             seen.addAll(records);
                             return transcoder.transcode(partitionId, records, table);
                         });
+        Record nullRecord = nullValue(0).records().get(0);
         Record empty = new Record(1L, null, new byte[0], Collections.emptyList());
         Record valid = good(0).records().get(0);
         KafkaProduceResult result =
@@ -161,14 +165,11 @@ class GatewayKafkaProduceBackendTest {
                                                 "kafka.topic",
                                                 new PartitionWrite(
                                                         0,
-                                                        Arrays.asList(
-                                                                nullValue(0).records().get(0),
-                                                                empty,
-                                                                valid)))))
+                                                        Arrays.asList(nullRecord, empty, valid)))))
                         .join();
         assertErrors(result, Errors.NONE);
-        assertThat(seen).containsExactly(empty, valid);
-        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(-1L);
+        assertThat(seen).containsExactly(nullRecord, empty, valid);
+        assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
     }
 
     private static PartitionWrite nullValue(int partition) {
@@ -798,8 +799,48 @@ class GatewayKafkaProduceBackendTest {
         assertThat(service.appends).isEmpty();
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"binary", "string"})
+    void testNullValueViolationRejectsWholePartitionWithoutAppendingPrefix(String format)
+            throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+        TableDescriptor notNull =
+                TableDescriptor.builder(original)
+                        .schema(
+                                Schema.newBuilder()
+                                        .column(
+                                                "_kafka_value",
+                                                (format.equals("binary")
+                                                                ? DataTypes.BYTES()
+                                                                : DataTypes.STRING())
+                                                        .copy(false))
+                                        .build())
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, format)
+                        .build();
+        service.pendingMetadata =
+                CompletableFuture.completedFuture(
+                        metadata(false).setTableJson(notNull.toJsonBytes()));
+        GatewayKafkaProduceBackend backend = backend(service);
+        assertErrors(
+                backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
+                Errors.INVALID_RECORD);
+        assertThat(service.appends).isEmpty();
+
+        Record valid = good(0).records().get(0);
+        PartitionWrite invalid =
+                new PartitionWrite(0, Arrays.asList(valid, nullValue(0).records().get(0), valid));
+        assertErrors(
+                backend.write(command((short) 1, topic("topic", invalid, good(1)))).join(),
+                Errors.INVALID_RECORD,
+                Errors.NONE);
+        assertThat(service.appends).hasSize(1);
+        assertThat(service.append.getBucketsReqsList()).hasSize(1);
+        assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
+    }
+
     @Test
-    void testMetadataOffsetsAndJsonCannotBeActivatedByFilteredRecords() throws Exception {
+    void testMetadataOffsetsAndJsonCannotBeActivatedByNullValues() throws Exception {
         TestingProduceService service = new TestingProduceService();
         TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
         TableDescriptor unsupportedMetadata =
@@ -969,8 +1010,7 @@ class GatewayKafkaProduceBackendTest {
                     : pendingMetadata;
         }
 
-        @Override
-        public void authorizeTableWrite(long tableId) {
+        private void checkWriteAuthorization(long tableId) {
             assertThat(tableId).isPositive();
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             assertThat(currentSession().getInetAddress())
@@ -983,7 +1023,7 @@ class GatewayKafkaProduceBackendTest {
 
         @Override
         public CompletableFuture<ProduceLogResponse> produceLog(ProduceLogRequest request) {
-            authorizeTableWrite(request.getTableId());
+            checkWriteAuthorization(request.getTableId());
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             assertThat(currentSession().getInetAddress())
                     .isEqualTo(InetAddress.getLoopbackAddress());
