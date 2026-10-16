@@ -271,6 +271,14 @@ class KafkaFormatFactoryRegistryTest {
                                 ? row.getRow(valuePosition, 1).getInt(0)
                                 : row.getInt(valuePosition))
                 .isEqualTo(7);
+        InternalRow nullRow = assembler.assemble(decoder.decode(null), record, 7);
+        assertThat(nullRow.isNullAt(valuePosition)).isTrue();
+        assertThat(nullRow.isNullAt(contract.rescuePosition())).isTrue();
+        assertThat(nullRow.getBytes(contract.keyPosition())).isEqualTo(key);
+        InternalRow nullMetadata = nullRow.getRow(contract.metadataPosition(), 3);
+        assertThat(nullMetadata.getTimestampLtz(0, 3).getEpochMillisecond()).isEqualTo(123L);
+        assertThat(nullMetadata.getInt(1)).isEqualTo(1);
+        assertThat(nullMetadata.getInt(2)).isEqualTo(7);
         assertThat(
                         assembler
                                 .assemble(
