@@ -145,6 +145,25 @@ class PlainSaslServerConfigManagerTest {
     }
 
     @Test
+    void testDuplicateCredentialsDoNotLeakPasswords() {
+        PlainSaslServerConfigManager manager =
+                new PlainSaslServerConfigManager(new Configuration());
+        Configuration duplicateCredentials = new Configuration();
+        duplicateCredentials.setString(
+                ConfigOptions.SERVER_SASL_CREDENTIALS.key(),
+                "alice:first-secret,alice:second-secret");
+
+        assertThatThrownBy(() -> manager.validate(duplicateCredentials))
+                .isInstanceOf(ConfigException.class)
+                .hasMessage("Failed to parse security.sasl.plain.credentials.")
+                .hasNoCause();
+        assertThat(
+                        manager.getConfiguration()
+                                .getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG))
+                .isNull();
+    }
+
+    @Test
     void testReconfigureRejectsInvalidCredentialsWithoutMutatingManagedConfiguration() {
         Configuration initialConfiguration = new Configuration();
         initialConfiguration.set(
