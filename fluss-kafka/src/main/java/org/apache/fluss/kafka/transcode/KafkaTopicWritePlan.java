@@ -39,7 +39,7 @@ public final class KafkaTopicWritePlan {
     KafkaTopicWritePlan(TableInfo tableInfo, KafkaTableSchema topicSchema) {
         this.tableInfo = checkNotNull(tableInfo);
         this.topicSchema = checkNotNull(topicSchema);
-        // Validate support during preparation as filtered partitions may never call transcode.
+        // Validate supported value formats when compiling the plan.
         if (topicSchema.valueType() != ValueType.BINARY
                 && topicSchema.valueType() != ValueType.STRING) {
             throw new KafkaRecordEncodingException(

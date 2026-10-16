@@ -163,8 +163,8 @@ class KafkaProduceCommandTest {
     }
 
     @Test
-    void testNullFilteringPreservesRecordIdentityAndTimestampProvenance() {
-        Record filtered =
+    void testNullValuesPreserveRecordIdentityAndTimestampProvenance() {
+        Record nullRecord =
                 new Record(
                         123L,
                         TimestampType.CREATE_TIME,
@@ -185,21 +185,22 @@ class KafkaProduceCommandTest {
                         null,
                         new byte[0],
                         Collections.emptyList());
-        List<Record> source = new ArrayList<>(Arrays.asList(filtered, retained, empty));
+        List<Record> source = new ArrayList<>(Arrays.asList(nullRecord, retained, empty));
         PartitionWrite partition = new PartitionWrite(0, source);
         source.clear();
 
-        assertThat(partition.records()).containsExactly(filtered, retained, empty);
-        assertThat(partition.hasNullValues()).isTrue();
-        assertThat(partition.nonNullRecords()).containsExactly(retained, empty);
-        assertThat(partition.nonNullRecords().get(0)).isSameAs(retained);
-        assertThat(partition.nonNullRecords().get(0).timestampType())
+        assertThat(partition.records()).containsExactly(nullRecord, retained, empty);
+        assertThat(partition.records().get(0)).isSameAs(nullRecord);
+        assertThat(partition.records().get(0).value()).isNull();
+        assertThat(partition.records().get(0).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
+        assertThat(partition.records().get(0).timestamp()).isEqualTo(123L);
+        assertThat(partition.records().get(1)).isSameAs(retained);
+        assertThat(partition.records().get(1).timestampType())
                 .isEqualTo(TimestampType.LOG_APPEND_TIME);
-        assertThat(partition.nonNullRecords().get(0).timestamp()).isEqualTo(456L);
-        assertThat(partition.nonNullRecords().get(1).timestampType())
-                .isEqualTo(TimestampType.CREATE_TIME);
-        assertThat(partition.nonNullRecords().get(1).hasTimestamp()).isFalse();
-        assertThatThrownBy(() -> partition.nonNullRecords().clear())
+        assertThat(partition.records().get(1).timestamp()).isEqualTo(456L);
+        assertThat(partition.records().get(2).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
+        assertThat(partition.records().get(2).hasTimestamp()).isFalse();
+        assertThatThrownBy(() -> partition.records().clear())
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 

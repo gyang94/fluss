@@ -188,17 +188,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 continue;
             }
             try {
-                if (partition.hasNullValues() && partition.nonNullRecords().isEmpty()) {
-                    setCurrentSession(command);
-                    service.authorizeTableWrite(tableInfo.getTableId());
-                    failures.put(
-                            partition.partitionId(),
-                            new PartitionResult(partition.partitionId(), Errors.NONE, -1L, null));
-                    continue;
-                }
                 BytesView records =
                         transcoder.transcode(
-                                partition.partitionId(), partition.nonNullRecords(), writePlan);
+                                partition.partitionId(), partition.records(), writePlan);
                 request.addBucketsReq()
                         .setBucketId(partition.partitionId())
                         .setRecordsBytesView(records);
@@ -286,9 +278,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         new PartitionResult(
                                 partition.partitionId(),
                                 Errors.NONE,
-                                !partition.hasNullValues() && bucket.hasBaseOffset()
-                                        ? bucket.getBaseOffset()
-                                        : -1L,
+                                bucket.hasBaseOffset() ? bucket.getBaseOffset() : -1L,
                                 null));
             }
         }
