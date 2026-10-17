@@ -81,7 +81,7 @@ class KafkaServiceLifecycleTest {
             ByteBuf buffer = produce((short) 0);
             channel.writeInbound(buffer);
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
-            new KafkaRequestHandler(new Configuration(), service, service).processRequest(request);
+            new KafkaRequestHandler(new Configuration(), service).processRequest(request);
             request.releaseBuffer();
             controller.setEnabled(false);
             channel.runPendingTasks();
@@ -114,7 +114,7 @@ class KafkaServiceLifecycleTest {
             ByteBuf buffer = produce();
             channel.writeInbound(buffer);
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
-            new KafkaRequestHandler(new Configuration(), service, service).processRequest(request);
+            new KafkaRequestHandler(new Configuration(), service).processRequest(request);
             request.releaseBuffer();
             assertThat(service.append).isNotNull();
             controller.setEnabled(false);
@@ -149,7 +149,7 @@ class KafkaServiceLifecycleTest {
             ByteBuf buffer = produce();
             channel.writeInbound(buffer);
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
-            new KafkaRequestHandler(new Configuration(), service, service).processRequest(request);
+            new KafkaRequestHandler(new Configuration(), service).processRequest(request);
             request.releaseBuffer();
             controller.setEnabled(false);
             channel.close();
@@ -193,7 +193,7 @@ class KafkaServiceLifecycleTest {
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
             controller.setEnabled(false);
             controller.setEnabled(true);
-            new KafkaRequestHandler(new Configuration(), service, service).processRequest(request);
+            new KafkaRequestHandler(new Configuration(), service).processRequest(request);
             request.releaseBuffer();
             assertThat(request.future().join().errorCounts())
                     .containsOnlyKeys(org.apache.kafka.common.protocol.Errors.BROKER_NOT_AVAILABLE);
@@ -223,7 +223,7 @@ class KafkaServiceLifecycleTest {
             ByteBuf bytes = produce(acks);
             channel.writeInbound(bytes);
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
-            new KafkaRequestHandler(new Configuration(), service, service, conversion)
+            new KafkaRequestHandler(new Configuration(), service, conversion)
                     .processRequest(request);
             request.releaseBuffer();
             assertThat(service.entered.await(10, TimeUnit.SECONDS)).isTrue();
@@ -266,7 +266,7 @@ class KafkaServiceLifecycleTest {
         try {
             channel.writeInbound(produce((short) -1));
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
-            new KafkaRequestHandler(new Configuration(), service, service, conversion)
+            new KafkaRequestHandler(new Configuration(), service, conversion)
                     .processRequest(request);
             request.releaseBuffer();
             assertThat(service.entered.await(10, TimeUnit.SECONDS)).isTrue();
@@ -340,8 +340,7 @@ class KafkaServiceLifecycleTest {
                         true, timeout ? Duration.ofMillis(1) : Duration.ofSeconds(30));
         RequestChannel requests = new RequestChannel(10);
         PendingService service = new PendingService();
-        KafkaRequestHandler handler =
-                new KafkaRequestHandler(new Configuration(), service, service);
+        KafkaRequestHandler handler = new KafkaRequestHandler(new Configuration(), service);
         EmbeddedChannel channel =
                 new EmbeddedChannel(
                         controller.newConnection(),
