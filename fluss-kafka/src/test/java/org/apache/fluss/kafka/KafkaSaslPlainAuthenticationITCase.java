@@ -22,7 +22,6 @@ import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
-import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
@@ -206,11 +205,12 @@ public class KafkaSaslPlainAuthenticationITCase {
                             producer.send(new ProducerRecord<byte[], byte[]>(TOPIC, KEY, null))
                                     .get(30, TimeUnit.SECONDS)
                                     .offset())
-                    .isEqualTo(-1L);
+                    .isZero();
             assertThat(
                             producer.send(new ProducerRecord<>(TOPIC, KEY, VALUE))
-                                    .get(30, TimeUnit.SECONDS))
-                    .isNotNull();
+                                    .get(30, TimeUnit.SECONDS)
+                                    .offset())
+                    .isEqualTo(1L);
             assertFlussRecord();
         }
     }
@@ -261,19 +261,20 @@ public class KafkaSaslPlainAuthenticationITCase {
             authenticateV0(socket);
             MetadataResponse metadata = (MetadataResponse) sendRequest(socket, metadataRequest());
             assertSuccessfulMetadata(metadata);
-            ProduceResponse filtered = (ProduceResponse) sendRequest(socket, produceRequest(null));
-            assertThat(filtered.errorCounts()).containsOnlyKeys(Errors.NONE);
+            ProduceResponse nullWrite = (ProduceResponse) sendRequest(socket, produceRequest(null));
+            assertThat(nullWrite.errorCounts()).containsOnlyKeys(Errors.NONE);
             assertThat(
-                            filtered.data()
+                            nullWrite
+                                    .data()
                                     .responses()
                                     .iterator()
                                     .next()
                                     .partitionResponses()
                                     .get(0)
                                     .baseOffset())
-                    .isEqualTo(-1L);
+                    .isZero();
             ProduceResponse produced = (ProduceResponse) sendRequest(socket, produceRequest());
-            assertThat(produced.errorCounts()).containsOnlyKeys(Errors.NONE);
+            assertPartition(produced, 0, Errors.NONE, 1L);
             assertFlussRecord();
         }
     }
@@ -287,23 +288,50 @@ public class KafkaSaslPlainAuthenticationITCase {
         }
     }
 
-    @Test
-    public void testV0RawAuthenticationPreservesProducePermissions() throws Exception {
+    @ParameterizedTest(name = "SASL v{0} all-null WRITE authorization")
+    @ValueSource(shorts = {0, 1})
+    public void testAuthenticatedNullOnlyProduceRequiresWrite(short version) throws Exception {
         grantWriterAccess(OperationType.DESCRIBE);
         try (Socket socket = connectKafka()) {
-            authenticateV0(socket);
+            authenticate(socket, version);
             MetadataResponse metadata = (MetadataResponse) sendRequest(socket, metadataRequest());
             assertSuccessfulMetadata(metadata);
-            ProduceResponse filtered = (ProduceResponse) sendRequest(socket, produceRequest(null));
-            assertThat(filtered.errorCounts()).containsOnlyKeys(Errors.TOPIC_AUTHORIZATION_FAILED);
-            ProduceResponse produced = (ProduceResponse) sendRequest(socket, produceRequest());
-            assertThat(produced.errorCounts()).containsOnlyKeys(Errors.TOPIC_AUTHORIZATION_FAILED);
+            for (String topic : Arrays.asList(TOPIC, TABLE_NAME)) {
+                ProduceRequest request =
+                        produceRequest(
+                                TablePath.of(DATABASE, TABLE_NAME),
+                                contractPartition(0, (String) null, null));
+                request.data().topicData().iterator().next().setName(topic);
+                assertPartition(
+                        (ProduceResponse) sendRequest(socket, request),
+                        0,
+                        Errors.TOPIC_AUTHORIZATION_FAILED,
+                        -1L);
+            }
+            assertNativeRecords(TablePath.of(DATABASE, TABLE_NAME), 0, 0, record -> {});
+            grantWriterAccess(OperationType.WRITE);
+            for (String topic : Arrays.asList(TABLE_NAME, TOPIC)) {
+                ProduceRequest request =
+                        produceRequest(
+                                TablePath.of(DATABASE, TABLE_NAME),
+                                contractPartition(0, (String) null, null));
+                request.data().topicData().iterator().next().setName(topic);
+                assertPartition(
+                        (ProduceResponse) sendRequest(socket, request),
+                        0,
+                        Errors.NONE,
+                        topic.equals(TABLE_NAME) ? 0L : 2L);
+            }
         }
-        try (Table table = connection.getTable(TablePath.of(DATABASE, TABLE_NAME));
-                LogScanner scanner = table.newScan().createLogScanner()) {
-            scanner.subscribeFromBeginning(0);
-            assertThat(scanner.poll(Duration.ofSeconds(1)).isEmpty()).isTrue();
-        }
+        assertNativeRecords(
+                TablePath.of(DATABASE, TABLE_NAME),
+                0,
+                4,
+                record -> {
+                    assertThat(record.getRow().getBytes(0)).containsExactly(KEY);
+                    assertThat(record.getRow().isNullAt(1)).isTrue();
+                    assertThat(record.getRow().isNullAt(2)).isTrue();
+                });
     }
 
     @ParameterizedTest(name = "strict Rescue after SASL handshake v{0}")
@@ -481,6 +509,8 @@ public class KafkaSaslPlainAuthenticationITCase {
             for (String topic : Arrays.asList(TOPIC, TABLE_NAME, TOPIC, TABLE_NAME)) {
                 assertThat(reader.partitionsFor(topic)).hasSize(1);
                 assertDeniedValues(reader, topic);
+                writer.send(new ProducerRecord<byte[], byte[]>(topic, KEY, null))
+                        .get(30, TimeUnit.SECONDS);
                 writer.send(new ProducerRecord<>(topic, KEY, VALUE)).get(30, TimeUnit.SECONDS);
             }
             Collection<AclBinding> removed =
@@ -494,16 +524,27 @@ public class KafkaSaslPlainAuthenticationITCase {
             for (String topic : Arrays.asList(TOPIC, TABLE_NAME)) {
                 assertDeniedValues(writer, topic);
             }
+            grantAccess(path, "reader", OperationType.ALL);
+            for (String topic : Arrays.asList(TABLE_NAME, TOPIC)) {
+                reader.send(new ProducerRecord<byte[], byte[]>(topic, KEY, null))
+                        .get(30, TimeUnit.SECONDS);
+                assertDeniedValues(writer, topic);
+            }
         }
         assertNativeRecords(
                 path,
                 0,
-                4,
+                10,
                 record -> {
                     assertThat(record.getRow().getBytes(0)).containsExactly(KEY);
-                    assertThat(record.getRow().getString(1).toString())
-                            .isEqualTo("authenticated-value");
-                    assertThat(record.getRow().getInt(2)).isEqualTo(42);
+                    if (record.logOffset() >= 8 || record.logOffset() % 2 == 0) {
+                        assertThat(record.getRow().isNullAt(1)).isTrue();
+                        assertThat(record.getRow().isNullAt(2)).isTrue();
+                    } else {
+                        assertThat(record.getRow().getString(1).toString())
+                                .isEqualTo("authenticated-value");
+                        assertThat(record.getRow().getInt(2)).isEqualTo(42);
+                    }
                 });
     }
 
@@ -640,6 +681,7 @@ public class KafkaSaslPlainAuthenticationITCase {
             }
         }
         schema.column("_kafka_headers", DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()));
+        schema.column("_kafka_metadata", metadataType());
         if (rescue) {
             schema.column("_kafka_rescue", DataTypes.STRING());
         }
@@ -726,9 +768,10 @@ public class KafkaSaslPlainAuthenticationITCase {
                     1,
                     record -> {
                         check.accept(record);
+                        assertMetadata(record.getRow(), nested ? 3 : 5, 123L, 0);
                         if (rescue) {
                             assertJson(
-                                    record.getRow().getString(nested ? 3 : 5).toString(),
+                                    record.getRow().getString(nested ? 4 : 6).toString(),
                                     "{\"details\":{\"unknown\":{\"x\":null}},\"extra\":[1,null],"
                                             + "\"_kafka_key\":\"payload\",\"_kafka_value\":null,"
                                             + "\"_kafka_headers\":{},\"_kafka_metadata\":null,\"_kafka_rescue\":null}");
@@ -740,8 +783,9 @@ public class KafkaSaslPlainAuthenticationITCase {
                     invalid.size(),
                     record -> {
                         check.accept(record);
+                        assertMetadata(record.getRow(), nested ? 3 : 5, 123L, 1);
                         if (rescue) {
-                            assertThat(record.getRow().isNullAt(nested ? 3 : 5)).isTrue();
+                            assertThat(record.getRow().isNullAt(nested ? 4 : 6)).isTrue();
                         }
                     });
         } finally {
@@ -758,7 +802,9 @@ public class KafkaSaslPlainAuthenticationITCase {
                                         new SimpleRecord(
                                                 123L,
                                                 KEY,
-                                                value.getBytes(StandardCharsets.UTF_8),
+                                                value == null
+                                                        ? null
+                                                        : value.getBytes(StandardCharsets.UTF_8),
                                                 new Header[] {
                                                     new RecordHeader("source", new byte[] {1}),
                                                     new RecordHeader("source", new byte[] {2})
@@ -818,7 +864,10 @@ public class KafkaSaslPlainAuthenticationITCase {
                                                             new SimpleRecord(KEY, value))));
                     request.data().topicData().iterator().next().setName(topic);
                     assertPartition(
-                            (ProduceResponse) sendRequest(socket, request), 0, Errors.NONE, -1L);
+                            (ProduceResponse) sendRequest(socket, request),
+                            0,
+                            Errors.NONE,
+                            topic.equals(path.toString()) ? 0L : 2L);
                 }
             }
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
@@ -826,15 +875,17 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 producer.send(new ProducerRecord<>(path.getTableName(), KEY, value))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
-                        .isEqualTo(2L);
+                        .isEqualTo(4L);
             }
             assertNativeRecords(
                     path,
                     0,
-                    3,
+                    5,
                     record -> {
                         assertThat(record.getRow().getBytes(0)).containsExactly(KEY);
-                        if (binary) {
+                        if (record.logOffset() == 0 || record.logOffset() == 2) {
+                            assertThat(record.getRow().isNullAt(1)).isTrue();
+                        } else if (binary) {
                             assertThat(record.getRow().getBytes(1)).containsExactly(value);
                         } else {
                             assertThat(record.getRow().getString(1).toString())
@@ -870,8 +921,284 @@ public class KafkaSaslPlainAuthenticationITCase {
                         });
     }
 
+    private static RowType metadataType() {
+        return DataTypes.ROW(
+                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                DataTypes.FIELD("partition", DataTypes.INT()));
+    }
+
+    private static void assertMetadata(
+            InternalRow row, int position, long timestamp, int partition) {
+        InternalRow metadata = row.getRow(position, 3);
+        assertThat(metadata.getFieldCount()).isEqualTo(3);
+        assertThat(metadata.getTimestampLtz(0, 3).getEpochMillisecond()).isEqualTo(timestamp);
+        assertThat(metadata.getInt(1)).isZero();
+        assertThat(metadata.getInt(2)).isEqualTo(partition);
+    }
+
+    @ParameterizedTest(name = "SASL v{0} {1} nullable={2} native null append")
+    @CsvSource({
+        "0,flat,true",
+        "1,flat,true",
+        "0,nested,true",
+        "1,nested,true",
+        "0,flat,false",
+        "1,flat,false",
+        "0,nested,false",
+        "1,nested,false"
+    })
+    public void testAuthenticatedJsonNullAppendAndNotNullAtomicity(
+            short version, String layout, boolean nullable) throws Exception {
+        boolean nested = layout.equals("nested");
+        TablePath path = TablePath.of(DATABASE, "sasl_null_json");
+        Schema.Builder schema = Schema.newBuilder().column("_kafka_key", DataTypes.BYTES());
+        if (nested) {
+            // A nullable parent accepts a null value even when its child is NOT NULL.
+            schema.column(
+                    "_kafka_value",
+                    RowType.builder()
+                            .field("message", DataTypes.STRING().copy(false))
+                            .field("count", DataTypes.INT())
+                            .build()
+                            .copy(nullable));
+        } else {
+            schema.column("message", DataTypes.STRING().copy(nullable))
+                    .column("count", DataTypes.INT());
+        }
+        schema.column("_kafka_headers", DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()))
+                .column("_kafka_metadata", metadataType())
+                .column("_kafka_rescue", DataTypes.STRING());
+        flussAdmin
+                .createTable(
+                        path,
+                        TableDescriptor.builder()
+                                .schema(schema.build())
+                                .distributedBy(1)
+                                .logFormat(LogFormat.ARROW)
+                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
+                                .build(),
+                        false)
+                .get();
+        try {
+            FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(
+                    new TableBucket(flussAdmin.getTableInfo(path).get().getTableId(), 0));
+            grantWriterAccess(path, OperationType.ALL);
+            String valid = new String(VALUE, StandardCharsets.UTF_8);
+            try (Socket socket = connectKafka()) {
+                authenticate(socket, version);
+                ProduceRequest allNull =
+                        produceRequest(path, contractPartition(0, (String) null, null));
+                assertPartition(
+                        (ProduceResponse) sendRequest(socket, allNull),
+                        0,
+                        nullable ? Errors.NONE : Errors.INVALID_RECORD,
+                        nullable ? 0L : -1L);
+                ProduceRequest mixed =
+                        produceRequest(path, contractPartition(0, valid, null, valid));
+                mixed.data().topicData().iterator().next().setName(path.getTableName());
+                assertPartition(
+                        (ProduceResponse) sendRequest(socket, mixed),
+                        0,
+                        nullable ? Errors.NONE : Errors.INVALID_RECORD,
+                        nullable ? 2L : -1L);
+                if (!nullable) {
+                    assertPartition(
+                            (ProduceResponse)
+                                    sendRequest(
+                                            socket,
+                                            produceRequest(path, contractPartition(0, valid))),
+                            0,
+                            Errors.NONE,
+                            0L);
+                }
+            }
+            assertNativeRecords(
+                    path,
+                    0,
+                    nullable ? 5 : 1,
+                    record -> {
+                        InternalRow row = record.getRow();
+                        assertThat(row.getBytes(0)).containsExactly(KEY);
+                        boolean nullValue =
+                                nullable && (record.logOffset() < 2 || record.logOffset() == 3);
+                        if (nullValue) {
+                            assertThat(row.isNullAt(1)).isTrue();
+                            if (!nested) {
+                                assertThat(row.isNullAt(2)).isTrue();
+                            }
+                        } else {
+                            InternalRow value = nested ? row.getRow(1, 2) : row;
+                            int start = nested ? 0 : 1;
+                            assertThat(value.getString(start).toString())
+                                    .isEqualTo("authenticated-value");
+                            assertThat(value.getInt(start + 1)).isEqualTo(42);
+                        }
+                        int headers = nested ? 2 : 3;
+                        assertThat(row.getMap(headers).size()).isEqualTo(1);
+                        assertThat(row.getMap(headers).keyArray().getString(0).toString())
+                                .isEqualTo("source");
+                        assertThat(row.getMap(headers).valueArray().getBytes(0))
+                                .containsExactly((byte) 2);
+                        assertMetadata(row, headers + 1, 123L, 0);
+                        assertThat(row.isNullAt(headers + 2)).isTrue();
+                    });
+        } finally {
+            flussAdmin.dropTable(path, true).get();
+        }
+    }
+
+    @Test
+    public void testAuthenticatedRequestsDoNotRecreateDeletedDefaultDatabase() throws Exception {
+        String defaultDatabase = "sasl_default";
+        String full = defaultDatabase + "." + TABLE_NAME;
+        Configuration config = clusterConfig();
+        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, defaultDatabase);
+        // The native API protects the built-in fluss database from deletion. A configured
+        // default database exercises real DDL deletion without bypassing that Core guard.
+        FlussClusterExtension cluster =
+                FlussClusterExtension.builder()
+                        .setNumOfTabletServers(1)
+                        .setClusterConf(config)
+                        .setTabletServerListeners("FLUSS://localhost:0,KAFKA://localhost:0")
+                        .build();
+        cluster.start();
+        try (Connection nativeConnection =
+                        ConnectionFactory.createConnection(cluster.getClientConfig());
+                org.apache.fluss.client.admin.Admin admin = nativeConnection.getAdmin()) {
+            assertThat(admin.databaseExists(DATABASE).get()).isTrue();
+            assertThat(admin.databaseExists(defaultDatabase).get()).isTrue();
+            admin.createDatabase("other", org.apache.fluss.metadata.DatabaseDescriptor.EMPTY, false)
+                    .get();
+            TablePath other = TablePath.of("other", TABLE_NAME);
+            TableDescriptor descriptor =
+                    TableDescriptor.builder()
+                            .schema(
+                                    Schema.newBuilder()
+                                            .column("_kafka_value", DataTypes.BYTES())
+                                            .build())
+                            .distributedBy(1)
+                            .logFormat(LogFormat.ARROW)
+                            .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                            .build();
+            for (TablePath path : Arrays.asList(TablePath.of(defaultDatabase, TABLE_NAME), other)) {
+                admin.createTable(path, descriptor, false).get();
+                cluster.waitAndGetLeader(
+                        new TableBucket(admin.getTableInfo(path).get().getTableId(), 0));
+                AclBinding acl =
+                        new AclBinding(
+                                Resource.table(path),
+                                new AccessControlEntry(
+                                        new FlussPrincipal(USERNAME, "User"),
+                                        AccessControlEntry.WILD_CARD_HOST,
+                                        OperationType.ALL,
+                                        PermissionType.ALLOW));
+                admin.createAcls(Collections.singletonList(acl)).all().get();
+                cluster.waitUntilAuthenticationSync(Collections.singletonList(acl), true);
+            }
+            try (Socket v0 = connectKafka(cluster.getTabletServerNodes("KAFKA").get(0));
+                    Socket v1 = connectKafka(cluster.getTabletServerNodes("KAFKA").get(0))) {
+                authenticateV0(v0);
+                authenticateV1(v1);
+                // Warm both names on both authenticated connections before deleting the database.
+                for (Socket socket : Arrays.asList(v0, v1)) {
+                    for (String topic : Arrays.asList(full, TABLE_NAME)) {
+                        assertThat(metadata(socket, topic).data().topics().find(topic).errorCode())
+                                .isEqualTo(Errors.NONE.code());
+                    }
+                }
+                admin.dropDatabase(defaultDatabase, false, true).get();
+                for (Socket socket : Arrays.asList(v0, v1)) {
+                    retry(
+                            Duration.ofSeconds(30),
+                            () -> {
+                                for (String topic : Arrays.asList(TABLE_NAME, full)) {
+                                    assertThat(
+                                                    metadata(socket, topic)
+                                                            .data()
+                                                            .topics()
+                                                            .find(topic)
+                                                            .errorCode())
+                                            .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+                                    ProduceRequest request = produceRequest((byte[]) null);
+                                    request.data().topicData().iterator().next().setName(topic);
+                                    assertPartition(
+                                            (ProduceResponse) sendRequest(socket, request),
+                                            0,
+                                            Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                                            -1L);
+                                }
+                            });
+                    assertThat(
+                                    metadata(socket, other.toString())
+                                            .data()
+                                            .topics()
+                                            .find(other.toString())
+                                            .errorCode())
+                            .isEqualTo(Errors.NONE.code());
+                    ProduceRequest request =
+                            produceRequest(other, contractPartition(0, (String) null));
+                    assertPartition(
+                            (ProduceResponse) sendRequest(socket, request),
+                            0,
+                            Errors.NONE,
+                            socket == v0 ? 0L : 1L);
+                    assertThat(admin.databaseExists(defaultDatabase).get()).isFalse();
+                }
+                try (Table table = nativeConnection.getTable(other);
+                        LogScanner scanner = table.newScan().createLogScanner()) {
+                    scanner.subscribeFromBeginning(0);
+                    List<ScanRecord> records = new ArrayList<>();
+                    retry(
+                            Duration.ofSeconds(30),
+                            () -> {
+                                scanner.poll(Duration.ofMillis(100)).forEach(records::add);
+                                assertThat(records).hasSize(2);
+                            });
+                    assertThat(records).extracting(ScanRecord::logOffset).containsExactly(0L, 1L);
+                    assertThat(records)
+                            .allSatisfy(record -> assertThat(record.getRow().isNullAt(0)).isTrue());
+                }
+            }
+        } finally {
+            cluster.close();
+        }
+    }
+
+    @Test
+    public void testV1AuthenticationFailureDoesNotExposeCredentials() throws Exception {
+        try (Socket socket = connectKafka()) {
+            handshake(socket, (short) 1);
+            SaslAuthenticateResponse response =
+                    (SaslAuthenticateResponse)
+                            sendRequest(
+                                    socket,
+                                    new SaslAuthenticateRequest(
+                                            new SaslAuthenticateRequestData()
+                                                    .setAuthBytes(
+                                                            ("\u0000"
+                                                                            + USERNAME
+                                                                            + "\u0000incorrect-secret")
+                                                                    .getBytes(
+                                                                            StandardCharsets
+                                                                                    .UTF_8)),
+                                            (short) 2));
+            assertThat(response.error()).isEqualTo(Errors.SASL_AUTHENTICATION_FAILED);
+            assertThat(response.data().errorMessage())
+                    .doesNotContain(USERNAME, PASSWORD, "incorrect-secret");
+            assertThat(response.data().authBytes()).isEmpty();
+        }
+    }
+
     private static Socket connectKafka() throws Exception {
-        ServerNode node = FLUSS_CLUSTER_EXTENSION.getTabletServerNodes("KAFKA").get(0);
+        return connectKafka(FLUSS_CLUSTER_EXTENSION.getTabletServerNodes("KAFKA").get(0));
+    }
+
+    private static Socket connectKafka(ServerNode node) throws Exception {
         Socket socket = new Socket();
         try {
             socket.connect(new InetSocketAddress(node.host(), node.port()), 5000);
@@ -1031,21 +1358,21 @@ public class KafkaSaslPlainAuthenticationITCase {
     }
 
     private void assertFlussRecord() throws Exception {
-        try (Table table = connection.getTable(TablePath.of(DATABASE, TABLE_NAME));
-                LogScanner scanner = table.newScan().createLogScanner()) {
-            scanner.subscribeFromBeginning(0);
-            for (int attempt = 0; attempt < 30; attempt++) {
-                ScanRecords records = scanner.poll(Duration.ofSeconds(1));
-                for (ScanRecord record : records) {
-                    assertThat(record.getRow().getBytes(0)).containsExactly(KEY);
-                    assertThat(record.getRow().getString(1).toString())
-                            .isEqualTo("authenticated-value");
-                    assertThat(record.getRow().getInt(2)).isEqualTo(42);
-                    return;
-                }
-            }
-        }
-        throw new AssertionError("Authenticated Kafka record was not visible through Fluss.");
+        assertNativeRecords(
+                TablePath.of(DATABASE, TABLE_NAME),
+                0,
+                2,
+                record -> {
+                    InternalRow row = record.getRow();
+                    assertThat(row.getBytes(0)).containsExactly(KEY);
+                    if (record.logOffset() == 0) {
+                        assertThat(row.isNullAt(1)).isTrue();
+                        assertThat(row.isNullAt(2)).isTrue();
+                    } else {
+                        assertThat(row.getString(1).toString()).isEqualTo("authenticated-value");
+                        assertThat(row.getInt(2)).isEqualTo(42);
+                    }
+                });
     }
 
     private void grantWriterAccess(OperationType operation) throws Exception {
