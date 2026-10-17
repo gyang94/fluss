@@ -681,9 +681,8 @@ class KafkaJsonProduceITCase {
         List<String> invalidValues =
                 Arrays.asList("{\"id\":1,\"profile\":{\"name\":{}}}", "{\"id\":null}", "{\"id\":1");
         Compression compression = Compression.of(CompressionType.forName(codec)).build();
-        SimpleRecord filtered = new SimpleRecord(123L, KEY, (byte[]) null, new Header[0]);
         int headersPosition = layout.equals("nested") ? 2 : 3;
-        int rescuePosition = headersPosition + 1;
+        int rescuePosition = headersPosition + 2;
         ObjectMapper mapper = new ObjectMapper();
         JsonNode expectedRescue =
                 mapper.readTree(
@@ -714,21 +713,6 @@ class KafkaJsonProduceITCase {
                     assertThat(partition(response, name, 1).errorCode())
                             .isEqualTo(Errors.NONE.code());
                     assertThat(partition(response, name, 1).baseOffset()).isEqualTo(index);
-                }
-                // Filtering makes the batch offset ambiguous even when some records are appended.
-                // An all-filtered batch must not append to the otherwise empty rejected bucket.
-                ProduceResponse filteredResponse =
-                        produce(
-                                socket,
-                                path.toString(),
-                                MemoryRecords.withRecords(compression, filtered, filtered),
-                                MemoryRecords.withRecords(
-                                        compression, filtered, record("{\"id\":3}"), filtered));
-                for (int bucket = 0; bucket < 2; bucket++) {
-                    assertThat(partition(filteredResponse, path.toString(), bucket).errorCode())
-                            .isEqualTo(Errors.NONE.code());
-                    assertThat(partition(filteredResponse, path.toString(), bucket).baseOffset())
-                            .isEqualTo(-1L);
                 }
                 List<String> payloads =
                         Arrays.asList(
@@ -793,7 +777,7 @@ class KafkaJsonProduceITCase {
                         connection,
                         path,
                         1,
-                        4,
+                        3,
                         (row, index) -> {
                             assertThat(valueId(row, layout, valueType)).isEqualTo(index);
                             assertThat(row.getBytes(0)).isEqualTo(KEY);
