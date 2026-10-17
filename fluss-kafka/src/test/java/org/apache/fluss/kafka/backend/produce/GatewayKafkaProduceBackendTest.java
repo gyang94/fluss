@@ -240,19 +240,21 @@ class GatewayKafkaProduceBackendTest {
     void testDisableDuringConversionPreventsNativeAppend() throws Exception {
         TestingProduceService service = new TestingProduceService();
         AtomicBoolean enabled = new AtomicBoolean(true);
-        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        KafkaRecordTranscoder transcoder =
+                new KafkaRecordTranscoder() {
+                    @Override
+                    public BytesView transcode(
+                            int partitionId, List<Record> records, TableInfo tableInfo)
+                            throws Exception {
+                        enabled.set(false);
+                        return arrow.transcode(partitionId, records, tableInfo);
+                    }
+                };
         GatewayKafkaProduceBackend backend =
-                new GatewayKafkaProduceBackend(
-                        service,
-                        service,
-                        mapper(),
-                        (records, table) -> {
-                            enabled.set(false);
-                            return transcoder.transcode(records, table);
-                        });
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
         assertErrors(backend.write(guardedCommand(enabled)).join(), Errors.BROKER_NOT_AVAILABLE);
         assertThat(service.append).isNull();
-        assertThat(service.drains).isZero();
     }
 
     @Test

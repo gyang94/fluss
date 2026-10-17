@@ -212,18 +212,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             checkInterrupted();
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended =
-                    command.submitIfServiceAvailable(
-                            () -> {
-                                try {
-                                    return gateway.produceLog(request);
-                                } finally {
-                                    // Native append is synchronous; replication acknowledgements
-                                    // may complete
-                                    // later. Wake replica fetches only after submission actually
-                                    // starts.
-                                    service.tryCompleteActions();
-                                }
-                            });
+                    command.submitIfServiceAvailable(() -> gateway.produceLog(request));
             return appended.handle(
                     (response, failure) ->
                             failure == null
