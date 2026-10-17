@@ -264,9 +264,9 @@ Kafka protocol compatibility is still in development.
 Kafka listeners share `netty.connection.max-idle-time` with native Fluss RPC listeners (see [Netty](#netty)).
 The default is `10min`; connections close when neither reads nor writes occur for the configured duration.
 
-Kafka clients can access a topic only after its corresponding table has been created in Fluss.
 Kafka topics map to Fluss tables using `<database>.<table>`. Topic names without a database prefix
 map to the same-named table in the database configured by `kafka.default.database` (default: `fluss`).
+Kafka clients can access a topic only after its corresponding table has been created in Fluss.
 
 ### Kafka table properties
 
