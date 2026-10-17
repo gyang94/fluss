@@ -264,16 +264,9 @@ Kafka protocol compatibility is still in development.
 Kafka listeners share `netty.connection.max-idle-time` with native Fluss RPC listeners (see [Netty](#netty)).
 The default is `10min`; connections close when neither reads nor writes occur for the configured duration.
 
-Kafka tables must be created through Fluss or the Flink Fluss catalog. A topic named
-`sales.orders` maps to that table directly; `orders` maps to the same-named table in
-`kafka.default.database` (by default, `fluss.orders`). The native `fluss` database is created only
-when the cluster has no databases; Kafka reuses this database when its default is `fluss`.
-If Kafka is enabled and a different default database is configured, the coordinator creates it
-if missing. Existing databases are preserved; other databases and all tables must be created
-explicitly. Reverse mapping always uses
-the fully qualified name. All TabletServers must use the same default database. Changing it
-redirects unqualified names, so migrate clients to fully qualified names before changing the
-configuration. The prototype `kafka.database` option is no longer used.
+Kafka clients can access a topic only after its corresponding table has been created in Fluss.
+Kafka topics map to Fluss tables using `<database>.<table>`. Topic names without a database prefix
+map to the same-named table in the database configured by `kafka.default.database` (default: `fluss`).
 
 ### Kafka table properties
 
