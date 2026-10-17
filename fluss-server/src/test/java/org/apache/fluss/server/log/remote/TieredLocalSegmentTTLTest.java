@@ -97,6 +97,54 @@ final class TieredLocalSegmentTTLTest extends RemoteLogTestBase {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    void testFirstActiveSegmentRolledAfterTtlWithoutPreviousUploads(boolean partitionTable)
+            throws Exception {
+        TableBucket tb = makeTableBucket(partitionTable);
+        makeLogTableAsLeader(tb, partitionTable);
+        LogTablet logTablet = replicaManager.getReplicaOrException(tb).getLogTablet();
+        RemoteLogTablet remoteLog = remoteLogManager.remoteLogTablet(tb);
+
+        assertThat(conf.get(ConfigOptions.LOG_RETENTION_ROLL_ACTIVE_SEGMENT_ENABLED)).isTrue();
+        addMultiSegmentsToLogTablet(logTablet, 1);
+        assertThat(logTablet.localLogEndOffset()).isEqualTo(10L);
+        assertThat(logTablet.getHighWatermark()).isEqualTo(10L);
+
+        // The first segment is still active, so nothing has ever been uploaded.
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        assertThat(remoteLog.allRemoteLogSegments()).isEmpty();
+        assertThat(remoteLog.getHighestCopiedEndOffset()).isEqualTo(-1L);
+        logManager.cleanupExpiredLocalLogSegments();
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isZero();
+
+        // Expire the local TTL (1h), but not the remote TTL (2h), without any new writes.
+        manualClock.advanceTime(Duration.ofMinutes(90));
+        logManager.cleanupExpiredLocalLogSegments();
+
+        assertThat(logTablet.activeLogSegment().getBaseOffset())
+                .as("The first expired active segment should roll without previous uploads")
+                .isEqualTo(10L);
+        assertThat(logTablet.getSegments()).hasSize(2);
+        assertThat(logTablet.localLogStartOffset()).isZero();
+
+        // Further cleanup must retain the sealed segment until it has been uploaded.
+        logManager.cleanupExpiredLocalLogSegments();
+        assertThat(remoteLog.getHighestCopiedEndOffset()).isEqualTo(-1L);
+        assertThat(logTablet.getSegments()).hasSize(2);
+        assertThat(logTablet.localLogStartOffset()).isZero();
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(10L);
+
+        // Upload the sealed segment before allowing local retention to delete it.
+        remoteLogTaskScheduler.triggerPeriodicScheduledTasks();
+        assertThat(remoteLog.getRemoteLogEndOffset()).hasValue(10L);
+        logManager.cleanupExpiredLocalLogSegments();
+        assertThat(logTablet.getSegments()).hasSize(1);
+        assertThat(logTablet.localLogStartOffset()).isEqualTo(10L);
+        assertThat(logTablet.activeLogSegment().getBaseOffset()).isEqualTo(10L);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     void testExpiredLocalSegmentsRetainedWithoutHighestCopiedEndOffset(boolean partitionTable)
             throws Exception {
         TableBucket tb = makeTableBucket(partitionTable);
