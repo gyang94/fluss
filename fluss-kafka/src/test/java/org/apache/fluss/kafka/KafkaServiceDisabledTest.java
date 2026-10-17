@@ -619,8 +619,7 @@ class KafkaServiceDisabledTest {
         final KafkaServiceController controller;
         final RequestChannel requests = new RequestChannel(100);
         final TestingTabletGatewayService service = spy(new TestingTabletGatewayService());
-        final KafkaRequestHandler handler =
-                new KafkaRequestHandler(new Configuration(), service, service);
+        final KafkaRequestHandler handler = new KafkaRequestHandler(new Configuration(), service);
         final AtomicInteger authenticators = new AtomicInteger();
         final EmbeddedChannel channel;
 
