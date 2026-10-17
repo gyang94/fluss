@@ -69,22 +69,6 @@ public final class KafkaRequestDispatcher {
 
         KafkaApiSpec spec = handler.apiSpec();
         if (!spec.supportsVersion(request.apiVersion())) {
-            if (shouldDispatchBeforeVersionValidation(request)) {
-                try {
-                    // Preserve enabled-service ApiVersions/SASL behavior, but decide it under
-                    // admission so a simultaneous disable cannot replace a version error by 8.
-                    return request.serviceGuard()
-                            .execute(
-                                    () ->
-                                            invoke(
-                                                    handler,
-                                                    KafkaRequestContext.fromRequest(request),
-                                                    abstractRequest))
-                            .thenApply(response -> response);
-                } catch (KafkaServiceUnavailableException disabled) {
-                    // Disabled requests always reach the normal version error below.
-                }
-            }
             return completedErrorResponse(
                     abstractRequest,
                     new UnsupportedVersionException(
@@ -170,11 +154,6 @@ public final class KafkaRequestDispatcher {
             return CompletableFuture.completedFuture(null);
         }
         return completedErrorResponse(body, new KafkaServiceUnavailableException());
-    }
-
-    private static boolean shouldDispatchBeforeVersionValidation(KafkaRequest request) {
-        return request.apiKey() == ApiKeys.API_VERSIONS
-                && request.saslConnection().isAuthenticating();
     }
 
     @SuppressWarnings("unchecked")
