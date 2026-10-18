@@ -39,7 +39,7 @@ public final class KafkaTopicMapper {
     private final String defaultDatabase;
 
     /** Creates a mapper using the default database configuration. */
-    public KafkaTopicMapper() {
+    KafkaTopicMapper() {
         this(new Configuration());
     }
 
@@ -62,7 +62,7 @@ public final class KafkaTopicMapper {
                         : TablePath.of(
                                 topicName.substring(0, separator),
                                 topicName.substring(separator + 1));
-        if (!isMappedTable(path)) {
+        if (!isMappedTableValid(path)) {
             throw new InvalidTopicException("Canonical Kafka topic name is invalid: " + path);
         }
         return path;
@@ -70,7 +70,7 @@ public final class KafkaTopicMapper {
 
     /** Returns the fully qualified Kafka name of a representable Fluss table. */
     public String toTopicName(TablePath tablePath) {
-        if (!isMappedTable(tablePath)) {
+        if (!isMappedTableValid(tablePath)) {
             throw new InvalidTopicException(
                     "Fluss table cannot be represented as a Kafka database.table name: "
                             + tablePath);
@@ -78,8 +78,11 @@ public final class KafkaTopicMapper {
         return tablePath.toString();
     }
 
-    /** Returns whether a Fluss user table has a valid, fully qualified Kafka topic name. */
-    public boolean isMappedTable(TablePath tablePath) {
+    /**
+     * Returns whether a table path maps to a valid, fully qualified Kafka topic name. This does not
+     * check whether the table exists or enables Kafka compatibility.
+     */
+    public boolean isMappedTableValid(TablePath tablePath) {
         return KafkaTableSchema.isValidTablePath(tablePath);
     }
 

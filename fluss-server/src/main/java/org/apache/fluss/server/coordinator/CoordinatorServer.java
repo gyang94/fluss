@@ -64,7 +64,9 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -553,15 +555,15 @@ public class CoordinatorServer extends ServerBase {
 
     @VisibleForTesting
     static void createDefaultDatabases(MetadataManager metadataManager, Configuration conf) {
-        List<String> databases = metadataManager.listDatabases();
+        Set<String> databases = new HashSet<>(metadataManager.listDatabases());
         if (databases.isEmpty()) {
             metadataManager.createDatabase(DEFAULT_DATABASE, DatabaseDescriptor.EMPTY, true);
+            databases.add(DEFAULT_DATABASE);
             LOG.info("Created default database '{}' because no database exists.", DEFAULT_DATABASE);
         }
         if (conf.get(ConfigOptions.KAFKA_ENABLED)) {
             String kafkaDatabase = conf.get(ConfigOptions.KAFKA_DEFAULT_DATABASE);
-            // The native default database follows the cluster initialization logic above.
-            if (!DEFAULT_DATABASE.equals(kafkaDatabase) && !databases.contains(kafkaDatabase)) {
+            if (!databases.contains(kafkaDatabase)) {
                 metadataManager.createDatabase(kafkaDatabase, DatabaseDescriptor.EMPTY, true);
                 LOG.info("Created default database '{}' for Kafka protocol.", kafkaDatabase);
             }

@@ -149,10 +149,6 @@ public class TableDescriptorValidation {
     /** Validates the schema after altering table columns. */
     @Internal
     public static void validateAlterTableSchema(TableInfo table, Schema newSchema) {
-        TableDescriptor updated =
-                TableDescriptor.builder(table.toTableDescriptor()).schema(newSchema).build();
-        KafkaTableSchema.validate(updated);
-        KafkaTableSchema.validateTablePath(table.getTablePath(), updated);
         checkSystemColumns(newSchema.getRowType());
         if (table.getTableConfig()
                 .getMergeEngineType()
@@ -162,6 +158,10 @@ public class TableDescriptorValidation {
         } else {
             validateNoAggregationFunctions(newSchema);
         }
+        TableDescriptor updated =
+                TableDescriptor.builder(table.toTableDescriptor()).schema(newSchema).build();
+        KafkaTableSchema.validate(updated);
+        KafkaTableSchema.validateTablePath(table.getTablePath(), updated);
     }
 
     private static void checkTableLakeFormatMatchesCluster(

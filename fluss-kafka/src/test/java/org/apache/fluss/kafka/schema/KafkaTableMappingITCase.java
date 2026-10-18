@@ -19,6 +19,9 @@ package org.apache.fluss.kafka.schema;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.ValueConversionLayout;
+import org.apache.fluss.config.ValueConversionType;
+import org.apache.fluss.exception.InvalidConfigException;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.metadata.KafkaTableSchema;
@@ -223,6 +226,67 @@ class KafkaTableMappingITCase {
         assertThat(after.getSchemaId()).isEqualTo(before.getSchemaId());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"value", "system", "nested"})
+    void testNotNullFieldsAreRejectedBeforePersistence(String field) throws Exception {
+        boolean system = "system".equals(field);
+        String column = system ? "_kafka_metadata" : "payload";
+        DataType type =
+                system
+                        ? DataTypes.ROW(
+                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                                DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                                DataTypes.FIELD("partition", DataTypes.INT().copy(false)))
+                        : "nested".equals(field)
+                                ? DataTypes.ARRAY(
+                                        DataTypes.MAP(
+                                                DataTypes.STRING(),
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                "id",
+                                                                DataTypes.INT().copy(false)))))
+                                : DataTypes.INT().copy(false);
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(Schema.newBuilder().column(column, type).build())
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                        .build();
+        TablePath path = TablePath.of("ddl", "not_null_" + field);
+        gateway.createDatabase(newCreateDatabaseRequest("ddl", true)).get();
+        assertThatThrownBy(
+                        () ->
+                                gateway.createTable(newCreateTableRequest(path, descriptor, false))
+                                        .get())
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("nullable fields");
+        assertThat(gateway.tableExists(newTableExistsRequest(path)).get().isExists()).isFalse();
+        assertThat(CLUSTER.getZooKeeperClient().getCurrentSchemaId(path)).isZero();
+        createTable(
+                CLUSTER,
+                path,
+                TableDescriptor.builder(descriptor)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
+                        .build());
+        GetTableInfoResponse before = info(path);
+        assertThatThrownBy(() -> set(path, Collections.singletonMap("table.kafka.enabled", "true")))
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("nullable fields");
+        assertUnchanged(path, before);
+
+        // Native schema evolution already rejects new NOT NULL columns. Kafka additionally
+        // rejects NOT NULL children of otherwise nullable columns.
+        if (type.isNullable()) {
+            TablePath alter = TablePath.of("ddl", "alter_not_null_" + field);
+            createTable(CLUSTER, alter, jsonTable("flat", DataTypes.STRING()).build());
+            GetTableInfoResponse beforeAlter = info(alter);
+            assertThatThrownBy(() -> addColumn(alter, system ? column : "invalid", type))
+                    .hasCauseInstanceOf(InvalidTableException.class)
+                    .hasStackTraceContaining("nullable fields");
+            assertUnchanged(alter, beforeAlter);
+        }
+    }
+
     private static TableDescriptor.Builder jsonTable(String layout, DataType businessType) {
         Schema schema =
                 "flat".equals(layout)
@@ -230,15 +294,16 @@ class KafkaTableMappingITCase {
                         : Schema.newBuilder()
                                 .column(
                                         "_kafka_value",
-                                        DataTypes.ROW(DataTypes.FIELD("payload", businessType)))
+                                        DataTypes.ROW(DataTypes.FIELD("_kafka_key", businessType)))
                                 .build();
         TableDescriptor.Builder builder =
-                enabled()
+                TableDescriptor.builder()
                         .schema(schema)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json");
-        // Omitted flat layout must remain omitted through CREATE and ALTER.
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true);
+        // Read-time JSON defaults must remain omitted through CREATE and ALTER.
         if ("nested".equals(layout)) {
-            builder.property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout);
+            builder.property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), layout);
         }
         return builder;
     }
@@ -258,16 +323,41 @@ class KafkaTableMappingITCase {
                         .column("_kafka_rescue", DataTypes.STRING())
                         .build();
         TableDescriptor descriptor =
-                enabled()
+                TableDescriptor.builder()
                         .schema(schema)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .distributedBy(1)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                        .customProperty("table.kafka.convert.value.type", "custom-value")
+                        .customProperty("kafka.value.format", "custom-format")
+                        .customProperty("fluss.owner", "team")
                         .build();
         createTable(CLUSTER, path, descriptor);
         TableDescriptor stored = stored(path);
         assertThat(stored.getSchema()).isEqualTo(schema);
-        assertThat(kafkaProperties(stored)).isEqualTo(kafkaProperties(descriptor));
+        assertThat(stored.getCustomProperties()).isEqualTo(descriptor.getCustomProperties());
+        assertThat(kafkaProperties(stored))
+                .isEqualTo(Collections.singletonMap("table.kafka.enabled", "true"));
         assertThat(new KafkaTopicSchemaResolver().resolve(stored).valueProjection().positions())
                 .containsExactly(1);
+        set(path, Collections.singletonMap("table.kafka.convert.key.type", "binary"));
+        assertThat(KafkaTableSchema.resolve(stored(path)))
+                .isEqualTo(KafkaTableSchema.resolve(stored));
+        reset(path, "table.kafka.convert.key.type");
+        assertThat(stored(path)).isEqualTo(stored);
+        TableDescriptor unknownOption =
+                TableDescriptor.builder(descriptor)
+                        .property("table.kafka.unknown", "anything")
+                        .build();
+        assertThatThrownBy(
+                        () ->
+                                gateway.createTable(
+                                                newCreateTableRequest(
+                                                        TablePath.of("ddl", "unknown_option"),
+                                                        unknownOption,
+                                                        false))
+                                        .get())
+                .hasCauseInstanceOf(InvalidConfigException.class)
+                .hasStackTraceContaining("table.kafka.unknown");
     }
 
     @Test
@@ -285,10 +375,21 @@ class KafkaTableMappingITCase {
         expected.put("table.kafka.enabled", "true");
         assertThat(enabled.getProperties()).isEqualTo(expected);
         assertThat(enabled.getSchema()).isEqualTo(before.getSchema());
-        Map<String, String> invalid = new HashMap<>();
-        invalid.put("table.kafka.convert.value.type", "string");
-        invalid.put("table.kafka.convert.key.type", "binary");
-        assertThatThrownBy(() -> set(path, invalid))
+        assertThatThrownBy(
+                        () ->
+                                set(
+                                        path,
+                                        Collections.singletonMap(
+                                                "table.kafka.convert.key.type", "binary")))
+                .hasCauseInstanceOf(InvalidTableException.class)
+                .hasStackTraceContaining("requires _kafka_key BYTES");
+        assertThat(stored(path)).isEqualTo(enabled);
+        assertThatThrownBy(
+                        () ->
+                                set(
+                                        path,
+                                        Collections.singletonMap(
+                                                "table.kafka.convert.value.type", "string")))
                 .hasCauseInstanceOf(InvalidTableException.class);
         assertThat(stored(path)).isEqualTo(enabled);
         assertThatThrownBy(() -> reset(path, "table.kafka.convert.value.type"))
@@ -304,6 +405,38 @@ class KafkaTableMappingITCase {
         assertThatThrownBy(() -> set(path, Collections.singletonMap("table.kafka.enabled", "true")))
                 .hasCauseInstanceOf(InvalidTableException.class);
         assertThat(stored(path)).isEqualTo(staged);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"binary", "string"})
+    void testNonJsonLayoutDoesNotChangeMapping(String type) throws Exception {
+        TablePath path = TablePath.of("ddl", type + "_layout");
+        TableDescriptor descriptor =
+                enabled()
+                        .schema(
+                                Schema.newBuilder()
+                                        .column(
+                                                "_kafka_value",
+                                                "binary".equals(type)
+                                                        ? DataTypes.BYTES()
+                                                        : DataTypes.STRING())
+                                        .build())
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), type)
+                        .build();
+        createTable(CLUSTER, path, descriptor);
+        TableDescriptor before = stored(path);
+        KafkaTableSchema expected = KafkaTableSchema.resolve(before);
+        assertThat(expected.valueConversionLayout()).isNull();
+        assertThat(stored(path).getProperties())
+                .doesNotContainKey("table.kafka.convert.value.layout");
+        for (ValueConversionLayout layout : ValueConversionLayout.values()) {
+            set(path, Collections.singletonMap("table.kafka.convert.value.layout", layout.name()));
+            assertThat(KafkaTableSchema.resolve(stored(path))).isEqualTo(expected);
+            assertThat(stored(path).getProperties())
+                    .containsEntry("table.kafka.convert.value.layout", layout.name());
+        }
+        reset(path, "table.kafka.convert.value.layout");
+        assertThat(stored(path)).isEqualTo(before);
     }
 
     @Test
@@ -496,6 +629,6 @@ class KafkaTableMappingITCase {
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary");
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, ValueConversionType.BINARY);
     }
 }

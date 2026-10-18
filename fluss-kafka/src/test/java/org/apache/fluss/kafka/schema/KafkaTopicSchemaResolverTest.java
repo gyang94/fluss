@@ -43,7 +43,8 @@ class KafkaTopicSchemaResolverTest {
     void testInvalidEnabledContractIsNotTreatedAsDisabled() {
         TableDescriptor table =
                 table().property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "schema_latest")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "schema_latest")
                         .build();
         assertThat(resolver.isEnabled(table)).isTrue();
         assertThatThrownBy(() -> resolver.resolve(table))
@@ -62,6 +63,6 @@ class KafkaTopicSchemaResolverTest {
     private static TableDescriptor.Builder table() {
         return TableDescriptor.builder()
                 .schema(Schema.newBuilder().column("_kafka_value", DataTypes.BYTES()).build())
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary");
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "binary");
     }
 }

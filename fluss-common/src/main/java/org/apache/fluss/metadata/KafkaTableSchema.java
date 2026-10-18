@@ -21,9 +21,12 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.TableConfig;
+import org.apache.fluss.config.ValueConversionLayout;
+import org.apache.fluss.config.ValueConversionType;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BytesType;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.MapType;
@@ -37,7 +40,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
 
@@ -66,30 +68,10 @@ public final class KafkaTableSchema {
                                     HEADERS_COLUMN,
                                     METADATA_COLUMN,
                                     RESCUE_COLUMN)));
-    private static final Set<String> OPTIONS =
-            new HashSet<>(
-                    Arrays.asList(
-                            ConfigOptions.TABLE_KAFKA_ENABLED.key(),
-                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
-                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
-                            ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE.key()));
-
-    /** Supported value conversion contracts; decoders are provided by the Kafka module. */
-    public enum ValueType {
-        BINARY,
-        STRING,
-        PARSE_JSON
-    }
-
-    /** JSON business fields either occupy the table row or the fixed value ROW column. */
-    public enum ValueLayout {
-        FLAT,
-        NESTED
-    }
 
     private final RowType rowType;
-    private final ValueType valueType;
-    private final @Nullable ValueLayout valueLayout;
+    private final ValueConversionType valueConversionType;
+    private final @Nullable ValueConversionLayout valueConversionLayout;
     private final KafkaFieldProjection valueProjection;
     private final int keyPosition;
     private final int headersPosition;
@@ -98,16 +80,16 @@ public final class KafkaTableSchema {
 
     private KafkaTableSchema(
             RowType rowType,
-            ValueType valueType,
-            @Nullable ValueLayout valueLayout,
+            ValueConversionType valueConversionType,
+            @Nullable ValueConversionLayout valueConversionLayout,
             List<Integer> valuePositions,
             int keyPosition,
             int headersPosition,
             int metadataPosition,
             int rescuePosition) {
         this.rowType = rowType;
-        this.valueType = valueType;
-        this.valueLayout = valueLayout;
+        this.valueConversionType = valueConversionType;
+        this.valueConversionLayout = valueConversionLayout;
         this.valueProjection = new KafkaFieldProjection(rowType, valuePositions);
         this.keyPosition = keyPosition;
         this.headersPosition = headersPosition;
@@ -117,7 +99,20 @@ public final class KafkaTableSchema {
 
     /** Returns only the persisted opt-in flag; schema compatibility does not imply enablement. */
     public static boolean isEnabled(TableDescriptor table) {
-        return new TableConfig(Configuration.fromMap(table.getProperties())).isKafkaEnabled();
+        String value = table.getProperties().get(ConfigOptions.TABLE_KAFKA_ENABLED.key());
+        if (value == null) {
+            return ConfigOptions.TABLE_KAFKA_ENABLED.defaultValue();
+        }
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new IllegalArgumentException(
+                "Invalid value for table.kafka.enabled: '"
+                        + value
+                        + "'. Expected true or false (case insensitive).");
     }
 
     /** Validates the Kafka contract only when the final table state enables it. */
@@ -144,7 +139,7 @@ public final class KafkaTableSchema {
         }
     }
 
-    /** Returns whether a JSON member at the value mapping level has a reserved name. */
+    /** Returns whether a name is reserved at the physical table's top level. */
     public static boolean isReservedName(String name) {
         return RESERVED_NAMES.contains(name);
     }
@@ -154,7 +149,8 @@ public final class KafkaTableSchema {
         if (!isEnabled(table)) {
             throw invalid("Kafka compatibility is disabled; table.kafka.enabled must be true.");
         }
-        validateOptions(table);
+        // The initial Kafka write path encodes Arrow batches and appends them to log tables.
+        // Other log formats require matching encoders before they can be enabled here.
         if (table.hasPrimaryKey()
                 || table.isPartitioned()
                 || new TableConfig(Configuration.fromMap(table.getProperties())).getLogFormat()
@@ -163,43 +159,21 @@ public final class KafkaTableSchema {
                     "Kafka requires a non-partitioned Arrow log table without a primary key.");
         }
         Configuration options = Configuration.fromMap(table.getProperties());
-        String value = options.get(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE);
-        if (value == null) {
-            throw invalid("Missing required table property 'table.kafka.convert.value.type'.");
-        }
-        ValueType valueType;
-        try {
-            valueType = ValueType.valueOf(value.trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException e) {
-            throw invalid(
-                    "Unsupported table.kafka.convert.value.type '"
-                            + value
-                            + "'. Expected binary, string or parse_json.");
-        }
-        String layout = options.get(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT);
-        ValueLayout valueLayout = null;
-        if (valueType == ValueType.PARSE_JSON) {
-            try {
-                valueLayout =
-                        layout == null
-                                ? ValueLayout.FLAT
-                                : ValueLayout.valueOf(layout.trim().toUpperCase(Locale.ROOT));
-            } catch (IllegalArgumentException e) {
-                throw invalid("Unsupported table.kafka.convert.value.layout '" + layout + "'.");
-            }
-        } else if (layout != null) {
-            throw invalid("table.kafka.convert.value.layout is only supported for parse_json.");
-        }
+        ValueConversionType valueConversionType =
+                options.get(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE);
+        ValueConversionLayout valueConversionLayout =
+                valueConversionType == ValueConversionType.PARSE_JSON
+                        ? options.get(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT)
+                        : null;
 
         RowType rowType = table.getSchema().getRowType();
         int keyPosition = rowType.getFieldIndex(KEY_COLUMN);
         if (keyPosition >= 0 && !(rowType.getTypeAt(keyPosition) instanceof BytesType)) {
             throw invalid("_kafka_key must be BYTES.");
         }
-        String keyType = options.get(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE);
-        if (keyType != null && (!"binary".equalsIgnoreCase(keyType.trim()) || keyPosition < 0)) {
-            throw invalid(
-                    "table.kafka.convert.key.type only supports binary and requires _kafka_key BYTES.");
+        if (options.getOptional(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE).isPresent()
+                && keyPosition < 0) {
+            throw invalid("table.kafka.convert.key.type requires _kafka_key BYTES.");
         }
         int headersPosition = rowType.getFieldIndex(HEADERS_COLUMN);
         if (headersPosition >= 0) {
@@ -222,14 +196,14 @@ public final class KafkaTableSchema {
         }
 
         List<Integer> valuePositions = new ArrayList<>();
-        if (valueLayout == ValueLayout.FLAT) {
+        if (valueConversionLayout == ValueConversionLayout.FLAT) {
             if (rowType.getFieldIndex(VALUE_COLUMN) >= 0) {
                 throw invalid(
                         "_kafka_value is reserved for binary, string or nested JSON; "
                                 + "it cannot be a flat JSON business field.");
             }
             for (int i = 0; i < rowType.getFieldCount(); i++) {
-                if (!isReservedName(rowType.getFieldNames().get(i))) {
+                if (!isReservedName(rowType.getFields().get(i).getName())) {
                     valuePositions.add(i);
                 }
             }
@@ -240,19 +214,21 @@ public final class KafkaTableSchema {
             }
             DataType type = rowType.getTypeAt(valuePosition);
             boolean valid =
-                    valueType == ValueType.BINARY
+                    valueConversionType == ValueConversionType.BINARY
                             ? type instanceof BytesType
-                            : valueType == ValueType.STRING
+                            : valueConversionType == ValueConversionType.STRING
                                     ? type instanceof StringType
                                     : type instanceof RowType;
             if (!valid) {
                 throw invalid(
                         "_kafka_value must be "
-                                + (valueType == ValueType.BINARY
+                                + (valueConversionType == ValueConversionType.BINARY
                                         ? "BYTES"
-                                        : valueType == ValueType.STRING ? "STRING" : "ROW")
+                                        : valueConversionType == ValueConversionType.STRING
+                                                ? "STRING"
+                                                : "ROW")
                                 + " for "
-                                + valueType
+                                + valueConversionType
                                 + ".");
             }
             for (String name : rowType.getFieldNames()) {
@@ -263,22 +239,12 @@ public final class KafkaTableSchema {
                                     + "' has no value mapping; this conversion targets _kafka_value only.");
                 }
             }
-            if (type instanceof RowType) {
-                for (String name : ((RowType) type).getFieldNames()) {
-                    if (isReservedName(name)) {
-                        throw invalid(
-                                "Reserved name '"
-                                        + name
-                                        + "' cannot be a nested JSON business field.");
-                    }
-                }
-            }
             valuePositions.add(valuePosition);
         }
-        if (valueType == ValueType.PARSE_JSON) {
+        if (valueConversionType == ValueConversionType.PARSE_JSON) {
             for (int position : valuePositions) {
                 DataType type = rowType.getTypeAt(position);
-                if (valueLayout == ValueLayout.NESTED) {
+                if (valueConversionLayout == ValueConversionLayout.NESTED) {
                     // The physical value container represents the JSON object root, just like
                     // the table row in flat layout; it must not add a business nesting level.
                     for (DataType field : ((RowType) type).getChildren()) {
@@ -289,10 +255,13 @@ public final class KafkaTableSchema {
                 }
             }
         }
+        for (DataField field : rowType.getFields()) {
+            validateNullable(field.getType(), field.getName());
+        }
         return new KafkaTableSchema(
                 rowType,
-                valueType,
-                valueLayout,
+                valueConversionType,
+                valueConversionLayout,
                 valuePositions,
                 keyPosition,
                 headersPosition,
@@ -302,9 +271,11 @@ public final class KafkaTableSchema {
 
     /**
      * Validates a top-level JSON business field without parser or protocol dependencies. DDL and
-     * decoder construction share this contract. Each business field starts at depth zero; ROW
-     * fields, ARRAY elements and MAP values each advance the depth by one. Nullability and scalar
-     * value constraints are enforced when decoding individual records. The JSON object root
+     * decoder construction share this contract. All currently defined Fluss types are supported
+     * except MAP types with non-STRING keys (including nested maps) and schemas nested deeper than
+     * 64 levels. Each business field starts at depth zero; ROW fields, ARRAY elements and MAP
+     * values each advance the depth by one. Table resolution separately requires nullable fields;
+     * scalar value constraints are enforced when decoding individual records. The JSON object root
      * (including the physical nested _kafka_value ROW) is not counted.
      */
     public static void validateJsonType(DataType type) {
@@ -362,21 +333,19 @@ public final class KafkaTableSchema {
         }
     }
 
-    private static void validateOptions(TableDescriptor table) {
-        for (String name : table.getProperties().keySet()) {
-            if (name.startsWith("table.kafka.") && !OPTIONS.contains(name)) {
-                throw invalid("Unsupported Kafka table property '" + name + "'.");
-            }
+    private static void validateNullable(DataType type, String path) {
+        if (!type.isNullable()) {
+            throw invalid("Kafka requires nullable fields, but '" + path + "' is NOT NULL.");
         }
-        for (String name : table.getCustomProperties().keySet()) {
-            if (name.startsWith("table.kafka.")
-                    || name.startsWith("kafka.")
-                    || name.startsWith("fluss.")) {
-                throw invalid(
-                        "Unsupported Kafka custom property '"
-                                + name
-                                + "'. Use registered table.kafka.* properties and fixed system columns.");
+        if (type instanceof RowType) {
+            for (DataField field : ((RowType) type).getFields()) {
+                validateNullable(field.getType(), path + "." + field.getName());
             }
+        } else if (type instanceof ArrayType) {
+            validateNullable(((ArrayType) type).getElementType(), path + "[]");
+        } else if (type instanceof MapType) {
+            // Fluss requires non-null MAP keys. Only values can be nulled by field-level rescue.
+            validateNullable(((MapType) type).getValueType(), path + "<value>");
         }
     }
 
@@ -402,13 +371,13 @@ public final class KafkaTableSchema {
     }
 
     /** Returns the value conversion type. */
-    public ValueType valueType() {
-        return valueType;
+    public ValueConversionType valueConversionType() {
+        return valueConversionType;
     }
 
     /** Returns the JSON layout, or null for binary/string. */
-    public @Nullable ValueLayout valueLayout() {
-        return valueLayout;
+    public @Nullable ValueConversionLayout valueConversionLayout() {
+        return valueConversionLayout;
     }
 
     /** Returns physical value targets; nested JSON projects its single ROW container. */
@@ -452,8 +421,8 @@ public final class KafkaTableSchema {
         }
         KafkaTableSchema that = (KafkaTableSchema) other;
         return rowType.equals(that.rowType)
-                && valueType == that.valueType
-                && valueLayout == that.valueLayout
+                && valueConversionType == that.valueConversionType
+                && valueConversionLayout == that.valueConversionLayout
                 && valueProjection.equals(that.valueProjection)
                 && keyPosition == that.keyPosition
                 && headersPosition == that.headersPosition
@@ -465,8 +434,8 @@ public final class KafkaTableSchema {
     public int hashCode() {
         return Objects.hash(
                 rowType,
-                valueType,
-                valueLayout,
+                valueConversionType,
+                valueConversionLayout,
                 valueProjection,
                 keyPosition,
                 headersPosition,

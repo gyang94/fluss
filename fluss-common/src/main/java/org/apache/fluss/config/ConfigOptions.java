@@ -2277,29 +2277,33 @@ public class ConfigOptions {
                             "Whether the table is exposed as a Kafka topic. Enabling validates the "
                                     + "existing schema and conversion options without adding columns or defaults.");
 
-    public static final ConfigOption<String> TABLE_KAFKA_CONVERT_VALUE_TYPE =
+    public static final ConfigOption<ValueConversionType> TABLE_KAFKA_CONVERT_VALUE_TYPE =
             key("table.kafka.convert.value.type")
-                    .stringType()
-                    .noDefaultValue()
+                    .enumType(ValueConversionType.class)
+                    .defaultValue(ValueConversionType.PARSE_JSON)
                     .withDescription(
-                            "Required when Kafka compatibility is enabled: binary, string, or parse_json. "
-                                    + "Binary and string target the declared _kafka_value column.");
+                            "Kafka value conversion: binary, string, or parse_json. "
+                                    + "Binary and string target the declared _kafka_value column. "
+                                    + "The default is used at read time without adding a table property.");
 
-    public static final ConfigOption<String> TABLE_KAFKA_CONVERT_VALUE_LAYOUT =
+    public static final ConfigOption<ValueConversionLayout> TABLE_KAFKA_CONVERT_VALUE_LAYOUT =
             key("table.kafka.convert.value.layout")
-                    .stringType()
-                    .noDefaultValue()
+                    .enumType(ValueConversionLayout.class)
+                    .defaultValue(ValueConversionLayout.FLAT)
                     .withDescription(
-                            "JSON layout: flat (the read-time default for parse_json) or nested. "
-                                    + "Nested targets _kafka_value ROW. Not allowed for binary or string.");
+                            "JSON layout for parse_json: flat maps top-level business columns; "
+                                    + "nested targets _kafka_value ROW. Ignored for binary and string, "
+                                    + "whether defaulted or explicitly configured. The default is used "
+                                    + "at read time without adding a table property.");
 
-    public static final ConfigOption<String> TABLE_KAFKA_CONVERT_KEY_TYPE =
+    public static final ConfigOption<KafkaKeyConversionType> TABLE_KAFKA_CONVERT_KEY_TYPE =
             key("table.kafka.convert.key.type")
-                    .stringType()
+                    .enumType(KafkaKeyConversionType.class)
                     .noDefaultValue()
                     .withDescription(
-                            "Optional Kafka key conversion type. Only binary is supported and requires "
-                                    + "_kafka_key BYTES. Declaring that column implies binary without persisting a default.");
+                            "Optional Kafka key conversion. Only binary is supported and requires "
+                                    + "_kafka_key BYTES. Declaring that column implies binary without "
+                                    + "adding a table property.");
 
     // ------------------------------------------------------------------------
     //  ConfigOptions for Consumer Offsets
@@ -2985,9 +2989,9 @@ public class ConfigOptions {
                     .defaultValue("fluss")
                     .withDescription(
                             "Default database for unqualified Kafka topic names. Fully qualified names may "
-                                    + "access other databases. When Kafka is enabled, a configured database other "
-                                    + "than 'fluss' is created if missing. The native 'fluss' database is created "
-                                    + "only when the cluster has no databases.");
+                                    + "access other databases. When Kafka is enabled, the coordinator creates "
+                                    + "the configured database if missing, including 'fluss'. With Kafka disabled, "
+                                    + "native initialization creates 'fluss' only when the cluster has no databases.");
 
     /**
      * Compaction style for Fluss's kv, which is same to rocksdb's, but help use avoid including

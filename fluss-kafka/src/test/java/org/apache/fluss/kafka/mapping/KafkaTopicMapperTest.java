@@ -46,7 +46,7 @@ public class KafkaTopicMapperTest {
             String topicName = database + ".orders_1-2026";
             assertThat(mapper.toTablePath(topicName)).isEqualTo(tablePath);
             assertThat(mapper.toTopicName(tablePath)).isEqualTo(topicName);
-            assertThat(mapper.isMappedTable(tablePath)).isTrue();
+            assertThat(mapper.isMappedTableValid(tablePath)).isTrue();
             assertThat(KafkaTopicMapper.isValidTopic(topicName)).isTrue();
         }
     }
@@ -121,7 +121,7 @@ public class KafkaTopicMapperTest {
                         TablePath.of(repeat('a', 201), "orders"),
                         TablePath.of("sales", repeat('a', 201)),
                         TablePath.of(repeat('a', 124), repeat('b', 125)))) {
-            assertThat(mapper.isMappedTable(invalid)).isFalse();
+            assertThat(mapper.isMappedTableValid(invalid)).isFalse();
             assertThatThrownBy(() -> mapper.toTablePath(invalid.toString()))
                     .isInstanceOf(InvalidTopicException.class);
             assertThatThrownBy(() -> mapper.toTopicName(invalid))
@@ -143,7 +143,7 @@ public class KafkaTopicMapperTest {
                         TablePath.of("__system", "orders"),
                         TablePath.of("sales", "__internal"),
                         TablePath.of("sales", "bad name"))) {
-            assertThat(mapper.isMappedTable(invalid)).isFalse();
+            assertThat(mapper.isMappedTableValid(invalid)).isFalse();
             assertThatThrownBy(() -> mapper.toTopicName(invalid))
                     .isInstanceOf(InvalidTopicException.class);
         }

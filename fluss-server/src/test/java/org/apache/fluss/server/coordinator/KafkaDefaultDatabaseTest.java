@@ -30,10 +30,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.apache.fluss.server.coordinator.CoordinatorServer.DEFAULT_DATABASE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 /** Tests startup database creation for native and Kafka default database configurations. */
 class KafkaDefaultDatabaseTest {
@@ -61,16 +65,26 @@ class KafkaDefaultDatabaseTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testNativeDefaultFollowsClusterInitialization(boolean hasDatabase) {
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void testNativeAndKafkaDefaultInitialization(boolean hasDatabase, boolean kafkaEnabled) {
         if (hasDatabase) {
             manager.createDatabase("existing", DatabaseDescriptor.EMPTY, false);
         }
         Configuration config = kafkaConfiguration(DEFAULT_DATABASE);
-        CoordinatorServer.createDefaultDatabases(manager, config);
-        CoordinatorServer.createDefaultDatabases(manager, config);
+        config.set(ConfigOptions.KAFKA_ENABLED, kafkaEnabled);
+        MetadataManager observed = spy(manager);
+        CoordinatorServer.createDefaultDatabases(observed, config);
+        CoordinatorServer.createDefaultDatabases(observed, config);
+        boolean createsDefault = !hasDatabase || kafkaEnabled;
         assertThat(manager.listDatabases())
-                .containsExactly(hasDatabase ? "existing" : DEFAULT_DATABASE);
+                .containsExactlyInAnyOrder(
+                        !hasDatabase
+                                ? new String[] {DEFAULT_DATABASE}
+                                : kafkaEnabled
+                                        ? new String[] {"existing", DEFAULT_DATABASE}
+                                        : new String[] {"existing"});
+        verify(observed, times(createsDefault ? 1 : 0))
+                .createDatabase(DEFAULT_DATABASE, DatabaseDescriptor.EMPTY, true);
     }
 
     @ParameterizedTest
