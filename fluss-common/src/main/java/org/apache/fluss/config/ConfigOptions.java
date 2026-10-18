@@ -2274,36 +2274,38 @@ public class ConfigOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            "Whether the table is exposed as a Kafka topic. Enabling validates the "
-                                    + "existing schema and conversion options without adding columns or defaults.");
+                            "Whether to expose this table as a Kafka topic. Requires a non-partitioned "
+                                    + "log table using the Arrow log format.");
 
     public static final ConfigOption<KafkaValueConversionType> TABLE_KAFKA_CONVERT_VALUE_TYPE =
             key("table.kafka.convert.value.type")
                     .enumType(KafkaValueConversionType.class)
                     .defaultValue(KafkaValueConversionType.PARSE_JSON)
                     .withDescription(
-                            "Kafka value conversion: binary, string, or parse_json. "
-                                    + "Binary and string target the declared _kafka_value column. "
-                                    + "The default is used at read time without adding a table property.");
+                            "How to convert Kafka record values. 'binary' stores the raw bytes in "
+                                    + "_kafka_value (BYTES); 'string' decodes UTF-8 text into _kafka_value "
+                                    + "(STRING); 'parse_json' parses a JSON object and maps its fields "
+                                    + "according to table.kafka.convert.value.layout. Defaults to 'parse_json'.");
 
     public static final ConfigOption<KafkaValueConversionLayout> TABLE_KAFKA_CONVERT_VALUE_LAYOUT =
             key("table.kafka.convert.value.layout")
                     .enumType(KafkaValueConversionLayout.class)
                     .defaultValue(KafkaValueConversionLayout.FLAT)
                     .withDescription(
-                            "JSON layout for parse_json: flat maps top-level business columns; "
-                                    + "nested targets _kafka_value ROW. Ignored for binary and string, "
-                                    + "whether defaulted or explicitly configured. The default is used "
-                                    + "at read time without adding a table property.");
+                            "How to map JSON object fields when table.kafka.convert.value.type is "
+                                    + "'parse_json'. 'flat' maps fields by name to top-level table columns; "
+                                    + "'nested' maps them to fields in the _kafka_value column, which must "
+                                    + "have ROW type. Defaults to 'flat'. Ignored for 'binary' and 'string' conversion.");
 
     public static final ConfigOption<KafkaKeyConversionType> TABLE_KAFKA_CONVERT_KEY_TYPE =
             key("table.kafka.convert.key.type")
                     .enumType(KafkaKeyConversionType.class)
                     .noDefaultValue()
                     .withDescription(
-                            "Optional Kafka key conversion. Only binary is supported and requires "
-                                    + "_kafka_key BYTES. Declaring that column implies binary without "
-                                    + "adding a table property.");
+                            "How to convert Kafka record keys. Only 'binary' is supported, which stores "
+                                    + "raw key bytes in the _kafka_key column of type BYTES. If this column "
+                                    + "is declared, keys are stored even when this option is omitted. "
+                                    + "Without this column, keys are not stored and this option must be left unset.");
 
     // ------------------------------------------------------------------------
     //  ConfigOptions for Consumer Offsets

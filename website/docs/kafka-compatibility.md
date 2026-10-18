@@ -73,8 +73,7 @@ CREATE TABLE sales.orders (
 
 This maps the `sales.orders` topic to the table. JSON members map to `order_id` and `amount`; the
 Kafka key and headers map to their system columns. With no conversion properties, values use
-`parse_json` with the `flat` layout. These defaults are applied when resolving the mapping and are
-not added to table properties.
+`parse_json` with the `flat` layout.
 
 Enable Kafka mapping for an existing compatible table with:
 
@@ -98,10 +97,8 @@ Set these table properties with CREATE or ALTER TABLE.
 | `table.kafka.convert.value.layout` | Enum | `flat` | JSON layout: `flat` maps top-level columns; `nested` maps fields in `_kafka_value ROW<...>`. Ignored for binary and string. |
 | `table.kafka.convert.key.type` | Enum | None | Optional `binary` key conversion; requires `_kafka_key BYTES`. |
 
-Defaults apply when resolving the mapping; omitted properties stay omitted. Declaring
-`_kafka_key BYTES` selects binary key mapping without a key conversion property. No key column or
-property is required when keys are not stored. Custom properties do not configure Kafka mapping;
-the server validates registered table properties.
+Declare `_kafka_key BYTES` to store Kafka keys as bytes; `table.kafka.convert.key.type` can be
+omitted. To discard keys, omit both the column and the property.
 
 | Value conversion | Required schema | Mapping |
 |---|---|---|
@@ -141,9 +138,10 @@ must be nullable. Timestamp type is `-1` when absent, `0` for CreateTime, or `1`
 An absent timestamp maps to null. Log offsets remain native log metadata and are not included in
 this ROW.
 
-`_kafka_rescue` needs no additional property. The planned JSON decoder will store unknown fields,
-flat-layout name conflicts, and conversion failures there as compact JSON. It will set only an
-unconvertible target field to null and preserve valid siblings. Without a rescue column, these
-errors fail conversion; invalid JSON and non-object roots fail even when rescue is declared.
-PR03 validates the DDL prerequisites for this behavior; it does not implement the decoder. For
-binary/string conversion or records with nothing to rescue, the column is null.
+Use the optional `_kafka_rescue` column to retain JSON fields that cannot be mapped to the table
+schema for later inspection. It stores unknown fields, values that cannot be converted to the
+declared type, and fields whose names conflict with system columns in the flat layout as compact
+JSON. When a value cannot be converted, the corresponding table field is set to null while valid
+fields are preserved. Without `_kafka_rescue`, these errors cause conversion to fail. Invalid JSON
+and non-object roots always fail conversion. The column is null for binary/string conversion or
+when there is nothing to rescue.
