@@ -2277,19 +2277,19 @@ public class ConfigOptions {
                             "Whether the table is exposed as a Kafka topic. Enabling validates the "
                                     + "existing schema and conversion options without adding columns or defaults.");
 
-    public static final ConfigOption<ValueConversionType> TABLE_KAFKA_CONVERT_VALUE_TYPE =
+    public static final ConfigOption<KafkaValueConversionType> TABLE_KAFKA_CONVERT_VALUE_TYPE =
             key("table.kafka.convert.value.type")
-                    .enumType(ValueConversionType.class)
-                    .defaultValue(ValueConversionType.PARSE_JSON)
+                    .enumType(KafkaValueConversionType.class)
+                    .defaultValue(KafkaValueConversionType.PARSE_JSON)
                     .withDescription(
                             "Kafka value conversion: binary, string, or parse_json. "
                                     + "Binary and string target the declared _kafka_value column. "
                                     + "The default is used at read time without adding a table property.");
 
-    public static final ConfigOption<ValueConversionLayout> TABLE_KAFKA_CONVERT_VALUE_LAYOUT =
+    public static final ConfigOption<KafkaValueConversionLayout> TABLE_KAFKA_CONVERT_VALUE_LAYOUT =
             key("table.kafka.convert.value.layout")
-                    .enumType(ValueConversionLayout.class)
-                    .defaultValue(ValueConversionLayout.FLAT)
+                    .enumType(KafkaValueConversionLayout.class)
+                    .defaultValue(KafkaValueConversionLayout.FLAT)
                     .withDescription(
                             "JSON layout for parse_json: flat maps top-level business columns; "
                                     + "nested targets _kafka_value ROW. Ignored for binary and string, "

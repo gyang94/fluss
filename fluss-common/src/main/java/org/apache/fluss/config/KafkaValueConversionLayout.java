@@ -21,7 +21,7 @@ import org.apache.fluss.annotation.PublicEvolving;
 
 /** Mapping of JSON object members to Fluss table columns. */
 @PublicEvolving
-public enum ValueConversionLayout {
+public enum KafkaValueConversionLayout {
     /** Map members to top-level business columns. */
     FLAT,
 

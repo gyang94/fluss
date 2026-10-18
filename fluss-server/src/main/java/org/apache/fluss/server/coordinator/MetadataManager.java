@@ -125,7 +125,7 @@ public class MetadataManager {
     }
 
     /** Validates a descriptor and its Kafka topic identity before persistence. */
-    public void validateTableDefinition(TablePath tablePath, TableDescriptor tableDescriptor) {
+    public void validateTableDescriptor(TablePath tablePath, TableDescriptor tableDescriptor) {
         TableDescriptorValidation.validateTableDescriptor(
                 tableDescriptor,
                 maxBucketNum,
@@ -839,7 +839,7 @@ public class MetadataManager {
             // historical partition would be created with the new table-level count while retired
             // lake data still uses the pre-rescale layout. bucketCountEpoch never decreases, so
             // this also rejects a table that was rescaled while the feature was temporarily
-            // disabled. Checked before validateTableDefinition so the rescale rejection is not
+            // disabled. Checked before validateTableDescriptor so the rescale rejection is not
             // masked by unrelated option-dependency errors.
             if (!tableInfo.getTableConfig().isHistoricalPartitionEnabled()
                     && Configuration.fromMap(newDescriptor.getProperties())
@@ -854,7 +854,7 @@ public class MetadataManager {
             }
 
             // reuse the same validate logic with the createTable() method
-            validateTableDefinition(tablePath, newDescriptor);
+            validateTableDescriptor(tablePath, newDescriptor);
 
             beforeUpdate.accept(tableInfo, newDescriptor);
 

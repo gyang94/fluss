@@ -19,8 +19,8 @@ package org.apache.fluss.kafka.schema;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.config.ValueConversionLayout;
-import org.apache.fluss.config.ValueConversionType;
+import org.apache.fluss.config.KafkaValueConversionLayout;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.InvalidConfigException;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
@@ -429,7 +429,7 @@ class KafkaTableMappingITCase {
         assertThat(expected.valueConversionLayout()).isNull();
         assertThat(stored(path).getProperties())
                 .doesNotContainKey("table.kafka.convert.value.layout");
-        for (ValueConversionLayout layout : ValueConversionLayout.values()) {
+        for (KafkaValueConversionLayout layout : KafkaValueConversionLayout.values()) {
             set(path, Collections.singletonMap("table.kafka.convert.value.layout", layout.name()));
             assertThat(KafkaTableSchema.resolve(stored(path))).isEqualTo(expected);
             assertThat(stored(path).getProperties())
@@ -629,6 +629,6 @@ class KafkaTableMappingITCase {
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, ValueConversionType.BINARY);
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, KafkaValueConversionType.BINARY);
     }
 }

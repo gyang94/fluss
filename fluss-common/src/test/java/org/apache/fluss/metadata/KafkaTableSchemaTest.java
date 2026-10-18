@@ -19,8 +19,8 @@ package org.apache.fluss.metadata;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.KafkaKeyConversionType;
-import org.apache.fluss.config.ValueConversionLayout;
-import org.apache.fluss.config.ValueConversionType;
+import org.apache.fluss.config.KafkaValueConversionLayout;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
@@ -152,8 +152,8 @@ class KafkaTableSchemaTest {
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                         .build();
         KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
-        assertThat(resolved.valueConversionType()).isEqualTo(ValueConversionType.PARSE_JSON);
-        assertThat(resolved.valueConversionLayout()).isEqualTo(ValueConversionLayout.FLAT);
+        assertThat(resolved.valueConversionType()).isEqualTo(KafkaValueConversionType.PARSE_JSON);
+        assertThat(resolved.valueConversionLayout()).isEqualTo(KafkaValueConversionLayout.FLAT);
         assertThat(resolved.valueProjection().positions()).containsExactly(0, 3, 6);
         assertThat(resolved.valueProjection().dataTypeAt(1)).isEqualTo(nested);
         assertThat(resolved.rescuePosition()).isEqualTo(1);
@@ -181,7 +181,7 @@ class KafkaTableSchemaTest {
                         .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), "nested")
                         .build();
         KafkaTableSchema resolved = KafkaTableSchema.resolve(table);
-        assertThat(resolved.valueConversionLayout()).isEqualTo(ValueConversionLayout.NESTED);
+        assertThat(resolved.valueConversionLayout()).isEqualTo(KafkaValueConversionLayout.NESTED);
         assertThat(resolved.valueProjection().positions()).containsExactly(2);
         assertThat(resolved.valueProjection().dataTypeAt(0)).isEqualTo(row);
         assertThat(resolved.rescuePosition()).isZero();
@@ -362,7 +362,7 @@ class KafkaTableSchemaTest {
         assertThat(expected.valueConversionLayout()).isNull();
         assertThat(expected.valueProjection().positions()).containsExactly(0);
         assertThat(table.getProperties()).doesNotContainKey("table.kafka.convert.value.layout");
-        for (ValueConversionLayout layout : ValueConversionLayout.values()) {
+        for (KafkaValueConversionLayout layout : KafkaValueConversionLayout.values()) {
             assertThat(
                             KafkaTableSchema.resolve(
                                     TableDescriptor.builder(table)
@@ -459,7 +459,7 @@ class KafkaTableSchemaTest {
                                     "parse_json")
                             .property(
                                     ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
-                                    ValueConversionLayout.NESTED)
+                                    KafkaValueConversionLayout.NESTED)
                             .build(),
                     "_kafka_value");
         }

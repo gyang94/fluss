@@ -21,7 +21,7 @@ import org.apache.fluss.annotation.PublicEvolving;
 
 /** Conversion applied to Kafka record values. */
 @PublicEvolving
-public enum ValueConversionType {
+public enum KafkaValueConversionType {
     /** Store the value as bytes in the fixed value column. */
     BINARY,
 

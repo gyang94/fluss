@@ -21,8 +21,8 @@ import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.TableConfig;
-import org.apache.fluss.config.ValueConversionLayout;
-import org.apache.fluss.config.ValueConversionType;
+import org.apache.fluss.config.KafkaValueConversionLayout;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BytesType;
@@ -70,8 +70,8 @@ public final class KafkaTableSchema {
                                     RESCUE_COLUMN)));
 
     private final RowType rowType;
-    private final ValueConversionType valueConversionType;
-    private final @Nullable ValueConversionLayout valueConversionLayout;
+    private final KafkaValueConversionType valueConversionType;
+    private final @Nullable KafkaValueConversionLayout valueConversionLayout;
     private final KafkaFieldProjection valueProjection;
     private final int keyPosition;
     private final int headersPosition;
@@ -80,8 +80,8 @@ public final class KafkaTableSchema {
 
     private KafkaTableSchema(
             RowType rowType,
-            ValueConversionType valueConversionType,
-            @Nullable ValueConversionLayout valueConversionLayout,
+            KafkaValueConversionType valueConversionType,
+            @Nullable KafkaValueConversionLayout valueConversionLayout,
             List<Integer> valuePositions,
             int keyPosition,
             int headersPosition,
@@ -159,10 +159,10 @@ public final class KafkaTableSchema {
                     "Kafka requires a non-partitioned Arrow log table without a primary key.");
         }
         Configuration options = Configuration.fromMap(table.getProperties());
-        ValueConversionType valueConversionType =
+        KafkaValueConversionType valueConversionType =
                 options.get(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE);
-        ValueConversionLayout valueConversionLayout =
-                valueConversionType == ValueConversionType.PARSE_JSON
+        KafkaValueConversionLayout valueConversionLayout =
+                valueConversionType == KafkaValueConversionType.PARSE_JSON
                         ? options.get(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT)
                         : null;
 
@@ -196,7 +196,7 @@ public final class KafkaTableSchema {
         }
 
         List<Integer> valuePositions = new ArrayList<>();
-        if (valueConversionLayout == ValueConversionLayout.FLAT) {
+        if (valueConversionLayout == KafkaValueConversionLayout.FLAT) {
             if (rowType.getFieldIndex(VALUE_COLUMN) >= 0) {
                 throw invalid(
                         "_kafka_value is reserved for binary, string or nested JSON; "
@@ -214,17 +214,17 @@ public final class KafkaTableSchema {
             }
             DataType type = rowType.getTypeAt(valuePosition);
             boolean valid =
-                    valueConversionType == ValueConversionType.BINARY
+                    valueConversionType == KafkaValueConversionType.BINARY
                             ? type instanceof BytesType
-                            : valueConversionType == ValueConversionType.STRING
+                            : valueConversionType == KafkaValueConversionType.STRING
                                     ? type instanceof StringType
                                     : type instanceof RowType;
             if (!valid) {
                 throw invalid(
                         "_kafka_value must be "
-                                + (valueConversionType == ValueConversionType.BINARY
+                                + (valueConversionType == KafkaValueConversionType.BINARY
                                         ? "BYTES"
-                                        : valueConversionType == ValueConversionType.STRING
+                                        : valueConversionType == KafkaValueConversionType.STRING
                                                 ? "STRING"
                                                 : "ROW")
                                 + " for "
@@ -241,10 +241,10 @@ public final class KafkaTableSchema {
             }
             valuePositions.add(valuePosition);
         }
-        if (valueConversionType == ValueConversionType.PARSE_JSON) {
+        if (valueConversionType == KafkaValueConversionType.PARSE_JSON) {
             for (int position : valuePositions) {
                 DataType type = rowType.getTypeAt(position);
-                if (valueConversionLayout == ValueConversionLayout.NESTED) {
+                if (valueConversionLayout == KafkaValueConversionLayout.NESTED) {
                     // The physical value container represents the JSON object root, just like
                     // the table row in flat layout; it must not add a business nesting level.
                     for (DataType field : ((RowType) type).getChildren()) {
@@ -371,12 +371,12 @@ public final class KafkaTableSchema {
     }
 
     /** Returns the value conversion type. */
-    public ValueConversionType valueConversionType() {
+    public KafkaValueConversionType valueConversionType() {
         return valueConversionType;
     }
 
     /** Returns the JSON layout, or null for binary/string. */
-    public @Nullable ValueConversionLayout valueConversionLayout() {
+    public @Nullable KafkaValueConversionLayout valueConversionLayout() {
         return valueConversionLayout;
     }
 
