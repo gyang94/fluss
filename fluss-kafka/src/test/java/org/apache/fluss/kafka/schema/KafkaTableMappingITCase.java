@@ -629,6 +629,8 @@ class KafkaTableMappingITCase {
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, KafkaValueConversionType.BINARY);
+                .property(
+                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                        KafkaValueConversionType.BINARY);
     }
 }
