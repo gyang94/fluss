@@ -335,7 +335,7 @@ class KafkaTableMappingITCase {
                         .schema(schema)
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                        .customProperty("table.kafka.convert.value.type", "custom-value")
+                        .customProperty("custom.kafka.convert.value.type", "custom-value")
                         .customProperty("kafka.value.format", "custom-format")
                         .customProperty("fluss.owner", "team")
                         .build();
@@ -346,7 +346,7 @@ class KafkaTableMappingITCase {
         assertThat(kafkaProperties(stored))
                 .isEqualTo(Collections.singletonMap("table.kafka.enabled", "true"));
         // This checks persisted DDL mapping; recursive gateway decoding is a later stage.
-        assertThat(new KafkaTopicSchemaResolver().resolve(stored).valueProjection().positions())
+        assertThat(KafkaTableSchema.resolve(stored).valueProjection().positions())
                 .containsExactly(1);
         set(path, Collections.singletonMap("table.kafka.convert.key.type", "binary"));
         assertThat(KafkaTableSchema.resolve(stored(path)))

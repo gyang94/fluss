@@ -336,9 +336,9 @@ public class KafkaMetadataHandlerTest {
                 140L,
                 TableDescriptor.builder(defaultDescriptor())
                         .schema(schema)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
                         .property(
-                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
                                 nested ? "nested" : "flat")
                         .build());
         for (short version = 0; version <= 11; version++) {
@@ -371,7 +371,7 @@ public class KafkaMetadataHandlerTest {
         TableDescriptor flat =
                 TableDescriptor.builder(defaultDescriptor())
                         .schema(Schema.newBuilder().column("id", DataTypes.INT()).build())
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
                         .build();
         service.putTable("fluss.json_topic", 140L, flat);
         assertThat(
@@ -386,7 +386,7 @@ public class KafkaMetadataHandlerTest {
                 "fluss.json_topic",
                 140L,
                 TableDescriptor.builder(flat)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, "nested")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), "nested")
                         .build());
         assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
                 .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
