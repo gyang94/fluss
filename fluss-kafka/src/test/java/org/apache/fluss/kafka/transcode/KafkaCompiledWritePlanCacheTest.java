@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.metadata.KafkaTableSchema;
@@ -265,9 +266,11 @@ class KafkaCompiledWritePlanCacheTest {
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
                         .property(
-                                ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE,
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                KafkaValueConversionType.BINARY)
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE.key(),
                                 propertyValue.equals("v1") ? "binary" : "BINARY")
                         .build();
         return TableInfo.of(

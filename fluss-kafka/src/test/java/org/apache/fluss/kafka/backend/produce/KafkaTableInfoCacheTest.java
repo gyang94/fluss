@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -262,7 +263,9 @@ class KafkaTableInfoCacheTest {
                         .distributedBy(1)
                         .property(ConfigOptions.TABLE_LOG_FORMAT, LogFormat.ARROW)
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary");
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                KafkaValueConversionType.BINARY);
         if ("v2".equals(version)) {
             builder.property(ConfigOptions.TABLE_KAFKA_ENABLED, false);
         }
