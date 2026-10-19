@@ -19,6 +19,7 @@ package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.DatabaseNotExistException;
 import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.metadata.LogFormat;
@@ -571,12 +572,15 @@ public class KafkaMetadataHandlerTest {
                 TableDescriptor.builder()
                         .schema(defaultDescriptor().getSchema())
                         .distributedBy(2)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                KafkaValueConversionType.BINARY)
                         .build();
         TableDescriptor disabledInvalid =
                 TableDescriptor.builder(defaultDescriptor())
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, false)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "unimplemented")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "unimplemented")
                         .build();
         for (TableDescriptor disabled : Arrays.asList(missingFlag, disabledInvalid)) {
             service.putTable("fluss.topic", 777L, disabled);
@@ -726,7 +730,9 @@ public class KafkaMetadataHandlerTest {
                 .distributedBy(2)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                .property(
+                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                        KafkaValueConversionType.BINARY)
                 .build();
     }
 

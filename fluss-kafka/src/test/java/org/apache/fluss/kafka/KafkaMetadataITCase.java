@@ -20,6 +20,7 @@ package org.apache.fluss.kafka;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -210,7 +211,9 @@ public class KafkaMetadataITCase {
                 TableDescriptor.builder()
                         .schema(topicDescriptor().getSchema())
                         .distributedBy(2)
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                KafkaValueConversionType.BINARY)
                         .build();
         long tableId = createTable(CLUSTER, path, disabled);
         long unsetId = createTable(CLUSTER, TablePath.of("sales", "unset"), unset);
@@ -441,7 +444,9 @@ public class KafkaMetadataITCase {
                 .distributedBy(2)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                .property(
+                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                        KafkaValueConversionType.BINARY)
                 .build();
     }
 
