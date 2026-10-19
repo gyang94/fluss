@@ -17,6 +17,7 @@
 
 package org.apache.fluss.metadata;
 
+import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
@@ -303,6 +304,28 @@ class TableSchemaTest {
     }
 
     @Test
+    void testFromColumnsWithUnknownColumnIdAndAssignedNestedFieldId() {
+        assertMixedFieldIdsRejected(
+                Schema.Column.UNKNOWN_COLUMN_ID, Schema.Column.UNKNOWN_COLUMN_ID, 2);
+    }
+
+    @Test
+    void testFromColumnsWithAssignedColumnIdAndUnknownNestedFieldId() {
+        assertMixedFieldIdsRejected(0, 1, Schema.Column.UNKNOWN_COLUMN_ID);
+    }
+
+    @Test
+    void testFromColumnsWithMixedColumnIds() {
+        List<Schema.Column> columns =
+                Arrays.asList(
+                        new Schema.Column("f0", DataTypes.INT(), null, 0),
+                        new Schema.Column("f1", DataTypes.STRING()));
+
+        assertThatThrownBy(() -> Schema.newBuilder().fromColumns(columns))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
     void testSchemaBuilderColumnWithAggFunction() {
         Schema schema =
                 Schema.newBuilder()
@@ -468,5 +491,35 @@ class TableSchemaTest {
                 .isEqualTo(AggFunctions.STRING_AGG(", "));
         assertThat(schemaStringAgg.getAggFunction("items").get().getParameter("delimiter"))
                 .isEqualTo(", ");
+    }
+
+    private static void assertMixedFieldIdsRejected(
+            int columnId, int parentFieldId, int nestedFieldId) {
+        RowType rowType =
+                DataTypes.ROW(
+                        DataTypes.FIELD(
+                                "parent",
+                                DataTypes.ROW(
+                                        DataTypes.FIELD("child", DataTypes.INT(), nestedFieldId)),
+                                parentFieldId));
+        for (DataType dataType :
+                Arrays.asList(
+                        rowType,
+                        DataTypes.ARRAY(rowType),
+                        DataTypes.MAP(rowType, DataTypes.STRING()),
+                        DataTypes.MAP(DataTypes.STRING(), rowType))) {
+            assertThatThrownBy(
+                            () ->
+                                    Schema.newBuilder()
+                                            .fromColumns(
+                                                    Collections.singletonList(
+                                                            new Schema.Column(
+                                                                    "f0", dataType, null,
+                                                                    columnId))))
+                    .as("Mixed field IDs in %s", dataType)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessage(
+                            "All field IDs (including nested fields) must be set or none of them must be set.");
+        }
     }
 }
