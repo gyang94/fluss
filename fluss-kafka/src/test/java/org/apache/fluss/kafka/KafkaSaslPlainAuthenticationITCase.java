@@ -25,6 +25,7 @@ import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
@@ -151,7 +152,8 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 .logFormat(LogFormat.ARROW)
                                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                                 .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        "parse_json")
                                 .build(),
                         false)
                 .get();
@@ -354,7 +356,8 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 .logFormat(LogFormat.ARROW)
                                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                                 .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        "parse_json")
                                 .build(),
                         false)
                 .get();
@@ -667,7 +670,7 @@ public class KafkaSaslPlainAuthenticationITCase {
         TablePath path = TablePath.of(DATABASE, "sasl_contract");
         RowType business =
                 RowType.builder()
-                        .field("message", DataTypes.STRING().copy(false))
+                        .field("message", DataTypes.STRING())
                         .field("count", DataTypes.INT())
                         .field("details", RowType.builder().field("n", DataTypes.INT()).build())
                         .build();
@@ -694,8 +697,11 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 .logFormat(LogFormat.ARROW)
                                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                                 .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        "parse_json")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
+                                        layout)
                                 .build(),
                         false)
                 .get();
@@ -715,14 +721,16 @@ public class KafkaSaslPlainAuthenticationITCase {
                             Arrays.asList(
                                     "{\"message\":\"bad\",\"count\":\"wrong\"}",
                                     "{\"message\":\"bad\",\"details\":[]}",
-                                    "{\"message\":null}",
-                                    "{\"count\":2}",
                                     "{\"message\":",
                                     "[]"));
             if (!rescue) {
                 invalid.add(unknown);
                 invalid.add("{\"message\":\"bad\",\"_kafka_key\":null}");
             }
+            String[] recoveredValues =
+                    rescue
+                            ? new String[] {valid, "{\"message\":null}", "{\"count\":2}", unknown}
+                            : new String[] {valid, "{\"message\":null}", "{\"count\":2}"};
             try (Socket socket = connectKafka()) {
                 authenticate(socket, version);
                 for (int i = 0; i < invalid.size(); i++) {
@@ -742,10 +750,49 @@ public class KafkaSaslPlainAuthenticationITCase {
                                 sendRequest(
                                         socket,
                                         produceRequest(
-                                                path,
-                                                contractPartition(0, rescue ? unknown : valid)));
+                                                path, contractPartition(0, recoveredValues)));
                 assertPartition(recovered, 0, Errors.NONE, 0L);
             }
+            assertNativeRecords(
+                    path,
+                    0,
+                    recoveredValues.length,
+                    record -> {
+                        InternalRow row = record.getRow();
+                        assertThat(row.getBytes(0)).containsExactly(KEY);
+                        InternalRow value = nested ? row.getRow(1, 3) : row;
+                        int first = nested ? 0 : 1;
+                        if (record.logOffset() == 0
+                                || (rescue && record.logOffset() == recoveredValues.length - 1)) {
+                            assertThat(value.getString(first).toString()).isEqualTo("ok");
+                            assertThat(value.isNullAt(first + 1)).isTrue();
+                            assertThat(value.getRow(first + 2, 1).getInt(0)).isEqualTo(2);
+                        } else if (record.logOffset() == 1) {
+                            assertThat(value.isNullAt(first)).isTrue();
+                            assertThat(value.isNullAt(first + 1)).isTrue();
+                            assertThat(value.isNullAt(first + 2)).isTrue();
+                        } else {
+                            assertThat(value.isNullAt(first)).isTrue();
+                            assertThat(value.getInt(first + 1)).isEqualTo(2);
+                            assertThat(value.isNullAt(first + 2)).isTrue();
+                        }
+                        int headers = nested ? 2 : 4;
+                        assertThat(row.getMap(headers).size()).isEqualTo(1);
+                        assertThat(row.getMap(headers).keyArray().getString(0).toString())
+                                .isEqualTo("source");
+                        assertThat(row.getMap(headers).valueArray().getBytes(0))
+                                .containsExactly((byte) 2);
+                        assertMetadata(row, nested ? 3 : 5, 123L, 0);
+                        if (rescue && record.logOffset() == recoveredValues.length - 1) {
+                            assertJson(
+                                    row.getString(nested ? 4 : 6).toString(),
+                                    "{\"details\":{\"unknown\":{\"x\":null}},\"extra\":[1,null],"
+                                            + "\"_kafka_key\":\"payload\",\"_kafka_value\":null,"
+                                            + "\"_kafka_headers\":{},\"_kafka_metadata\":null,\"_kafka_rescue\":null}");
+                        } else if (rescue) {
+                            assertThat(row.isNullAt(nested ? 4 : 6)).isTrue();
+                        }
+                    });
             Consumer<ScanRecord> check =
                     record -> {
                         InternalRow row = record.getRow();
@@ -762,21 +809,6 @@ public class KafkaSaslPlainAuthenticationITCase {
                         assertThat(row.getMap(headers).valueArray().getBytes(0))
                                 .containsExactly((byte) 2);
                     };
-            assertNativeRecords(
-                    path,
-                    0,
-                    1,
-                    record -> {
-                        check.accept(record);
-                        assertMetadata(record.getRow(), nested ? 3 : 5, 123L, 0);
-                        if (rescue) {
-                            assertJson(
-                                    record.getRow().getString(nested ? 4 : 6).toString(),
-                                    "{\"details\":{\"unknown\":{\"x\":null}},\"extra\":[1,null],"
-                                            + "\"_kafka_key\":\"payload\",\"_kafka_value\":null,"
-                                            + "\"_kafka_headers\":{},\"_kafka_metadata\":null,\"_kafka_rescue\":null}");
-                        }
-                    });
             assertNativeRecords(
                     path,
                     1,
@@ -837,7 +869,9 @@ public class KafkaSaslPlainAuthenticationITCase {
                                                 .build())
                                 .distributedBy(1)
                                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, valueType)
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        valueType)
                                 .build(),
                         false)
                 .get();
@@ -954,11 +988,11 @@ public class KafkaSaslPlainAuthenticationITCase {
         TablePath path = TablePath.of(DATABASE, "sasl_null_json");
         Schema.Builder schema = Schema.newBuilder().column("_kafka_key", DataTypes.BYTES());
         if (nested) {
-            // A nullable parent accepts a null value even when its child is NOT NULL.
+            // Kafka table fields and nested children follow the nullable schema contract.
             schema.column(
                     "_kafka_value",
                     RowType.builder()
-                            .field("message", DataTypes.STRING().copy(false))
+                            .field("message", DataTypes.STRING())
                             .field("count", DataTypes.INT())
                             .build()
                             .copy(nullable));
@@ -969,20 +1003,22 @@ public class KafkaSaslPlainAuthenticationITCase {
         schema.column("_kafka_headers", DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()))
                 .column("_kafka_metadata", metadataType())
                 .column("_kafka_rescue", DataTypes.STRING());
-        flussAdmin
-                .createTable(
-                        path,
-                        TableDescriptor.builder()
-                                .schema(schema.build())
-                                .distributedBy(1)
-                                .logFormat(LogFormat.ARROW)
-                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                                .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
-                                .build(),
-                        false)
-                .get();
+        TableDescriptor descriptor =
+                TableDescriptor.builder()
+                        .schema(schema.build())
+                        .distributedBy(1)
+                        .logFormat(LogFormat.ARROW)
+                        .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), layout)
+                        .build();
+        if (!nullable) {
+            assertThatThrownBy(() -> flussAdmin.createTable(path, descriptor, false).get())
+                    .hasCauseInstanceOf(InvalidTableException.class)
+                    .hasStackTraceContaining("nullable fields");
+            return;
+        }
+        flussAdmin.createTable(path, descriptor, false).get();
         try {
             FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(
                     new TableBucket(flussAdmin.getTableInfo(path).get().getTableId(), 0));
@@ -992,39 +1028,20 @@ public class KafkaSaslPlainAuthenticationITCase {
                 authenticate(socket, version);
                 ProduceRequest allNull =
                         produceRequest(path, contractPartition(0, (String) null, null));
-                assertPartition(
-                        (ProduceResponse) sendRequest(socket, allNull),
-                        0,
-                        nullable ? Errors.NONE : Errors.INVALID_RECORD,
-                        nullable ? 0L : -1L);
+                assertPartition((ProduceResponse) sendRequest(socket, allNull), 0, Errors.NONE, 0L);
                 ProduceRequest mixed =
                         produceRequest(path, contractPartition(0, valid, null, valid));
                 mixed.data().topicData().iterator().next().setName(path.getTableName());
-                assertPartition(
-                        (ProduceResponse) sendRequest(socket, mixed),
-                        0,
-                        nullable ? Errors.NONE : Errors.INVALID_RECORD,
-                        nullable ? 2L : -1L);
-                if (!nullable) {
-                    assertPartition(
-                            (ProduceResponse)
-                                    sendRequest(
-                                            socket,
-                                            produceRequest(path, contractPartition(0, valid))),
-                            0,
-                            Errors.NONE,
-                            0L);
-                }
+                assertPartition((ProduceResponse) sendRequest(socket, mixed), 0, Errors.NONE, 2L);
             }
             assertNativeRecords(
                     path,
                     0,
-                    nullable ? 5 : 1,
+                    5,
                     record -> {
                         InternalRow row = record.getRow();
                         assertThat(row.getBytes(0)).containsExactly(KEY);
-                        boolean nullValue =
-                                nullable && (record.logOffset() < 2 || record.logOffset() == 3);
+                        boolean nullValue = record.logOffset() < 2 || record.logOffset() == 3;
                         if (nullValue) {
                             assertThat(row.isNullAt(1)).isTrue();
                             if (!nested) {
@@ -1083,7 +1100,7 @@ public class KafkaSaslPlainAuthenticationITCase {
                             .distributedBy(1)
                             .logFormat(LogFormat.ARROW)
                             .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "binary")
                             .build();
             for (TablePath path : Arrays.asList(TablePath.of(defaultDatabase, TABLE_NAME), other)) {
                 admin.createTable(path, descriptor, false).get();
