@@ -586,13 +586,14 @@ class KafkaJsonProduceITCase {
         TablePath path = TablePath.of(DATABASE, "json_compressed_" + codec + "_" + layout);
         RowType valueType =
                 RowType.builder()
-                        .field("id", DataTypes.INT().copy(false))
+                        .field("id", DataTypes.INT())
                         .field(
                                 "profile",
                                 RowType.builder().field("name", DataTypes.STRING()).build())
                         .build();
         List<String> invalidValues =
-                Arrays.asList("{\"id\":1,\"profile\":{\"name\":{}}}", "{\"id\":null}", "{\"id\":1");
+                Arrays.asList(
+                        "{\"id\":1,\"profile\":{\"name\":{}}}", "{\"id\":\"bad\"}", "{\"id\":1");
         Compression compression = Compression.of(CompressionType.forName(codec)).build();
         int headersPosition = layout.equals("nested") ? 2 : 3;
         int rescuePosition = headersPosition + 2;
