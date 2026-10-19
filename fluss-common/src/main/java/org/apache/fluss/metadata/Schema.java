@@ -306,12 +306,11 @@ public final class Schema implements Serializable {
         /**
          * Adopts all columns from the given list.
          *
-         * <p>This method directly uses the columns as-is, preserving their existing column IDs and
-         * all nested field IDs within their data types (e.g., field IDs in {@link RowType}, {@link
-         * ArrayType}, {@link MapType}). No field ID reassignment will occur.
-         *
-         * <p>This behavior is different from {@link #column(String, DataType)}, which automatically
-         * assigns new column IDs and reassigns all nested field IDs to ensure global uniqueness.
+         * <p>When the columns have IDs, this method preserves their existing column IDs and all
+         * nested field IDs within their data types (e.g., field IDs in {@link RowType}, {@link
+         * ArrayType}, {@link MapType}). When all column IDs are unknown, this method assigns new
+         * column IDs and reassigns all nested field IDs in flatten order, as in {@link
+         * #column(String, DataType)}.
          *
          * <p>Use this method when:
          *
@@ -355,14 +354,15 @@ public final class Schema implements Serializable {
                 highestFieldId =
                         new AtomicInteger(allFieldIds.stream().max(Integer::compareTo).orElse(-1));
             } else {
-                // if all columnId is not set, this maybe from old version schema. Just use its
-                // position as columnId.
+                // Assign IDs in flatten order, including nested fields.
                 for (Column column : inputColumns) {
                     int newColumnId = highestFieldId.incrementAndGet();
+                    DataType reassignDataType =
+                            ReassignFieldId.reassign(column.dataType, highestFieldId);
                     columns.add(
                             new Column(
                                     column.columnName,
-                                    column.dataType,
+                                    reassignDataType,
                                     column.comment,
                                     newColumnId,
                                     column.aggFunction));
