@@ -384,7 +384,7 @@ public class KafkaMetadataHandlerTest {
                     TableDescriptor.builder(flat)
                             .schema(complexSchema)
                             .property(
-                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
                                     nested ? "nested" : "flat")
                             .build();
             service.putTable("fluss.json_topic", 140L, complex);

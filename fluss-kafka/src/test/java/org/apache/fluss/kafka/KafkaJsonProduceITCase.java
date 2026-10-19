@@ -109,14 +109,14 @@ class KafkaJsonProduceITCase {
 
     private static final RowType NUMBER_TYPE =
             RowType.builder()
-                    .field("float_value", DataTypes.FLOAT().copy(false))
-                    .field("double_value", DataTypes.DOUBLE().copy(false))
-                    .field("rounded_float", DataTypes.FLOAT().copy(false))
-                    .field("amount", DataTypes.DECIMAL(30, 10).copy(false))
+                    .field("float_value", DataTypes.FLOAT())
+                    .field("double_value", DataTypes.DOUBLE())
+                    .field("rounded_float", DataTypes.FLOAT())
+                    .field("amount", DataTypes.DECIMAL(30, 10))
                     .build();
     private static final RowType CUSTOMER_TYPE =
             RowType.builder()
-                    .field("name", DataTypes.STRING().copy(false))
+                    .field("name", DataTypes.STRING())
                     .field(KafkaTableSchema.KEY_COLUMN, DataTypes.INT())
                     .field(KafkaTableSchema.VALUE_COLUMN, DataTypes.INT())
                     .field(KafkaTableSchema.HEADERS_COLUMN, DataTypes.INT())
@@ -125,19 +125,17 @@ class KafkaJsonProduceITCase {
                     .build();
     private static final RowType COMPLEX_TYPE =
             RowType.builder()
-                    .field("id", DataTypes.INT().copy(false))
+                    .field("id", DataTypes.INT())
                     .field("customer", CUSTOMER_TYPE)
                     .field("measurements", NUMBER_TYPE)
-                    .field("float_values", DataTypes.ARRAY(DataTypes.FLOAT().copy(false)))
-                    .field("double_values", DataTypes.ARRAY(DataTypes.DOUBLE().copy(false)))
-                    .field(
-                            "float_attributes",
-                            DataTypes.MAP(DataTypes.STRING(), DataTypes.FLOAT().copy(false)))
+                    .field("float_values", DataTypes.ARRAY(DataTypes.FLOAT()))
+                    .field("double_values", DataTypes.ARRAY(DataTypes.DOUBLE()))
+                    .field("float_attributes", DataTypes.MAP(DataTypes.STRING(), DataTypes.FLOAT()))
                     .field(
                             "double_attributes",
-                            DataTypes.MAP(DataTypes.STRING(), DataTypes.DOUBLE().copy(false)))
-                    .field("items", DataTypes.ARRAY(NUMBER_TYPE.copy(false)))
-                    .field("attributes", DataTypes.MAP(DataTypes.STRING(), NUMBER_TYPE.copy(false)))
+                            DataTypes.MAP(DataTypes.STRING(), DataTypes.DOUBLE()))
+                    .field("items", DataTypes.ARRAY(NUMBER_TYPE))
+                    .field("attributes", DataTypes.MAP(DataTypes.STRING(), NUMBER_TYPE))
                     .build();
 
     @RegisterExtension
@@ -242,19 +240,19 @@ class KafkaJsonProduceITCase {
         List<String> invalidValues =
                 Arrays.asList(
                         "{\"id\":1,\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
-                        "{\"id\":1,\"customer\":{}}",
-                        "{\"id\":1,\"customer\":{\"name\":null}}",
+                        "{\"id\":1,\"customer\":{\"name\":[]}}",
+                        "{\"id\":1,\"customer\":{\"name\":true}}",
                         "{\"id\":1,\"customer\":{\"name\":1}}",
                         "{\"id\":1,\"customer\":[]}",
-                        "{\"id\":1,\"float_values\":[1,null]}",
+                        "{\"id\":1,\"float_values\":[1,\"bad\"]}",
                         "{\"id\":1,\"double_values\":[1,\"bad\"]}",
                         "{\"id\":1,\"float_values\":{}}",
                         "{\"id\":1,\"float_attributes\":[]}",
-                        "{\"id\":1,\"double_attributes\":{\"bad\":null}}",
-                        "{\"id\":1,\"items\":[null]}",
-                        "{\"id\":1,\"items\":[{}]}",
-                        "{\"id\":1,\"attributes\":{\"bad\":null}}",
-                        "{\"id\":1,\"attributes\":{\"bad\":{}}}",
+                        "{\"id\":1,\"double_attributes\":{\"bad\":\"bad\"}}",
+                        "{\"id\":1,\"items\":[{\"float_value\":\"bad\"}]}",
+                        "{\"id\":1,\"items\":[{\"unknown\":1}]}",
+                        "{\"id\":1,\"attributes\":{\"bad\":{\"amount\":\"bad\"}}}",
+                        "{\"id\":1,\"attributes\":{\"bad\":{\"unknown\":1}}}",
                         // The escaped surrogate must not be encoded as '?' and overwrite that key.
                         "{\"id\":1,\"float_attributes\":{\"?\":1,\"\\ud800\":2}}",
                         "{\"id\":1,\"double_attributes\":{\"?\":1,\"\\udc00\":2}}");
@@ -423,7 +421,7 @@ class KafkaJsonProduceITCase {
         // Null Kafka values populate nullable flat fields or the nullable nested value container.
         RowType valueType =
                 RowType.builder()
-                        .field("id", nullValueBusinessType(fieldType).copy(layout.equals("flat")))
+                        .field("id", nullValueBusinessType(fieldType).copy(true))
                         .field("label", DataTypes.STRING())
                         .build();
         Header[] headers = {
@@ -530,8 +528,7 @@ class KafkaJsonProduceITCase {
     })
     void testNotNullBusinessFieldsAreRejectedAtTableCreation(String layout, String fieldType)
             throws Exception {
-        TablePath path =
-                TablePath.of(DATABASE, "json_required_value_" + layout + "_" + fieldType);
+        TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout + "_" + fieldType);
         RowType valueType =
                 RowType.builder(false)
                         .field("id", nullValueBusinessType(fieldType).copy(false))
@@ -895,11 +892,11 @@ class KafkaJsonProduceITCase {
             case "scalar":
                 return DataTypes.INT();
             case "row":
-                return DataTypes.ROW(DataTypes.FIELD("value", DataTypes.INT().copy(false)));
+                return DataTypes.ROW(DataTypes.FIELD("value", DataTypes.INT()));
             case "array":
-                return DataTypes.ARRAY(DataTypes.INT().copy(false));
+                return DataTypes.ARRAY(DataTypes.INT());
             case "map":
-                return DataTypes.MAP(DataTypes.STRING(), DataTypes.INT().copy(false));
+                return DataTypes.MAP(DataTypes.STRING(), DataTypes.INT());
             default:
                 throw new IllegalArgumentException("Unexpected business field type: " + fieldType);
         }
