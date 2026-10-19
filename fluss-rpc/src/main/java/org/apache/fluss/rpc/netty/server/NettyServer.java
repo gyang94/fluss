@@ -306,15 +306,25 @@ public final class NettyServer implements RpcServer {
             }
             isRunning = false;
 
+            CompletableFuture<Void> channelShutdownFuture =
+                    FutureUtils.completeAll(
+                            bindChannels.stream()
+                                    .map(NettyUtils::shutdownChannel)
+                                    .collect(Collectors.toList()));
+            CompletableFuture<Void> workerShutdownFuture =
+                    workerPool == null
+                            ? CompletableFuture.completedFuture(null)
+                            : workerPool.closeAsync();
+            // Event loops must remain active while accepted requests drain: their responses and
+            // backpressure updates still use those loops. Close the loops only after both the
+            // listening channels and request workers have stopped.
             CompletableFuture<Void> transportShutdownFuture =
-                    CompletableFuture.allOf(
-                            shutdownGroup(acceptorGroup),
-                            shutdownGroup(selectorGroup),
-                            FutureUtils.completeAll(
-                                    bindChannels.stream()
-                                            .map(NettyUtils::shutdownChannel)
-                                            .collect(Collectors.toList())),
-                            workerPool.closeAsync());
+                    FutureUtils.composeAfterwards(
+                            CompletableFuture.allOf(channelShutdownFuture, workerShutdownFuture),
+                            () ->
+                                    CompletableFuture.allOf(
+                                            shutdownGroup(acceptorGroup),
+                                            shutdownGroup(selectorGroup)));
             closeFuture = closeProtocolsAfter(transportShutdownFuture, protocols);
             return closeFuture;
         }

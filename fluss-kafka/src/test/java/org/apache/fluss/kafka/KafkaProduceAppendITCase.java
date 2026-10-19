@@ -27,6 +27,7 @@ import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
+import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -82,6 +83,7 @@ import java.util.concurrent.TimeUnit;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.createTable;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newAlterTableRequest;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Exercises native DDL, Kafka discovery and Produce, replication, and native Fluss readback. */
 class KafkaProduceAppendITCase {
@@ -222,31 +224,16 @@ class KafkaProduceAppendITCase {
 
     @ParameterizedTest
     @ValueSource(strings = {"binary", "string"})
-    void testNotNullValueRejectsWholeBatchWithoutAdvancingOffsets(String format) throws Exception {
+    void testNotNullValueSchemaIsRejectedWhenCreatingKafkaTable(String format) throws Exception {
         TablePath path = TablePath.of(DATABASE, "produce_not_null_" + format);
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
             admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            admin.createTable(path, descriptor(format, false), false).get();
-            CLUSTER.waitUntilAllGatewayHasSameMetadata();
-            try (KafkaProducer<byte[], byte[]> producer = producer("all", 0)) {
-                Node leader = producer.partitionsFor(path.toString()).get(0).leader();
-                try (Socket socket = new Socket(leader.host(), leader.port())) {
-                    String[] names = {path.toString()};
-                    assertProduceErrors(
-                            query(socket, recordBatch(null, null), names),
-                            names,
-                            Errors.INVALID_RECORD);
-                    assertProduceErrors(
-                            query(socket, recordBatch(VALUE, null, VALUE), names),
-                            names,
-                            Errors.INVALID_RECORD);
-                    assertProduceOffsets(query(socket, names), names, 0L);
-                    assertReadback(connection, path, format, VALUE, 1);
-                }
-            } finally {
-                admin.dropTable(path, true).get();
-            }
+            assertThatThrownBy(
+                            () -> admin.createTable(path, descriptor(format, false), false).get())
+                    .hasCauseInstanceOf(InvalidTableException.class)
+                    .rootCause()
+                    .hasMessageContaining("Kafka requires nullable fields");
         }
     }
 
