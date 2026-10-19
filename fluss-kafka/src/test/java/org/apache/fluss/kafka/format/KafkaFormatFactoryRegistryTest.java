@@ -222,10 +222,9 @@ class KafkaFormatFactoryRegistryTest {
         schema.column(
                 "_kafka_metadata",
                 DataTypes.ROW(
-                                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
-                                DataTypes.FIELD("timestamp_type", DataTypes.INT().copy(false)),
-                                DataTypes.FIELD("partition", DataTypes.INT().copy(false)))
-                        .copy(false));
+                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                        DataTypes.FIELD("partition", DataTypes.INT())));
         if (!first) {
             schema.column("_kafka_rescue", DataTypes.STRING());
         }
