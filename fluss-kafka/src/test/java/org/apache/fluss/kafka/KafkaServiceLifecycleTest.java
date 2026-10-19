@@ -470,7 +470,7 @@ class KafkaServiceLifecycleTest {
                             .distributedBy(1)
                             .logFormat(LogFormat.ARROW)
                             .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "string")
+                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "string")
                             .build();
             return CompletableFuture.completedFuture(
                     new GetTableInfoResponse()

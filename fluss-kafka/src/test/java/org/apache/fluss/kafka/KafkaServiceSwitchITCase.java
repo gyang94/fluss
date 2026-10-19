@@ -114,7 +114,7 @@ class KafkaServiceSwitchITCase {
                                     .logFormat(LogFormat.ARROW)
                                     .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                                     .property(
-                                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
                                             "parse_json")
                                     .build(),
                             false)
@@ -222,7 +222,7 @@ class KafkaServiceSwitchITCase {
                                     .logFormat(LogFormat.ARROW)
                                     .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                                     .property(
-                                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                            ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
                                             "parse_json")
                                     .build(),
                             false)
