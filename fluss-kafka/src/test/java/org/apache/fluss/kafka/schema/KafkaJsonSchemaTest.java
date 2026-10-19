@@ -46,7 +46,7 @@ class KafkaJsonSchemaTest {
         TableDescriptor descriptor =
                 descriptor(
                                 Schema.newBuilder()
-                                        .column("id", DataTypes.INT().copy(false))
+                                        .column("id", DataTypes.INT())
                                         .column("_kafka_key", DataTypes.BYTES())
                                         .column(
                                                 "_kafka_headers",
@@ -55,7 +55,7 @@ class KafkaJsonSchemaTest {
                                         .column("amount", DataTypes.DECIMAL(8, 2))
                                         .column("_kafka_rescue", DataTypes.STRING())
                                         .build())
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE, "binary")
+                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE.key(), "binary")
                         .build();
         KafkaTableSchema schema = resolver.resolve(descriptor);
         assertThat(schema).isEqualTo(KafkaTableSchema.resolve(descriptor));
@@ -72,7 +72,7 @@ class KafkaJsonSchemaTest {
     void testNestedJsonProjectsItsPhysicalValueContainer() {
         RowType value =
                 DataTypes.ROW(
-                        DataTypes.FIELD("id", DataTypes.INT().copy(false)),
+                        DataTypes.FIELD("id", DataTypes.INT()),
                         DataTypes.FIELD("name", DataTypes.STRING()));
         KafkaTableSchema schema =
                 resolver.resolve(
@@ -82,7 +82,9 @@ class KafkaJsonSchemaTest {
                                                 .column("_kafka_value", value)
                                                 .column("_kafka_rescue", DataTypes.STRING())
                                                 .build())
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, "nested")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
+                                        "nested")
                                 .build());
         assertThat(schema.valueConversionLayout()).isEqualTo(KafkaValueConversionLayout.NESTED);
         assertThat(schema.valueProjection().positions()).containsExactly(1);
@@ -92,7 +94,7 @@ class KafkaJsonSchemaTest {
     }
 
     @Test
-    void testJsonContractRequiresExplicitEnablementAndRejectsPrototypeOptions() {
+    void testJsonContractRequiresExplicitEnablementAndIgnoresCustomProperties() {
         TableDescriptor.Builder table =
                 descriptor(Schema.newBuilder().column("id", DataTypes.INT()).build());
         TableDescriptor disabled = table.property(ConfigOptions.TABLE_KAFKA_ENABLED, false).build();
@@ -105,25 +107,23 @@ class KafkaJsonSchemaTest {
                         "kafka.value.format",
                         "kafka.key.fields",
                         "table.kafka.convert.value.type")) {
-            assertThatThrownBy(
-                            () ->
-                                    resolver.resolve(
-                                            descriptor(disabled.getSchema())
-                                                    .customProperty(option, "json")
-                                                    .build()))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining("custom property");
+            TableDescriptor withCustomProperty =
+                    descriptor(disabled.getSchema()).customProperty(option, "json").build();
+            assertThat(withCustomProperty.getCustomProperties()).containsEntry(option, "json");
+            assertThat(resolver.resolve(withCustomProperty).valueConversionType())
+                    .isEqualTo(KafkaValueConversionType.PARSE_JSON);
         }
         assertThatThrownBy(
                         () ->
                                 resolver.resolve(
                                         descriptor(disabled.getSchema())
                                                 .property(
-                                                        ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE,
+                                                        ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE
+                                                                .key(),
                                                         "string")
                                                 .build()))
                 .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("only supports binary");
+                .hasMessageContaining("Could not parse value 'string'");
     }
 
     @Test
@@ -144,7 +144,8 @@ class KafkaJsonSchemaTest {
                                                                 .build())
                                                 .property(
                                                         ConfigOptions
-                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT
+                                                                .key(),
                                                         "nested")
                                                 .build()))
                 .isInstanceOf(KafkaTopicSchemaException.class)
@@ -176,7 +177,8 @@ class KafkaJsonSchemaTest {
                                                                 .build())
                                                 .property(
                                                         ConfigOptions
-                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT
+                                                                .key(),
                                                         "nested")
                                                 .build()))
                 .isInstanceOf(KafkaTopicSchemaException.class)
@@ -202,7 +204,7 @@ class KafkaJsonSchemaTest {
             TableDescriptor table =
                     descriptor(schema)
                             .property(
-                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
                                     nested ? "nested" : "flat")
                             .build();
             // The persisted contract is valid, but this gateway stage must report INVALID_TOPIC
@@ -220,6 +222,6 @@ class KafkaJsonSchemaTest {
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json");
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json");
     }
 }

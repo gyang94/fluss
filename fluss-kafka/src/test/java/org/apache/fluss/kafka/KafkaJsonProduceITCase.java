@@ -26,6 +26,7 @@ import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
@@ -87,6 +88,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Verifies DDL-discovered JSON writes and native Arrow readback. */
 class KafkaJsonProduceITCase {
@@ -94,10 +96,10 @@ class KafkaJsonProduceITCase {
     private static final byte[] KEY = new byte[] {(byte) 0xff, 1};
     private static final RowType SCALAR_TYPE =
             RowType.builder()
-                    .field("id", DataTypes.INT().copy(false))
+                    .field("id", DataTypes.INT())
                     .field("amount", DataTypes.DECIMAL(30, 10))
-                    .field("received_at", DataTypes.TIMESTAMP(6).copy(false))
-                    .field("emitted_at", DataTypes.TIMESTAMP_LTZ(6).copy(false))
+                    .field("received_at", DataTypes.TIMESTAMP(6))
+                    .field("emitted_at", DataTypes.TIMESTAMP_LTZ(6))
                     .field("float_value", DataTypes.FLOAT())
                     .field("double_value", DataTypes.DOUBLE())
                     .field("optional", DataTypes.STRING())
@@ -194,10 +196,10 @@ class KafkaJsonProduceITCase {
     void testNullValuesPersistWithSystemColumnsAndContinuousOffsets(String layout)
             throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_null_values_" + layout);
-        // A nullable nested parent accepts null even when its business child is NOT NULL.
+        // Null Kafka values populate nullable flat fields or the nullable nested value container.
         RowType valueType =
                 RowType.builder()
-                        .field("id", DataTypes.INT().copy(layout.equals("flat")))
+                        .field("id", DataTypes.INT())
                         .field("label", DataTypes.STRING())
                         .build();
         Header[] headers = {
@@ -282,65 +284,19 @@ class KafkaJsonProduceITCase {
 
     @ParameterizedTest
     @ValueSource(strings = {"flat", "nested"})
-    void testNullValueViolatingRequiredBusinessTypeIsPartitionAtomic(String layout)
-            throws Exception {
+    void testNotNullBusinessFieldsAreRejectedAtTableCreation(String layout) throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_required_value_" + layout);
-        // Flat checks the business field; nested checks the parent even with nullable children.
-        RowType valueType =
-                RowType.builder(false)
-                        .field("id", DataTypes.INT().copy(layout.equals("nested")))
-                        .build();
+        RowType valueType = RowType.builder(false).field("id", DataTypes.INT().copy(false)).build();
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(valueType, layout, true, false, 2));
-            ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
-            try (Socket socket = new Socket(node.host(), node.port());
-                    KafkaProducer<byte[], byte[]> producer = producer()) {
-                ProduceResponse response =
-                        produce(
-                                socket,
-                                path.toString(),
-                                MemoryRecords.withRecords(
-                                        Compression.NONE, record("{\"id\":1000}"), record(null)),
-                                MemoryRecords.withRecords(Compression.NONE, record("{\"id\":1}")));
-                PartitionProduceResponse rejected = partition(response, path.toString(), 0);
-                assertThat(rejected.errorCode()).isEqualTo(Errors.INVALID_RECORD.code());
-                assertThat(rejected.baseOffset()).isEqualTo(-1L);
-                PartitionProduceResponse accepted = partition(response, path.toString(), 1);
-                assertThat(accepted.errorCode()).isEqualTo(Errors.NONE.code());
-                assertThat(accepted.baseOffset()).isZero();
-                assertThat(
-                                producer.send(
-                                                new ProducerRecord<>(
-                                                        path.getTableName(),
-                                                        0,
-                                                        789L,
-                                                        KEY,
-                                                        bytes("{\"id\":-1}")))
-                                        .get(30, TimeUnit.SECONDS)
-                                        .offset())
-                        .isZero();
-                read(
-                        connection,
-                        path,
-                        0,
-                        1,
-                        (row, index) -> {
-                            assertThat(valueId(row, layout)).isEqualTo(-1);
-                            assertMetadata(row, 3, 789L, 0, 0);
-                        });
-                read(
-                        connection,
-                        path,
-                        1,
-                        1,
-                        (row, index) -> {
-                            assertThat(valueId(row, layout)).isEqualTo(1);
-                            assertMetadata(row, 3, 123L, 0, 1);
-                        });
-            } finally {
-                admin.dropTable(path, true).get();
-            }
+            assertThatThrownBy(
+                            () ->
+                                    create(
+                                            admin,
+                                            path,
+                                            descriptor(valueType, layout, true, false, 2)))
+                    .hasCauseInstanceOf(InvalidTableException.class)
+                    .hasStackTraceContaining("nullable fields");
         }
     }
 
@@ -349,7 +305,7 @@ class KafkaJsonProduceITCase {
     void testInvalidPartitionIsAtomicAndDoesNotBlockOtherPartitions(
             String layout, boolean withRescue) throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_rejections_" + layout + "_" + withRescue);
-        RowType valueType = RowType.builder().field("id", DataTypes.INT().copy(false)).build();
+        RowType valueType = RowType.builder().field("id", DataTypes.INT()).build();
         List<String> invalidValues =
                 new ArrayList<>(
                         Arrays.asList(
@@ -357,7 +313,6 @@ class KafkaJsonProduceITCase {
                                 "{",
                                 "null",
                                 "{\"id\":\"bad\"}",
-                                "{\"id\":null}",
                                 "{\"id\":1,\"unknown\":2}",
                                 "{\"id\":1} {}",
                                 "{\"id\":1,\"id\":2}"));
@@ -450,7 +405,7 @@ class KafkaJsonProduceITCase {
     @ValueSource(strings = {"flat", "nested"})
     void testBatchMetadataRoundTripWithAndWithoutTimestamps(String layout) throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_metadata_" + layout);
-        RowType valueType = RowType.builder().field("id", DataTypes.INT().copy(false)).build();
+        RowType valueType = RowType.builder().field("id", DataTypes.INT()).build();
         // Magic v2 batches carry CREATE_TIME or LOG_APPEND_TIME even without a timestamp.
         TimestampType[] types = {
             TimestampType.CREATE_TIME,
@@ -513,12 +468,12 @@ class KafkaJsonProduceITCase {
 
     @ParameterizedTest
     @ValueSource(strings = {"flat", "nested"})
-    void testMissingRequiredMetadataTimestampIsPartitionAtomic(String layout) throws Exception {
+    void testMissingMetadataTimestampPersistsAsNull(String layout) throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_required_timestamp_" + layout);
-        RowType valueType = RowType.builder().field("id", DataTypes.INT().copy(false)).build();
+        RowType valueType = RowType.builder().field("id", DataTypes.INT()).build();
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(valueType, layout, true, false, 2, false));
+            create(admin, path, descriptor(valueType, layout, true, false, 2));
             ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
             try (Socket socket = new Socket(node.host(), node.port());
                     KafkaProducer<byte[], byte[]> producer = producer()) {
@@ -535,9 +490,9 @@ class KafkaJsonProduceITCase {
                                                 KEY,
                                                 bytes("{\"id\":1001}"))),
                                 MemoryRecords.withRecords(Compression.NONE, record("{\"id\":1}")));
-                PartitionProduceResponse rejected = partition(response, path.toString(), 0);
-                assertThat(rejected.errorCode()).isEqualTo(Errors.INVALID_RECORD.code());
-                assertThat(rejected.baseOffset()).isEqualTo(-1L);
+                PartitionProduceResponse missingTimestamp = partition(response, path.toString(), 0);
+                assertThat(missingTimestamp.errorCode()).isEqualTo(Errors.NONE.code());
+                assertThat(missingTimestamp.baseOffset()).isZero();
                 PartitionProduceResponse accepted = partition(response, path.toString(), 1);
                 assertThat(accepted.errorCode()).isEqualTo(Errors.NONE.code());
                 assertThat(accepted.baseOffset()).isZero();
@@ -551,15 +506,23 @@ class KafkaJsonProduceITCase {
                                                         bytes("{\"id\":-1}")))
                                         .get(30, TimeUnit.SECONDS)
                                         .offset())
-                        .isZero();
+                        .isEqualTo(2L);
                 read(
                         connection,
                         path,
                         0,
-                        1,
+                        3,
                         (row, index) -> {
-                            assertThat(valueId(row, layout)).isEqualTo(-1);
-                            assertMetadata(row, 3, 789L, 0, 0);
+                            if (index == 0) {
+                                assertThat(valueId(row, layout)).isEqualTo(1000);
+                                assertMetadata(row, 3, 123L, 0, 0);
+                            } else if (index == 1) {
+                                assertThat(valueId(row, layout)).isEqualTo(1001);
+                                assertMetadata(row, 3, RecordBatch.NO_TIMESTAMP, 0, 0);
+                            } else {
+                                assertThat(valueId(row, layout)).isEqualTo(-1);
+                                assertMetadata(row, 3, 789L, 0, 0);
+                            }
                         });
                 read(
                         connection,
@@ -658,16 +621,6 @@ class KafkaJsonProduceITCase {
             boolean withSystemColumns,
             boolean withRescue,
             int buckets) {
-        return descriptor(valueType, layout, withSystemColumns, withRescue, buckets, true);
-    }
-
-    private static TableDescriptor descriptor(
-            RowType valueType,
-            String layout,
-            boolean withSystemColumns,
-            boolean withRescue,
-            int buckets,
-            boolean nullableTimestamp) {
         Schema.Builder schema = Schema.newBuilder();
         if (withSystemColumns) {
             schema.column(KafkaTableSchema.KEY_COLUMN, DataTypes.BYTES());
@@ -686,12 +639,9 @@ class KafkaJsonProduceITCase {
             schema.column(
                     KafkaTableSchema.METADATA_COLUMN,
                     DataTypes.ROW(
-                                    DataTypes.FIELD(
-                                            "timestamp",
-                                            DataTypes.TIMESTAMP_LTZ(3).copy(nullableTimestamp)),
-                                    DataTypes.FIELD("timestamp_type", DataTypes.INT().copy(false)),
-                                    DataTypes.FIELD("partition", DataTypes.INT().copy(false)))
-                            .copy(false));
+                            DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
+                            DataTypes.FIELD("timestamp_type", DataTypes.INT()),
+                            DataTypes.FIELD("partition", DataTypes.INT())));
         }
         if (withRescue) {
             schema.column(KafkaTableSchema.RESCUE_COLUMN, DataTypes.STRING());
@@ -701,8 +651,8 @@ class KafkaJsonProduceITCase {
                 .distributedBy(buckets)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, layout)
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), layout)
                 .build();
     }
 
