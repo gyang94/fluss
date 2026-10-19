@@ -19,6 +19,8 @@ package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.KafkaKeyConversionType;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.exception.DatabaseNotExistException;
 import org.apache.fluss.exception.TableNotExistException;
@@ -507,7 +509,9 @@ class GatewayKafkaProduceBackendTest {
                             .distributedBy(3)
                             .logFormat(LogFormat.ARROW)
                             .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                            .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                            .property(
+                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                    KafkaValueConversionType.BINARY)
                             .build();
             service.pendingMetadata =
                     CompletableFuture.completedFuture(
@@ -684,17 +688,25 @@ class GatewayKafkaProduceBackendTest {
                 new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
         assertErrors(
                 backend.write(command((short) 1, topic("topic", good(0)))).join(), Errors.NONE);
-        TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
+        TableDescriptor original =
+                TableDescriptor.builder(
+                                TableDescriptor.fromJsonBytes(metadata(false).getTableJson()))
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("_kafka_value", DataTypes.STRING())
+                                        .column("_kafka_key", DataTypes.BYTES())
+                                        .build())
+                        .build();
         for (TableDescriptor invalid :
                 Arrays.asList(
                         TableDescriptor.builder(original)
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "binary")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                        KafkaValueConversionType.BINARY)
                                 .build(),
                         TableDescriptor.builder(original)
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, "nested")
-                                .build(),
-                        TableDescriptor.builder(original)
-                                .property(ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE, "string")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE.key(), "string")
                                 .build())) {
             service.pendingMetadata =
                     CompletableFuture.completedFuture(
@@ -713,9 +725,8 @@ class GatewayKafkaProduceBackendTest {
                                 .setTableJson(
                                         TableDescriptor.builder(original)
                                                 .property(
-                                                        ConfigOptions
-                                                                .TABLE_KAFKA_CONVERT_VALUE_TYPE,
-                                                        "STRING")
+                                                        ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE,
+                                                        KafkaKeyConversionType.BINARY)
                                                 .build()
                                                 .toJsonBytes()));
         assertErrors(
@@ -725,7 +736,7 @@ class GatewayKafkaProduceBackendTest {
         assertThat(transcoder.prepared.get(1)).isNotSameAs(transcoder.prepared.get(0));
         assertThat(transcoder.prepared.get(1).tableInfo().getSchemaId()).isEqualTo(1);
         assertThat(service.appends).hasSize(2);
-        assertThat(service.metadataPaths).hasSize(8);
+        assertThat(service.metadataPaths).hasSize(6);
     }
 
     @Test
@@ -762,7 +773,7 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testRecordNullabilityFailureDoesNotAppendValidPrefix() throws Exception {
+    void testNotNullKeyContractRejectsBeforeAppendingAnyRecords() throws Exception {
         TestingProduceService service = new TestingProduceService();
         TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
         service.pendingMetadata =
@@ -795,13 +806,13 @@ class GatewayKafkaProduceBackendTest {
                                                         Arrays.asList(
                                                                 valid, good(0).records().get(0))))))
                         .join(),
-                Errors.INVALID_RECORD);
+                Errors.INVALID_TOPIC_EXCEPTION);
         assertThat(service.appends).isEmpty();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"binary", "string"})
-    void testNullValueViolationRejectsWholePartitionWithoutAppendingPrefix(String format)
+    void testNullValueViolationRejectsNotNullTableContractBeforeAppending(String format)
             throws Exception {
         TestingProduceService service = new TestingProduceService();
         TableDescriptor original = TableDescriptor.fromJsonBytes(metadata(false).getTableJson());
@@ -816,7 +827,11 @@ class GatewayKafkaProduceBackendTest {
                                                                 : DataTypes.STRING())
                                                         .copy(false))
                                         .build())
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, format)
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                format.equals("binary")
+                                        ? KafkaValueConversionType.BINARY
+                                        : KafkaValueConversionType.STRING)
                         .build();
         service.pendingMetadata =
                 CompletableFuture.completedFuture(
@@ -824,7 +839,7 @@ class GatewayKafkaProduceBackendTest {
         GatewayKafkaProduceBackend backend = backend(service);
         assertErrors(
                 backend.write(command((short) 1, topic("topic", nullValue(0)))).join(),
-                Errors.INVALID_RECORD);
+                Errors.INVALID_TOPIC_EXCEPTION);
         assertThat(service.appends).isEmpty();
 
         Record valid = good(0).records().get(0);
@@ -832,11 +847,9 @@ class GatewayKafkaProduceBackendTest {
                 new PartitionWrite(0, Arrays.asList(valid, nullValue(0).records().get(0), valid));
         assertErrors(
                 backend.write(command((short) 1, topic("topic", invalid, good(1)))).join(),
-                Errors.INVALID_RECORD,
-                Errors.NONE);
-        assertThat(service.appends).hasSize(1);
-        assertThat(service.append.getBucketsReqsList()).hasSize(1);
-        assertThat(service.append.getBucketsReqsList().get(0).getBucketId()).isEqualTo(1);
+                Errors.INVALID_TOPIC_EXCEPTION,
+                Errors.INVALID_TOPIC_EXCEPTION);
+        assertThat(service.appends).isEmpty();
     }
 
     @Test
@@ -872,7 +885,9 @@ class GatewayKafkaProduceBackendTest {
         TableDescriptor json =
                 TableDescriptor.builder(original)
                         .schema(Schema.newBuilder().column("business", DataTypes.STRING()).build())
-                        .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                        .property(
+                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                KafkaValueConversionType.PARSE_JSON)
                         .build();
         service.pendingMetadata =
                 CompletableFuture.completedFuture(metadata(false).setTableJson(json.toJsonBytes()));
@@ -939,7 +954,8 @@ class GatewayKafkaProduceBackendTest {
                         .logFormat(LogFormat.ARROW)
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, true);
         if (!invalid) {
-            descriptor.property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "string");
+            descriptor.property(
+                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, KafkaValueConversionType.STRING);
         }
         return new GetTableInfoResponse()
                 .setTableId(42L)

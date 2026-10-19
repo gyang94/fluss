@@ -59,8 +59,8 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     }
 
     @Override
-    public BytesView transcode(
-            int partitionId, List<Record> records, KafkaTopicWritePlan plan) throws Exception {
+    public BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan)
+            throws Exception {
         checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTableSchema schema = plan.topicSchema();
