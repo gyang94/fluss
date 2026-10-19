@@ -18,10 +18,10 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.metadata.KafkaTableSchema;
-import org.apache.fluss.metadata.KafkaTableSchema.ValueType;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.row.BinaryString;
@@ -48,9 +48,10 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
         KafkaTableSchema schema = schemaResolver.resolve(tableInfo.toTableDescriptor());
-        if (schema.valueType() != ValueType.BINARY && schema.valueType() != ValueType.STRING) {
+        if (schema.valueConversionType() != KafkaValueConversionType.BINARY
+                && schema.valueConversionType() != KafkaValueConversionType.STRING) {
             throw new KafkaRecordEncodingException(
-                    "Unsupported Kafka value conversion type: " + schema.valueType());
+                    "Unsupported Kafka value conversion type: " + schema.valueConversionType());
         }
         KafkaRowAssembler assembler = new KafkaRowAssembler(schema);
         return arrowRecordEncoder.encodeStreaming(
@@ -59,7 +60,9 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                         consumer.append(
                                 assembler.assemble(
                                         new Object[] {
-                                            decode(schema.valueType(), record.borrowedValue())
+                                            decode(
+                                                    schema.valueConversionType(),
+                                                    record.borrowedValue())
                                         },
                                         record,
                                         partitionId));
@@ -68,8 +71,9 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                 tableInfo);
     }
 
-    private static @Nullable Object decode(ValueType format, @Nullable byte[] bytes) {
-        if (bytes == null || format == ValueType.BINARY) {
+    private static @Nullable Object decode(
+            KafkaValueConversionType format, @Nullable byte[] bytes) {
+        if (bytes == null || format == KafkaValueConversionType.BINARY) {
             return bytes;
         }
         try {
