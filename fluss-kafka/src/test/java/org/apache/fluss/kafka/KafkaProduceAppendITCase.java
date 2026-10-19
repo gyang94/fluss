@@ -26,6 +26,7 @@ import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -613,7 +614,11 @@ class KafkaProduceAppendITCase {
                 .distributedBy(1)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, format)
+                .property(
+                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                        format.equals("binary")
+                                ? KafkaValueConversionType.BINARY
+                                : KafkaValueConversionType.STRING)
                 .build();
     }
 
