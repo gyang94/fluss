@@ -35,8 +35,8 @@ public final class KafkaTopicMapper {
 
     // ASCII "Fluss" followed by zero bytes. A dedicated namespace avoids Kafka-reserved UUIDs.
     private static final long TOPIC_ID_NAMESPACE = 0x466c757373000000L;
-    // ASCII "FlussA": Kafka clients require distinct IDs for distinct wire topic names.
-    private static final long ALIAS_TOPIC_ID_NAMESPACE = 0x466c757373410000L;
+    // ASCII "FlussA": distinguishes default-database aliases from canonical topic names.
+    private static final long DEFAULT_DATABASE_TOPIC_ID_NAMESPACE = 0x466c757373410000L;
 
     private final String defaultDatabase;
 
@@ -121,14 +121,14 @@ public final class KafkaTopicMapper {
      */
     public Uuid toAliasTopicId(long tableId) {
         checkArgument(tableId >= 0, "Table ID must be non-negative, but was %s.", tableId);
-        return new Uuid(ALIAS_TOPIC_ID_NAMESPACE, tableId);
+        return new Uuid(DEFAULT_DATABASE_TOPIC_ID_NAMESPACE, tableId);
     }
 
     /** Returns whether a Kafka topic ID can represent a Fluss table ID. */
     public boolean isMappedTopicId(Uuid topicId) {
         return topicId != null
                 && (topicId.getMostSignificantBits() == TOPIC_ID_NAMESPACE
-                        || topicId.getMostSignificantBits() == ALIAS_TOPIC_ID_NAMESPACE)
+                        || topicId.getMostSignificantBits() == DEFAULT_DATABASE_TOPIC_ID_NAMESPACE)
                 && topicId.getLeastSignificantBits() >= 0L;
     }
 
