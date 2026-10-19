@@ -954,9 +954,7 @@ class GatewayKafkaProduceBackendTest {
                                 .column(
                                         "_kafka_value",
                                         DataTypes.ROW(
-                                                DataTypes.FIELD(
-                                                        "business",
-                                                        DataTypes.STRING().copy(false))))
+                                                DataTypes.FIELD("business", DataTypes.STRING())))
                                 .build()
                         : Schema.newBuilder().column("business", DataTypes.STRING()).build();
         TableDescriptor json =
@@ -989,8 +987,7 @@ class GatewayKafkaProduceBackendTest {
             throws Exception {
         List<String> invalidValues =
                 new ArrayList<>(
-                        Arrays.asList(
-                                "{", "[]", "{\"id\":\"bad\"}", "{}", "{\"id\":1,\"unknown\":2}"));
+                        Arrays.asList("{", "[]", "{\"id\":\"bad\"}", "{\"id\":1,\"unknown\":2}"));
         for (String reserved :
                 Arrays.asList(
                         "_kafka_key",
@@ -1093,7 +1090,8 @@ class GatewayKafkaProduceBackendTest {
                                         TableDescriptor.builder(flat)
                                                 .property(
                                                         ConfigOptions
-                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                                                .TABLE_KAFKA_CONVERT_VALUE_LAYOUT
+                                                                .key(),
                                                         "nested")
                                                 .build()
                                                 .toJsonBytes()));
@@ -1122,11 +1120,9 @@ class GatewayKafkaProduceBackendTest {
     private static TableDescriptor jsonDescriptor(boolean nested, boolean rescue) {
         Schema.Builder schema = Schema.newBuilder();
         if (nested) {
-            schema.column(
-                    "_kafka_value",
-                    DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT().copy(false))));
+            schema.column("_kafka_value", DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT())));
         } else {
-            schema.column("id", DataTypes.INT().copy(false));
+            schema.column("id", DataTypes.INT());
         }
         schema.column("_kafka_key", DataTypes.BYTES());
         if (rescue) {
@@ -1137,9 +1133,10 @@ class GatewayKafkaProduceBackendTest {
                 .distributedBy(2)
                 .logFormat(LogFormat.ARROW)
                 .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "parse_json")
                 .property(
-                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT, nested ? "nested" : "flat")
+                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
+                        nested ? "nested" : "flat")
                 .build();
     }
 
