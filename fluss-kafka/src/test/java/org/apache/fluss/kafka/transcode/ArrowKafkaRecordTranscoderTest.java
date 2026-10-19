@@ -549,9 +549,8 @@ class ArrowKafkaRecordTranscoderTest {
                 DataTypes.ROW(
                         DataTypes.FIELD(
                                 "customer",
-                                DataTypes.ROW(
-                                        DataTypes.FIELD("name", DataTypes.STRING().copy(false)))),
-                        DataTypes.FIELD("items", DataTypes.ARRAY(DataTypes.INT().copy(false))),
+                                DataTypes.ROW(DataTypes.FIELD("name", DataTypes.STRING()))),
+                        DataTypes.FIELD("items", DataTypes.ARRAY(DataTypes.INT())),
                         DataTypes.FIELD(
                                 "attributes",
                                 DataTypes.MAP(
@@ -566,9 +565,10 @@ class ArrowKafkaRecordTranscoderTest {
                 table(
                         descriptor(schema.build(), false)
                                 .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE, "parse_json")
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        "parse_json")
                                 .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT,
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
                                         nested ? "nested" : "flat")
                                 .build());
         KafkaTopicWritePlan plan = transcoder.prepare(table);
@@ -584,9 +584,9 @@ class ArrowKafkaRecordTranscoderTest {
                         Collections.emptyList());
         for (String invalid :
                 Arrays.asList(
-                        "{\"customer\":{}}",
+                        "{\"customer\":{\"name\":1}}",
                         "{\"customer\":{\"name\":\"Alice\",\"unknown\":1}}",
-                        "{\"items\":[1,null]}",
+                        "{\"items\":[1,\"bad\"]}",
                         "{\"attributes\":[]}",
                         "{\"attributes\":{\"?\":{\"count\":1},\"\\ud800\":{\"count\":2}}}")) {
             AtomicReference<BytesView> output = new AtomicReference<>();

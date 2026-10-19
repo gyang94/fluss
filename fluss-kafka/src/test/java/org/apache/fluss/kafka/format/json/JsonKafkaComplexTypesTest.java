@@ -17,12 +17,12 @@
 
 package org.apache.fluss.kafka.format.json;
 
+import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
-import org.apache.fluss.metadata.KafkaTableSchema.ValueLayout;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.Decimal;
 import org.apache.fluss.row.GenericArray;
@@ -703,7 +703,7 @@ class JsonKafkaComplexTypesTest {
                     new KafkaFieldProjection(
                             DataTypes.ROW(DataTypes.FIELD(KafkaTableSchema.VALUE_COLUMN, rowType)),
                             Collections.singletonList(0)),
-                    ValueLayout.NESTED);
+                    KafkaValueConversionLayout.NESTED);
         }
         List<Integer> positions = new ArrayList<>();
         for (int i = 0; i < rowType.getFieldCount(); i++) {
