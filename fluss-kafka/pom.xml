@@ -38,6 +38,17 @@
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
             <version>${kafka.version}</version>
+            <!-- Use the codec versions from fluss-common, matching the server fat JAR. -->
+            <exclusions>
+                <exclusion>
+                    <groupId>at.yawk.lz4</groupId>
+                    <artifactId>lz4-java</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.github.luben</groupId>
+                    <artifactId>zstd-jni</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <dependency>
@@ -110,4 +121,33 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>shade-fluss</id>
+                        <configuration>
+                            <!-- Bundle Kafka and its codecs; Fluss core and logging come from the server. -->
+                            <artifactSet combine.self="override">
+                                <includes>
+                                    <include>org.apache.kafka:kafka-clients</include>
+                                    <include>at.yawk.lz4:lz4-java</include>
+                                    <include>com.github.luben:zstd-jni</include>
+                                    <include>org.xerial.snappy:snappy-java</include>
+                                </includes>
+                            </artifactSet>
+                            <!-- Retain classes loaded reflectively by Kafka and the native codecs. -->
+                            <minimizeJar>false</minimizeJar>
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <createDependencyReducedPom>true</createDependencyReducedPom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
