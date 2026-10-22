@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.backend.metadata;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.exception.DatabaseNotExistException;
+import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.metadata.KafkaClusterMetadata.Broker;
 import org.apache.fluss.kafka.backend.metadata.KafkaClusterMetadata.Partition;
 import org.apache.fluss.kafka.backend.metadata.KafkaClusterMetadata.Topic;
@@ -110,84 +111,72 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
 
     private CompletableFuture<KafkaClusterMetadata> requestFlussMetadata(
             KafkaMetadataQuery query, Set<TablePath> tablePaths) {
-        return requestFlussMetadata(query, tablePaths, true);
+        // Native Metadata fails the entire batch when a table is missing. Read broker metadata
+        // once, then resolve each distinct table once so a failure cannot discard other topics.
+        Map<TablePath, TopicError> tableErrors = new HashMap<>();
+        CompletableFuture<MetadataResponse> responseFuture =
+                requestMetadata(query, new MetadataRequest());
+        for (TablePath tablePath : tablePaths) {
+            responseFuture =
+                    responseFuture.thenCompose(
+                            response -> {
+                                MetadataRequest request = new MetadataRequest();
+                                request.addAllTablePaths(
+                                        Collections.singletonList(
+                                                new PbTablePath()
+                                                        .setDatabaseName(
+                                                                tablePath.getDatabaseName())
+                                                        .setTableName(tablePath.getTableName())));
+                                return requestMetadata(query, request)
+                                        .handle(
+                                                (tableResponse, failure) -> {
+                                                    if (failure == null) {
+                                                        response.addAllTableMetadatas(
+                                                                tableResponse
+                                                                        .getTableMetadatasList());
+                                                    } else {
+                                                        tableErrors.put(
+                                                                tablePath,
+                                                                tableMetadataError(
+                                                                        tablePath, failure));
+                                                    }
+                                                    return response;
+                                                });
+                            });
+        }
+        return responseFuture.thenApply(response -> toKafkaMetadata(query, response, tableErrors));
     }
 
-    private CompletableFuture<KafkaClusterMetadata> requestFlussMetadata(
-            KafkaMetadataQuery query, Set<TablePath> tablePaths, boolean refreshAndRetry) {
-        MetadataRequest request = new MetadataRequest();
-        for (TablePath tablePath : tablePaths) {
-            request.addAllTablePaths(
-                    Collections.singletonList(
-                            new PbTablePath()
-                                    .setDatabaseName(tablePath.getDatabaseName())
-                                    .setTableName(tablePath.getTableName())));
-        }
+    private CompletableFuture<MetadataResponse> requestMetadata(
+            KafkaMetadataQuery query, MetadataRequest request) {
         setCurrentSession(query);
         try {
-            return gateway.metadata(request)
-                    .handle(
-                            (response, failure) ->
-                                    failure == null
-                                            ? CompletableFuture.completedFuture(
-                                                    toKafkaMetadata(query, response))
-                                            : recoverMetadataFailure(
-                                                    query, failure, refreshAndRetry))
-                    .thenCompose(future -> future);
-        } catch (Throwable failure) {
-            return recoverMetadataFailure(query, failure, refreshAndRetry);
+            return gateway.metadata(request);
+        } catch (Exception failure) {
+            return FutureUtils.completedExceptionally(failure);
         }
     }
 
-    private CompletableFuture<KafkaClusterMetadata> recoverMetadataFailure(
-            KafkaMetadataQuery query, Throwable failure, boolean refreshAndRetry) {
-        if (refreshAndRetry) {
-            return currentTablePaths(query)
-                    .thenCompose(currentPaths -> requestFlussMetadata(query, currentPaths, false));
-        }
+    private TopicError tableMetadataError(TablePath tablePath, Throwable failure) {
         Throwable cause = ExceptionUtils.stripCompletionException(failure);
-        LOG.warn("Failed to load Kafka metadata from Fluss.", cause);
-        CompletableFuture<KafkaClusterMetadata> failed = new CompletableFuture<>();
-        failed.completeExceptionally(cause);
-        return failed;
+        // MetadataManager can wrap missing-table errors in FlussRuntimeException.
+        if (ExceptionUtils.findThrowable(
+                        cause,
+                        error ->
+                                error instanceof TableNotExistException
+                                        || error instanceof DatabaseNotExistException)
+                .isPresent()) {
+            return TopicError.UNKNOWN_TOPIC_OR_PARTITION;
+        }
+        LOG.warn("Failed to load Kafka metadata for table {}.", tablePath, cause);
+        return TopicError.UNKNOWN_SERVER_ERROR;
     }
 
     private CompletableFuture<Set<TablePath>> currentTablePaths(KafkaMetadataQuery query) {
-        CompletableFuture<Set<String>> databasesFuture;
-        if (query.allTopics() || containsTopicId(query.topics())) {
-            setCurrentSession(query);
-            databasesFuture =
-                    gateway.listDatabases(new ListDatabasesRequest())
-                            .thenApply(
-                                    response ->
-                                            new LinkedHashSet<>(response.getDatabaseNamesList()));
-        } else {
-            Set<String> databases = new LinkedHashSet<>();
-            for (TopicReference topic : query.topics()) {
-                if (topic.topicName() != null) {
-                    databases.add(topicMapper.toTablePath(topic.topicName()).getDatabaseName());
-                }
-            }
-            databasesFuture = CompletableFuture.completedFuture(databases);
-        }
-        return databasesFuture
-                .thenCompose(databases -> listTablePaths(query, databases))
-                .thenApply(
-                        currentPaths -> {
-                            if (!query.allTopics() && !containsTopicId(query.topics())) {
-                                Set<TablePath> requestedTables = new HashSet<>();
-                                for (TopicReference topic : query.topics()) {
-                                    if (topic.topicName() != null) {
-                                        requestedTables.add(
-                                                topicMapper.toTablePath(topic.topicName()));
-                                    }
-                                }
-                                // Canonical names and aliases share one table identity, including
-                                // when a missing database triggers this discovery retry.
-                                currentPaths.retainAll(requestedTables);
-                            }
-                            return currentPaths;
-                        });
+        setCurrentSession(query);
+        return gateway.listDatabases(new ListDatabasesRequest())
+                .thenApply(response -> new LinkedHashSet<>(response.getDatabaseNamesList()))
+                .thenCompose(databases -> listTablePaths(query, databases));
     }
 
     private CompletableFuture<Set<TablePath>> listTablePaths(
@@ -235,7 +224,9 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
     }
 
     private KafkaClusterMetadata toKafkaMetadata(
-            KafkaMetadataQuery query, MetadataResponse response) {
+            KafkaMetadataQuery query,
+            MetadataResponse response,
+            Map<TablePath, TopicError> tableErrors) {
         List<Broker> brokers = new ArrayList<>();
         Set<Integer> aliveBrokerIds = new HashSet<>();
         for (PbServerNode server : response.getTabletServersList()) {
@@ -260,6 +251,20 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
             if (topic != null) {
                 topicsByTable.put(tablePath, topic);
                 topicsById.put(topic.topicId(), topic);
+            }
+        }
+
+        for (Map.Entry<TablePath, TopicError> entry : tableErrors.entrySet()) {
+            if (!query.allTopics() || entry.getValue() != TopicError.UNKNOWN_TOPIC_OR_PARTITION) {
+                // A table deleted after discovery is omitted from all-topics responses. Explicit
+                // names retain their own error, while unexpected table failures remain visible.
+                topicsByTable.put(
+                        entry.getKey(),
+                        new Topic(
+                                entry.getKey().toString(),
+                                Uuid.ZERO_UUID,
+                                entry.getValue(),
+                                Collections.emptyList()));
             }
         }
 

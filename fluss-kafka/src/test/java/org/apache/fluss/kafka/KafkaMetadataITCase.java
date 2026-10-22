@@ -136,8 +136,7 @@ public class KafkaMetadataITCase {
         CLUSTER.waitUntilTableReady(tableId);
         for (short version = 0; version <= 11; version++) {
             for (ServerNode broker : CLUSTER.getTabletServerNodes("KAFKA")) {
-                // The missing database forces the same discovery retry that used to discard
-                // aliases.
+                // A missing database must not discard aliases or valid topics in the response.
                 MetadataResponse response =
                         query(
                                 broker,
