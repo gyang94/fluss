@@ -291,7 +291,7 @@ public class KafkaMetadataHandlerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    public void testMetadataColumnContractForEveryVersion(boolean legacyOffset) {
+    public void testEnabledTablesDoNotRevalidateColumnContract(boolean legacyOffset) {
         RowType metadataType =
                 DataTypes.ROW(
                         DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
@@ -306,7 +306,8 @@ public class KafkaMetadataHandlerTest {
                             DataTypes.FIELD("offset", DataTypes.BIGINT()));
         }
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
-        // Also model an invalid historical descriptor that native DDL would now reject.
+        // Native DDL owns schema validation. Metadata only checks the persisted enablement flag,
+        // even for a historical descriptor that current DDL would reject.
         service.putTable(
                 "fluss.metadata_events",
                 777L,
@@ -317,7 +318,6 @@ public class KafkaMetadataHandlerTest {
                                         .column("_kafka_metadata", metadataType)
                                         .build())
                         .build());
-        short expected = legacyOffset ? Errors.INVALID_TOPIC_EXCEPTION.code() : Errors.NONE.code();
         for (short version = 0; version <= 11; version++) {
             MetadataResponse named =
                     handle(
@@ -330,15 +330,15 @@ public class KafkaMetadataHandlerTest {
                             version);
             for (String name : Arrays.asList("metadata_events", "fluss.metadata_events")) {
                 MetadataResponseTopic topic = named.data().topics().find(name);
-                assertThat(topic.errorCode()).isEqualTo(expected);
-                assertThat(topic.partitions()).hasSize(legacyOffset ? 0 : 2);
+                assertThat(topic.errorCode()).isEqualTo(Errors.NONE.code());
+                assertThat(topic.partitions()).hasSize(2);
             }
             assertThat(named.data().topics().find("kafka.topic").errorCode())
                     .isEqualTo(Errors.NONE.code());
 
             MetadataResponse all = handle(service, allTopicsRequest(version), version);
             assertThat(all.data().topics().find("fluss.metadata_events").errorCode())
-                    .isEqualTo(expected);
+                    .isEqualTo(Errors.NONE.code());
             assertThat(all.data().topics().find("kafka.topic").errorCode())
                     .isEqualTo(Errors.NONE.code());
             assertThat(all.data().topics())
@@ -836,7 +836,8 @@ public class KafkaMetadataHandlerTest {
             }
             if (failure != null) {
                 if (failListTablesAsFuture) {
-                    return FutureUtils.completedExceptionally(new CompletionException(failure));
+                    return FutureUtils.completedExceptionally(
+                            new CompletionException(new CompletionException(failure)));
                 }
                 throw failure;
             }

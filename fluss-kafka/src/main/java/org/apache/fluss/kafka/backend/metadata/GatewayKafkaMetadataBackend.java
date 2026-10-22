@@ -25,7 +25,7 @@ import org.apache.fluss.kafka.backend.metadata.KafkaClusterMetadata.Topic;
 import org.apache.fluss.kafka.backend.metadata.KafkaClusterMetadata.TopicError;
 import org.apache.fluss.kafka.backend.metadata.KafkaMetadataQuery.TopicReference;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
+import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.RpcGatewayService;
@@ -41,6 +41,7 @@ import org.apache.fluss.rpc.messages.PbTableMetadata;
 import org.apache.fluss.rpc.messages.PbTablePath;
 import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.utils.ExceptionUtils;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.common.Uuid;
@@ -74,7 +75,6 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
     private final RpcGatewayService service;
     private final TabletServerGateway gateway;
     private final KafkaTopicMapper topicMapper;
-    private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
 
     /**
      * Creates a metadata backend backed by the local TabletServer gateway.
@@ -145,9 +145,10 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
             return currentTablePaths(query)
                     .thenCompose(currentPaths -> requestFlussMetadata(query, currentPaths, false));
         }
-        LOG.warn("Failed to load Kafka metadata from Fluss.", unwrap(failure));
+        Throwable cause = ExceptionUtils.stripCompletionException(failure);
+        LOG.warn("Failed to load Kafka metadata from Fluss.", cause);
         CompletableFuture<KafkaClusterMetadata> failed = new CompletableFuture<>();
-        failed.completeExceptionally(unwrap(failure));
+        failed.completeExceptionally(cause);
         return failed;
     }
 
@@ -223,7 +224,7 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
         }
         return tablesFuture.exceptionally(
                 failure -> {
-                    Throwable cause = unwrap(failure);
+                    Throwable cause = ExceptionUtils.stripCompletionException(failure);
                     if (cause instanceof DatabaseNotExistException) {
                         // A database may be missing or deleted after listDatabases. Keep loading
                         // the remaining topics and brokers through the normal metadata request.
@@ -264,7 +265,8 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
 
         List<Topic> topics = new ArrayList<>();
         if (query.allTopics()) {
-            // Invalid enabled tables remain visible as errors. Only disabled tables are omitted.
+            // Tables with invalid Kafka names remain visible as errors. Disabled tables are
+            // omitted.
             topics.addAll(topicsByTable.values());
             Collections.sort(topics, Comparator.comparing(Topic::name));
         } else {
@@ -296,16 +298,13 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
         String topicName = tablePath.toString();
         try {
             TableDescriptor descriptor = TableDescriptor.fromJsonBytes(table.getTableJson());
-            if (!schemaResolver.isEnabled(descriptor)) {
+            if (!KafkaTableSchema.isEnabled(descriptor)) {
                 return null;
             }
+            // Native DDL validates the write contract when Kafka compatibility is enabled.
             topicMapper.toTopicName(tablePath);
-            schemaResolver.resolve(descriptor);
         } catch (IllegalArgumentException | InvalidTopicException e) {
-            LOG.debug(
-                    "Enabled table {} has an invalid Kafka contract: {}",
-                    topicName,
-                    e.getMessage());
+            LOG.debug("Table {} has invalid Kafka metadata: {}", topicName, e.getMessage());
             return new Topic(
                     topicName,
                     topicMapper.toTopicId(table.getTableId()),
@@ -387,13 +386,5 @@ public final class GatewayKafkaMetadataBackend implements KafkaMetadataBackend {
             }
         }
         return false;
-    }
-
-    private static Throwable unwrap(Throwable failure) {
-        Throwable current = failure;
-        while (current instanceof CompletionException && current.getCause() != null) {
-            current = current.getCause();
-        }
-        return current;
     }
 }

@@ -26,7 +26,6 @@ import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
-import org.apache.fluss.server.zk.data.TableRegistration;
 import org.apache.fluss.types.DataTypes;
 
 import org.apache.kafka.common.Node;
@@ -49,8 +48,6 @@ import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
 
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.createTable;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.dropDatabase;
@@ -237,54 +234,6 @@ public class KafkaMetadataITCase {
                                 false))
                 .get();
         assertExposure(node, false, tableId);
-    }
-
-    @Test
-    public void testInvalidEnabledContractRemainsVisibleInNamedAndAllTopics() throws Exception {
-        TablePath path = TablePath.of("fluss", "events");
-        long tableId = createTable(CLUSTER, path, topicDescriptor());
-        long validId = createTable(CLUSTER, TablePath.of("sales", "valid"), topicDescriptor());
-        CLUSTER.waitUntilTableReady(tableId);
-        CLUSTER.waitUntilTableReady(validId);
-        TableRegistration registration = CLUSTER.getZooKeeperClient().getTable(path).get();
-        Map<String, String> invalidProperties = new HashMap<>(registration.properties);
-        invalidProperties.put(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "string");
-        // Bypass current DDL validation to model historical persisted metadata with a damaged
-        // contract. Metadata must expose the enabled table's error, not hide it as disabled.
-        CLUSTER.getZooKeeperClient()
-                .updateTable(
-                        path,
-                        registration.newProperties(
-                                invalidProperties, registration.customProperties));
-        ServerNode node = CLUSTER.getTabletServerInfos().get(0).node("KAFKA");
-        retry(
-                Duration.ofMinutes(1),
-                () ->
-                        assertThat(
-                                        query(node, named((short) 11, "events"))
-                                                .data()
-                                                .topics()
-                                                .find("events")
-                                                .errorCode())
-                                .isEqualTo(Errors.INVALID_TOPIC_EXCEPTION.code()));
-        for (short version = 0; version <= 11; version++) {
-            MetadataResponse named =
-                    query(node, named(version, "events", "fluss.events", "sales.valid"));
-            for (String topic : Arrays.asList("events", "fluss.events")) {
-                assertThat(named.data().topics().find(topic).errorCode())
-                        .isEqualTo(Errors.INVALID_TOPIC_EXCEPTION.code());
-                assertThat(named.data().topics().find(topic).partitions()).isEmpty();
-            }
-            MetadataResponse all = query(node, allTopics(version));
-            assertThat(all.brokers()).hasSize(2);
-            assertThat(all.data().topics())
-                    .extracting(MetadataResponseTopic::name)
-                    .containsExactly("fluss.events", "sales.valid");
-            assertThat(all.data().topics().find("fluss.events").errorCode())
-                    .isEqualTo(Errors.INVALID_TOPIC_EXCEPTION.code());
-            assertThat(all.data().topics().find("sales.valid").errorCode())
-                    .isEqualTo(Errors.NONE.code());
-        }
     }
 
     @Test
