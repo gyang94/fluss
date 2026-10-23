@@ -75,7 +75,7 @@ class KafkaProduceCommandTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testBothConstructorsBorrowPayloadsAndCopyHeaders(boolean explicitTimestampType) {
+    void testBothConstructorsBorrowPayloadsAndCopyHeaderList(boolean explicitTimestampType) {
         byte[] key = {1};
         byte[] value = {2};
         byte[] headerValue = {3};
@@ -103,9 +103,9 @@ class KafkaProduceCommandTest {
                 .extracting(RecordHeader::name)
                 .containsExactly("header", "header");
         byte[] returnedHeaderValue = record.headers().get(0).value();
-        assertThat(returnedHeaderValue).containsExactly((byte) 3);
+        assertThat(returnedHeaderValue).isSameAs(headerValue).containsExactly((byte) 6);
         returnedHeaderValue[0] = 7;
-        assertThat(record.headers().get(0).value()).containsExactly((byte) 3);
+        assertThat(record.headers().get(0).value()).containsExactly((byte) 7);
         assertThat(record.headers().get(1).value()).isNull();
         assertThat(record.timestamp()).isEqualTo(123L);
         assertThat(record.timestampType())

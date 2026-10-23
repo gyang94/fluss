@@ -155,7 +155,7 @@ public final class KafkaProduceCommand {
     }
 
     /**
-     * A Kafka record with borrowed key/value bytes and copied headers.
+     * A Kafka record with borrowed key/value bytes and a snapshot of the header list.
      *
      * <p>Accessors return read-only views with independent positions and limits. These views share
      * the input storage and do not retain it. The caller must keep that storage alive and unchanged
@@ -230,19 +230,19 @@ public final class KafkaProduceCommand {
             return readOnlyView(value);
         }
 
-        /** Returns the copied Kafka headers in record order. */
+        /** Returns an unmodifiable snapshot of the header list in record order. */
         public List<RecordHeader> headers() {
             return headers;
         }
     }
 
-    /** A copied Kafka record header. */
+    /** A Kafka record header with a byte-array value. */
     @Internal
     public static final class RecordHeader {
         private final String name;
         private final @Nullable byte[] value;
 
-        /** Creates a copied Kafka record header. */
+        /** Creates a Kafka record header without copying the supplied value. */
         public RecordHeader(String name, @Nullable byte[] value) {
             this.name = checkNotNull(name);
             this.value = value;
@@ -253,7 +253,7 @@ public final class KafkaProduceCommand {
             return name;
         }
 
-        /** Returns a copy of the header value, or null. */
+        /** Returns the header value directly, or null. */
         public @Nullable byte[] value() {
             return value;
         }
