@@ -54,8 +54,9 @@ public final class KafkaRowAssembler {
      * Assembles one Fluss row from a record and its requested partition for immediate synchronous
      * encoding.
      *
-     * <p>Binary fields are materialized from the command's read-only views for Arrow. The row must
-     * not be retained after conversion.
+     * <p>Key bytes are materialized from the command's read-only view for Arrow. The row borrows
+     * header value arrays for immediate encoding; consumers must not modify them or retain the row
+     * after conversion.
      */
     public GenericRow assemble(Object[] valueValues, Record record, int partitionId) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
@@ -144,7 +145,7 @@ public final class KafkaRowAssembler {
 
     private static GenericMap toHeaders(List<RecordHeader> headers, MapType type) {
         Map<BinaryString, byte[]> values = new LinkedHashMap<>();
-        // Walk backwards so overwritten header values never need a payload copy.
+        // Walk backwards to retain only the last value for each header name.
         for (int i = headers.size() - 1; i >= 0; i--) {
             RecordHeader header = headers.get(i);
             BinaryString name = BinaryString.fromString(header.name());

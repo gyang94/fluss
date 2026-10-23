@@ -75,7 +75,7 @@ class KafkaProduceCommandTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testBothConstructorsBorrowPayloadsAndCopyHeaderList(boolean explicitTimestampType) {
+    void testBothConstructorsBorrowPayloadsAndOwnHeaderList(boolean explicitTimestampType) {
         byte[] key = {1};
         byte[] value = {2};
         byte[] headerValue = {3};
@@ -93,6 +93,7 @@ class KafkaProduceCommandTest {
                                 ByteBuffer.wrap(value),
                                 headers)
                         : new Record(123L, ByteBuffer.wrap(key), ByteBuffer.wrap(value), headers);
+        // Mutations expose aliasing here; production consumers must not modify borrowed bytes.
         key[0] = 4;
         value[0] = 5;
         headerValue[0] = 6;
@@ -105,7 +106,10 @@ class KafkaProduceCommandTest {
         byte[] returnedHeaderValue = record.headers().get(0).value();
         assertThat(returnedHeaderValue).isSameAs(headerValue).containsExactly((byte) 6);
         returnedHeaderValue[0] = 7;
-        assertThat(record.headers().get(0).value()).containsExactly((byte) 7);
+        assertThat(record.headers().get(0).value())
+                .isSameAs(returnedHeaderValue)
+                .containsExactly((byte) 7);
+        assertThat(headerValue).containsExactly((byte) 7);
         assertThat(record.headers().get(1).value()).isNull();
         assertThat(record.timestamp()).isEqualTo(123L);
         assertThat(record.timestampType())
@@ -167,18 +171,19 @@ class KafkaProduceCommandTest {
     void testEmptyPayloadsRemainDistinctFromNull() {
         ByteBuffer exhausted = ByteBuffer.wrap(new byte[] {1});
         exhausted.position(exhausted.limit());
+        byte[] emptyHeaderValue = new byte[0];
         Record record =
                 new Record(
                         123L,
                         ByteBuffer.allocate(0),
                         exhausted,
                         Arrays.asList(
-                                new RecordHeader("empty", new byte[0]),
+                                new RecordHeader("empty", emptyHeaderValue),
                                 new RecordHeader("null", null)));
 
         assertReadOnlyViews(record::key);
         assertReadOnlyViews(record::value);
-        assertThat(record.headers().get(0).value()).isEmpty();
+        assertThat(record.headers().get(0).value()).isSameAs(emptyHeaderValue).isEmpty();
         assertThat(record.headers().get(1).value()).isNull();
         assertThat(exhausted.position()).isEqualTo(1);
     }

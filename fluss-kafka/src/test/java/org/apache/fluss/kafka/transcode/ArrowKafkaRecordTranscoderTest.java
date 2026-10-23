@@ -143,6 +143,7 @@ class ArrowKafkaRecordTranscoderTest {
         byte[] key = bytes("key");
         byte[] header = bytes("header");
         TableInfo table = envelope(string, 15);
+        KafkaTopicWritePlan plan = transcoder.prepare(table);
         int[] partitions = {7, 3};
         List<BytesView> encoded = new ArrayList<>();
         try {
@@ -167,9 +168,15 @@ class ArrowKafkaRecordTranscoderTest {
             }
             // Changing caller/view cursors must not change the record's borrowed range.
             source.clear();
-            for (int partition : partitions) {
+            // Exercise both entry points while reusing one immutable conversion plan.
+            for (int i = 0; i < partitions.length; i++) {
                 encoded.add(
-                        transcoder.transcode(partition, Collections.singletonList(input), table));
+                        i == 0
+                                ? transcoder.transcode(
+                                        partitions[i], Collections.singletonList(input), table)
+                                : transcoder.transcode(
+                                        partitions[i], Collections.singletonList(input), plan));
+                assertThat(transcoder.prepare(table)).isSameAs(plan);
             }
             for (ByteBuffer view : Arrays.asList(keyView, valueView)) {
                 assertThat(view.position()).isEqualTo(1);
@@ -177,12 +184,11 @@ class ArrowKafkaRecordTranscoderTest {
             }
             assertThat(input.key()).isEqualTo(ByteBuffer.wrap(bytes("key")));
             assertThat(input.value()).isEqualTo(ByteBuffer.wrap(expectedValue));
-            assertThat(input.headers().get(0).value()).isEqualTo(bytes("header"));
+            assertThat(input.headers().get(0).value()).isSameAs(header).isEqualTo(bytes("header"));
 
             // Destroy borrowed payloads only after synchronous transcoding has finished.
             Arrays.fill(key, (byte) 0);
             Arrays.fill(header, (byte) 0);
-            Arrays.fill(input.headers().get(0).value(), (byte) 0);
             storage.setZero(0, storage.readableBytes());
         } finally {
             storage.release();
@@ -201,6 +207,139 @@ class ArrowKafkaRecordTranscoderTest {
                         assertMetadata(row, 4, 123L, 0, partition);
                     });
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {3, 4})
+    void testSchemaChangeRebuildsFieldMapping(int schemaId) throws Exception {
+        TableInfo original = envelope(false, 15);
+        KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
+        List<Record> records =
+                Collections.singletonList(
+                        record(
+                                123L,
+                                TimestampType.CREATE_TIME,
+                                bytes("key"),
+                                bytes("value"),
+                                Collections.singletonList(new RecordHeader("h", bytes("header")))));
+        BytesView originalOutput = transcoder.transcode(7, records, originalPlan);
+        TableInfo changed =
+                table(
+                        original.getTableId(),
+                        schemaId,
+                        descriptor(
+                                        Schema.newBuilder()
+                                                .column("_kafka_value", DataTypes.BYTES())
+                                                .column("_kafka_metadata", metadataType(true))
+                                                .column("_kafka_key", DataTypes.BYTES())
+                                                .column(
+                                                        "_kafka_headers",
+                                                        DataTypes.MAP(
+                                                                DataTypes.STRING(),
+                                                                DataTypes.BYTES()))
+                                                .build(),
+                                        false)
+                                .build());
+
+        KafkaTopicWritePlan changedPlan = transcoder.prepare(changed);
+        assertThat(changedPlan).isNotSameAs(originalPlan);
+        assertThat(changedPlan.rowAssembler()).isNotSameAs(originalPlan.rowAssembler());
+        read(
+                transcoder.transcode(3, records, changed),
+                changed,
+                1,
+                row -> {
+                    assertThat(row.getFieldCount()).isEqualTo(4);
+                    assertThat(row.getBytes(0)).isEqualTo(bytes("value"));
+                    assertMetadata(row, 1, 123L, 0, 3);
+                    assertThat(row.getBytes(2)).isEqualTo(bytes("key"));
+                    assertThat(headers(row.getMap(3)).get("h")).isEqualTo(bytes("header"));
+                });
+        assertThat(transcoder.prepare(changed)).isSameAs(changedPlan);
+        // An output produced with the earlier plan still carries its original schema and layout.
+        read(
+                originalOutput,
+                original,
+                1,
+                row -> {
+                    assertThat(row.getFieldCount()).isEqualTo(5);
+                    assertThat(headers(row.getMap(0)).get("h")).isEqualTo(bytes("header"));
+                    assertThat(row.isNullAt(1)).isTrue();
+                    assertThat(row.getBytes(2)).isEqualTo(bytes("value"));
+                    assertThat(row.getBytes(3)).isEqualTo(bytes("key"));
+                    assertMetadata(row, 4, 123L, 0, 7);
+                });
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "table.kafka.enabled, false, disabled",
+        "table.kafka.convert.value.type, binary, _kafka_value must be BYTES",
+        "table.kafka.convert.key.type, binary, requires _kafka_key BYTES"
+    })
+    void testKafkaPropertyChangesRevalidateWithoutSchemaIdChange(
+            String property, String value, String expectedMessage) throws Exception {
+        TableInfo original = valueTable(false);
+        KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
+        TableInfo changed =
+                table(descriptor(original.getSchema(), true).property(property, value).build());
+        assertThat(changed.getTableId()).isEqualTo(original.getTableId());
+        assertThat(changed.getSchemaId()).isEqualTo(original.getSchemaId());
+        assertThat(changed.getModifiedTime()).isEqualTo(original.getModifiedTime());
+        List<Record> records =
+                Collections.singletonList(
+                        record(1L, null, bytes("value"), Collections.emptyList()));
+
+        // A warm plan must never bypass a changed Kafka contract, including after a failed compile.
+        for (int i = 0; i < 2; i++) {
+            assertThatThrownBy(() -> transcoder.transcode(0, records, changed))
+                    .isInstanceOf(KafkaTopicSchemaException.class)
+                    .hasMessageContaining(expectedMessage);
+        }
+        TableInfo restored = table(original.toTableDescriptor());
+        KafkaTopicWritePlan restoredPlan = transcoder.prepare(restored);
+        assertThat(restoredPlan).isNotSameAs(originalPlan);
+        read(
+                transcoder.transcode(0, records, restoredPlan),
+                restored,
+                1,
+                row -> assertThat(row.getString(0).toString()).isEqualTo("value"));
+        assertThat(transcoder.prepare(restored)).isSameAs(restoredPlan);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 3})
+    void testTableRecreationReplacesPlanEvenWithTheSameSchema(int schemaId) throws Exception {
+        TableInfo original = envelope(false, 15);
+        KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
+        TableInfo recreated =
+                table(original.getTableId() + 1, schemaId, original.toTableDescriptor());
+        assertThat(recreated.getTablePath()).isEqualTo(original.getTablePath());
+        assertThat(recreated.getRowType()).isEqualTo(original.getRowType());
+
+        KafkaTopicWritePlan recreatedPlan = transcoder.prepare(recreated);
+        assertThat(recreatedPlan).isNotSameAs(originalPlan);
+        assertThat(recreatedPlan.tableInfo()).isSameAs(recreated);
+        assertThat(recreatedPlan.tableInfo().getTableId()).isEqualTo(43L);
+        byte[] value = {(byte) 0xff, 1};
+        read(
+                transcoder.transcode(
+                        3,
+                        Collections.singletonList(
+                                record(
+                                        123L,
+                                        TimestampType.LOG_APPEND_TIME,
+                                        null,
+                                        value,
+                                        Collections.emptyList())),
+                        recreated),
+                recreated,
+                1,
+                row -> {
+                    assertThat(row.getBytes(2)).isEqualTo(value);
+                    assertMetadata(row, 4, 123L, 1, 3);
+                });
+        assertThat(transcoder.prepare(recreated)).isSameAs(recreatedPlan);
     }
 
     @ParameterizedTest
@@ -955,7 +1094,12 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     private static TableInfo table(TableDescriptor descriptor) {
-        return TableInfo.of(TablePath.of("fluss", "topic"), 42L, 3, descriptor, null, 1L, 1L);
+        return table(42L, 3, descriptor);
+    }
+
+    private static TableInfo table(long tableId, int schemaId, TableDescriptor descriptor) {
+        return TableInfo.of(
+                TablePath.of("fluss", "topic"), tableId, schemaId, descriptor, null, 1L, 1L);
     }
 
     private static Map<String, byte[]> headers(InternalMap map) {

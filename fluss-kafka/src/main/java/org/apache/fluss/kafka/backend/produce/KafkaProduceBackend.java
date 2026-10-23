@@ -27,15 +27,17 @@ public interface KafkaProduceBackend {
     /**
      * Consumes Kafka records synchronously and writes them through the native Fluss write path.
      *
-     * <p>All accesses to command buffers must finish before this method returns or throws. Record
-     * keys and values are borrowed read-only views of storage that may belong to the network
-     * request. That storage can be released as soon as request handling returns, without waiting
-     * for the returned future. Read-only views do not extend the storage's lifetime.
+     * <p>All accesses to borrowed command payloads must finish before this method returns or
+     * throws. Record keys and values are borrowed read-only views of storage that may belong to the
+     * network request; header values are borrowed byte arrays. The caller keeps these bytes alive
+     * and unchanged during this call, and consumers must not modify them. Input storage can be
+     * released or reused as soon as request handling returns, without waiting for the returned
+     * future. Read-only views do not extend the storage's lifetime.
      *
      * <p>Implementations must decode the payloads into independent objects (for example JSON
      * objects or Fluss rows) before returning. Asynchronous work must use only independently owned
-     * data and must not retain the command's records or buffers. The returned future represents
-     * completion of the write, not permission to continue reading the input buffers.
+     * data and must not retain the command's records, buffers or header arrays. The returned future
+     * represents completion of the write, not permission to continue reading the input payloads.
      */
     CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command);
 }
