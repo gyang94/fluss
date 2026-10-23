@@ -32,12 +32,14 @@ import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaTopicWritePlan;
+import org.apache.fluss.memory.MemorySegment;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.bytesview.BytesView;
+import org.apache.fluss.record.bytesview.MemorySegmentBytesView;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
@@ -438,44 +440,95 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testOffloadedRequestsAppendInOrderWithoutWaitingForAcknowledgement() throws Exception {
+    void testAliasesConvertConcurrentlyButAppendInOrderWithoutWaitingForAcknowledgement()
+            throws Exception {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(2, 4);
         TestingProduceService service = new TestingProduceService();
-        service.pendingMetadata = new CompletableFuture<>();
         service.pendingAppend = new CompletableFuture<>();
-        service.metadataEntered = new CountDownLatch(1);
         service.appended = new CountDownLatch(2);
+        CountDownLatch firstConverting = new CountDownLatch(1);
+        CountDownLatch secondConverted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        KafkaRecordTranscoder transcoder =
+                (partitionId, records, table) -> {
+                    byte[] value = records.get(0).value();
+                    if (value[0] == 1) {
+                        firstConverting.countDown();
+                        assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
+                    } else {
+                        secondConverted.countDown();
+                    }
+                    return new MemorySegmentBytesView(MemorySegment.wrap(value), 0, value.length);
+                };
         GatewayKafkaProduceBackend backend =
-                new GatewayKafkaProduceBackend(
-                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder, executor);
         try {
             CompletableFuture<KafkaProduceResult> first =
-                    backend.write(command((short) -1, topic("kafka.topic", good(0))));
-            assertThat(service.metadataEntered.await(10, TimeUnit.SECONDS)).isTrue();
+                    backend.write(command((short) -1, topic("topic", good(0, 1))));
+            assertThat(firstConverting.await(10, TimeUnit.SECONDS)).isTrue();
             CompletableFuture<KafkaProduceResult> second =
-                    backend.write(command((short) -1, topic("kafka.topic", good(1))));
-            assertThat(service.metadataThread).isNotSameAs(Thread.currentThread());
-            CompletableFuture.runAsync(() -> service.pendingMetadata.complete(metadata(false)))
-                    .join();
+                    backend.write(command((short) -1, topic("kafka.topic", good(0, 2))));
+            assertThat(secondConverted.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(service.appended.await(100, TimeUnit.MILLISECONDS)).isFalse();
+            assertThat(service.appends).isEmpty();
+            releaseFirst.countDown();
             assertThat(service.appended.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(service.appends)
-                    .extracting(request -> request.getBucketsReqsList().get(0).getBucketId())
-                    .containsExactly(0, 1);
+                    .extracting(request -> request.getBucketsReqsList().get(0).getRecords()[0])
+                    .containsExactly((byte) 1, (byte) 2);
             assertThat(first).isNotDone();
             assertThat(second).isNotDone();
-            service.pendingAppend.complete(
-                    new ProduceLogResponse()
-                            .addAllBucketsResps(
-                                    Arrays.asList(
-                                            new PbProduceLogRespForBucket()
-                                                    .setBucketId(0)
-                                                    .setBaseOffset(17L),
-                                            new PbProduceLogRespForBucket()
-                                                    .setBucketId(1)
-                                                    .setBaseOffset(18L))));
+            service.pendingAppend.complete(success(0));
             assertErrors(first.get(10, TimeUnit.SECONDS), Errors.NONE);
             assertErrors(second.get(10, TimeUnit.SECONDS), Errors.NONE);
+            assertThat(first.get().topics().get(0).topicName()).isEqualTo("topic");
+            assertThat(second.get().topics().get(0).topicName()).isEqualTo("kafka.topic");
         } finally {
+            releaseFirst.countDown();
+            executor.closeAsync().get(10, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void testPartitionsAndTablesConvertIndependently() throws Exception {
+        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(2, 4);
+        TestingProduceService service = new TestingProduceService();
+        service.appended = new CountDownLatch(1);
+        CountDownLatch firstConverting = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        KafkaRecordTranscoder transcoder =
+                (partitionId, records, table) -> {
+                    if (table.getTableId() == 42L && partitionId == 0) {
+                        firstConverting.countDown();
+                        assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
+                    }
+                    return arrow.transcode(partitionId, records, table);
+                };
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(service, service, mapper(), transcoder, executor);
+        try {
+            CompletableFuture<KafkaProduceResult> first =
+                    backend.write(command((short) 1, topic("kafka.topic", good(0), good(1))));
+            assertThat(firstConverting.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(service.appended.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(first).isNotDone();
+            assertErrors(
+                    backend.write(command((short) 1, topic("other.topic", good(0))))
+                            .get(10, TimeUnit.SECONDS),
+                    Errors.NONE);
+            assertThat(first).isNotDone();
+            assertThat(service.appends)
+                    .extracting(request -> request.getBucketsReqsList().get(0).getBucketId())
+                    .containsExactly(1, 0);
+            releaseFirst.countDown();
+            KafkaProduceResult result = first.get(10, TimeUnit.SECONDS);
+            assertErrors(result, Errors.NONE, Errors.NONE);
+            assertThat(result.topics().get(0).partitions())
+                    .extracting(PartitionResult::partitionId)
+                    .containsExactly(0, 1);
+        } finally {
+            releaseFirst.countDown();
             executor.closeAsync().get(10, TimeUnit.SECONDS);
         }
     }
@@ -937,10 +990,15 @@ class GatewayKafkaProduceBackendTest {
     }
 
     private static PartitionWrite good(int id) {
+        return good(id, 65);
+    }
+
+    private static PartitionWrite good(int id, int value) {
         return new PartitionWrite(
                 id,
                 Collections.singletonList(
-                        new Record(123L, null, new byte[] {65}, Collections.emptyList())));
+                        new Record(
+                                123L, null, new byte[] {(byte) value}, Collections.emptyList())));
     }
 
     private static GetTableInfoResponse metadata(boolean invalid) {
@@ -985,8 +1043,10 @@ class GatewayKafkaProduceBackendTest {
     }
 
     private static class TestingProduceService extends TestingTabletGatewayService {
-        private final List<TablePath> metadataPaths = new ArrayList<>();
-        private final List<ProduceLogRequest> appends = new ArrayList<>();
+        private final List<TablePath> metadataPaths =
+                Collections.synchronizedList(new ArrayList<>());
+        private final List<ProduceLogRequest> appends =
+                Collections.synchronizedList(new ArrayList<>());
         private ProduceLogRequest append;
         private CompletableFuture<ProduceLogResponse> pendingAppend;
         private CompletableFuture<GetTableInfoResponse> pendingMetadata;
@@ -1026,7 +1086,7 @@ class GatewayKafkaProduceBackendTest {
                     : pendingMetadata;
         }
 
-        private void checkWriteAuthorization(long tableId) {
+        private synchronized void checkWriteAuthorization(long tableId) {
             assertThat(tableId).isPositive();
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             assertThat(currentSession().getInetAddress())

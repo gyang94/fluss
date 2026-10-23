@@ -42,6 +42,7 @@ import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.utils.types.Tuple2;
 
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.protocol.Errors;
@@ -49,6 +50,7 @@ import org.apache.kafka.common.protocol.Errors;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -100,18 +102,55 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     @Override
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
         if (conversionExecutor != null) {
-            return conversionExecutor
-                    .submit(Thread.currentThread().getId(), () -> writeTopics(command))
-                    .exceptionally(
-                            failure -> {
-                                List<TopicResult> results = new ArrayList<>();
-                                for (TopicWrite topic : command.topics()) {
-                                    results.add(failedTopic(topic, failure));
-                                }
-                                return new KafkaProduceResult(results);
-                            });
+            return writePartitions(command);
         }
         return writeTopics(command);
+    }
+
+    private CompletableFuture<KafkaProduceResult> writePartitions(KafkaProduceCommand command) {
+        List<CompletableFuture<TopicResult>> topicFutures = new ArrayList<>();
+        for (TopicWrite topic : command.topics()) {
+            TablePath path;
+            try {
+                path = topicMapper.toTablePath(topic.topicName());
+            } catch (Exception failure) {
+                topicFutures.add(CompletableFuture.completedFuture(failedTopic(topic, failure)));
+                continue;
+            }
+            List<CompletableFuture<TopicResult>> partitionFutures = new ArrayList<>();
+            for (PartitionWrite partition : topic.partitions()) {
+                TopicWrite singlePartition =
+                        new TopicWrite(topic.topicName(), Collections.singletonList(partition));
+                // Register before asynchronous metadata lookup. Aliases of the same table
+                // share append order, while unrelated tables and partitions remain independent.
+                partitionFutures.add(
+                        conversionExecutor
+                                .submit(
+                                        Tuple2.of(path, partition.partitionId()),
+                                        () -> writeTopic(command, singlePartition))
+                                .exceptionally(failure -> failedTopic(singlePartition, failure)));
+            }
+            topicFutures.add(
+                    CompletableFuture.allOf(partitionFutures.toArray(new CompletableFuture<?>[0]))
+                            .thenApply(
+                                    ignored -> {
+                                        List<PartitionResult> results = new ArrayList<>();
+                                        for (CompletableFuture<TopicResult> future :
+                                                partitionFutures) {
+                                            results.addAll(future.join().partitions());
+                                        }
+                                        return new TopicResult(topic.topicName(), results);
+                                    }));
+        }
+        return CompletableFuture.allOf(topicFutures.toArray(new CompletableFuture<?>[0]))
+                .thenApply(
+                        ignored -> {
+                            List<TopicResult> results = new ArrayList<>();
+                            for (CompletableFuture<TopicResult> future : topicFutures) {
+                                results.add(future.join());
+                            }
+                            return new KafkaProduceResult(results);
+                        });
     }
 
     private CompletableFuture<KafkaProduceResult> writeTopics(KafkaProduceCommand command) {
@@ -143,8 +182,8 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                     .setTableName(path.getTableName());
             CompletableFuture<GetTableInfoResponse> metadata = gateway.getTableInfo(request);
             if (conversionExecutor != null) {
-                // The local gateway is synchronous. Waiting here also preserves FIFO append
-                // order if an alternative gateway returns asynchronously; only this worker waits.
+                // Keep conversion and native submission on this worker even when metadata
+                // completes asynchronously. The submission gate is scoped to the worker task.
                 GetTableInfoResponse response =
                         metadata.get(Math.max(0, command.timeoutMs()), TimeUnit.MILLISECONDS);
                 return produceTopic(command, topic, toTableInfo(path, response));
@@ -205,6 +244,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         }
         try {
             checkInterrupted();
+            if (conversionExecutor != null) {
+                conversionExecutor.awaitAppendTurn();
+            }
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended = gateway.produceLog(request);
             return appended.handle(
