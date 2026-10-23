@@ -87,12 +87,8 @@ public final class KafkaProduceCommand {
         return Collections.unmodifiableList(new ArrayList<>(checkNotNull(values)));
     }
 
-    private static @Nullable ByteBuffer readOnlySlice(@Nullable ByteBuffer source) {
+    private static @Nullable ByteBuffer readOnlyView(@Nullable ByteBuffer source) {
         return source == null ? null : source.slice().asReadOnlyBuffer();
-    }
-
-    private static @Nullable ByteBuffer readOnlyView(@Nullable ByteBuffer buffer) {
-        return buffer == null ? null : buffer.asReadOnlyBuffer();
     }
 
     /** Records addressed to one Kafka topic. */
@@ -200,8 +196,8 @@ public final class KafkaProduceCommand {
                 List<RecordHeader> headers) {
             this.timestamp = timestamp;
             this.timestampType = checkNotNull(timestampType);
-            this.key = readOnlySlice(key);
-            this.value = readOnlySlice(value);
+            this.key = readOnlyView(key);
+            this.value = readOnlyView(value);
             this.headers = immutableCopy(headers);
         }
 
