@@ -22,6 +22,7 @@ import org.apache.fluss.annotation.Internal;
 import javax.annotation.Nullable;
 
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -79,6 +80,20 @@ public final class KafkaProduceCommand {
 
     private static <T> List<T> immutableCopy(List<T> values) {
         return Collections.unmodifiableList(new ArrayList<>(checkNotNull(values)));
+    }
+
+    private static @Nullable ByteBuffer copyBuffer(@Nullable ByteBuffer source) {
+        if (source == null) {
+            return null;
+        }
+        ByteBuffer copy = ByteBuffer.allocate(source.remaining());
+        copy.put(source.duplicate());
+        copy.flip();
+        return copy.asReadOnlyBuffer();
+    }
+
+    private static @Nullable ByteBuffer readOnlyView(@Nullable ByteBuffer buffer) {
+        return buffer == null ? null : buffer.asReadOnlyBuffer();
     }
 
     /** Records addressed to one Kafka topic. */
@@ -140,7 +155,10 @@ public final class KafkaProduceCommand {
         LOG_APPEND_TIME
     }
 
-    /** A copied Kafka record whose lifetime is independent of the network request buffer. */
+    /**
+     * A Kafka record that copies its input bytes once, independently of the network request buffer.
+     * Accessors return read-only views with independent positions and limits.
+     */
     @Internal
     public static final class Record {
         /** Sentinel used when the input record has no timestamp. */
@@ -148,8 +166,8 @@ public final class KafkaProduceCommand {
 
         private final long timestamp;
         private final TimestampType timestampType;
-        private final @Nullable byte[] key;
-        private final @Nullable byte[] value;
+        private final @Nullable ByteBuffer key;
+        private final @Nullable ByteBuffer value;
         private final List<RecordHeader> headers;
 
         /**
@@ -161,23 +179,26 @@ public final class KafkaProduceCommand {
          */
         public Record(
                 long timestamp,
-                @Nullable byte[] key,
-                @Nullable byte[] value,
+                @Nullable ByteBuffer key,
+                @Nullable ByteBuffer value,
                 List<RecordHeader> headers) {
             this(timestamp, TimestampType.UNKNOWN, key, value, headers);
         }
 
-        /** Creates a copied record with the timestamp type supplied by its source batch. */
+        /**
+         * Copies the remaining key/value bytes with the timestamp type supplied by the source
+         * batch. The input buffers' positions and limits are unchanged.
+         */
         public Record(
                 long timestamp,
                 TimestampType timestampType,
-                @Nullable byte[] key,
-                @Nullable byte[] value,
+                @Nullable ByteBuffer key,
+                @Nullable ByteBuffer value,
                 List<RecordHeader> headers) {
             this.timestamp = timestamp;
             this.timestampType = checkNotNull(timestampType);
-            this.key = copyNullable(key);
-            this.value = copyNullable(value);
+            this.key = copyBuffer(key);
+            this.value = copyBuffer(value);
             this.headers = immutableCopy(headers);
         }
 
@@ -196,23 +217,19 @@ public final class KafkaProduceCommand {
             return timestampType;
         }
 
-        /** Returns a copy of the nullable Kafka record key. */
-        public @Nullable byte[] key() {
-            return copyNullable(key);
+        /** Returns a read-only key view with an independent position and limit, or null. */
+        public @Nullable ByteBuffer key() {
+            return readOnlyView(key);
         }
 
-        /** Returns a copy of the nullable Kafka record value. */
-        public @Nullable byte[] value() {
-            return copyNullable(value);
+        /** Returns a read-only value view with an independent position and limit, or null. */
+        public @Nullable ByteBuffer value() {
+            return readOnlyView(value);
         }
 
         /** Returns the copied Kafka headers in record order. */
         public List<RecordHeader> headers() {
             return headers;
-        }
-
-        private static @Nullable byte[] copyNullable(@Nullable byte[] value) {
-            return value == null ? null : value.clone();
         }
     }
 
@@ -220,12 +237,12 @@ public final class KafkaProduceCommand {
     @Internal
     public static final class RecordHeader {
         private final String name;
-        private final @Nullable byte[] value;
+        private final @Nullable ByteBuffer value;
 
         /** Creates a copied Kafka record header. */
         public RecordHeader(String name, @Nullable byte[] value) {
             this.name = checkNotNull(name);
-            this.value = value == null ? null : value.clone();
+            this.value = copyBuffer(value == null ? null : ByteBuffer.wrap(value));
         }
 
         /** Returns the header name. */
@@ -233,9 +250,11 @@ public final class KafkaProduceCommand {
             return name;
         }
 
-        /** Returns a copy of the nullable header value. */
-        public @Nullable byte[] value() {
-            return value == null ? null : value.clone();
+        /**
+         * Returns a read-only header value view with an independent position and limit, or null.
+         */
+        public @Nullable ByteBuffer value() {
+            return readOnlyView(value);
         }
     }
 }

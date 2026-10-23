@@ -30,6 +30,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.dispatcher.KafkaApiHandler;
 import org.apache.fluss.kafka.dispatcher.KafkaApiSpec;
+import org.apache.fluss.utils.ExceptionUtils;
 
 import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.TopicPartition;
@@ -55,7 +56,6 @@ import org.apache.kafka.common.utils.CloseableIterator;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -64,7 +64,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -179,9 +178,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
     }
 
     private static PartitionResult failedPartition(int partitionId, Throwable failure) {
-        while (failure instanceof CompletionException && failure.getCause() != null) {
-            failure = failure.getCause();
-        }
+        failure = ExceptionUtils.stripCompletionException(failure);
         return new PartitionResult(
                 partitionId, Errors.forException(failure), -1L, failure.getMessage());
     }
@@ -257,8 +254,8 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                             new KafkaProduceCommand.Record(
                                     record.timestamp(),
                                     timestampType,
-                                    copyBuffer(record.hasKey() ? record.key() : null),
-                                    copyBuffer(record.hasValue() ? record.value() : null),
+                                    record.hasKey() ? record.key() : null,
+                                    record.hasValue() ? record.value() : null,
                                     copyHeaders(record.headers())));
                 }
             }
@@ -310,16 +307,6 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
             copied.add(new RecordHeader(header.key(), header.value()));
         }
         return copied;
-    }
-
-    private static byte[] copyBuffer(ByteBuffer buffer) {
-        if (buffer == null) {
-            return null;
-        }
-        ByteBuffer duplicate = buffer.duplicate();
-        byte[] bytes = new byte[duplicate.remaining()];
-        duplicate.get(bytes);
-        return bytes;
     }
 
     private static InetAddress clientAddress(SocketAddress remoteAddress) {

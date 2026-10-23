@@ -62,6 +62,7 @@ import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -70,6 +71,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 
 /** Protocol tests independent of the Fluss append and record conversion backends. */
@@ -104,13 +106,14 @@ class KafkaProduceProtocolTest {
             assertThat(record.timestamp()).isEqualTo(123L);
             assertThat(record.timestampType()).isEqualTo(TimestampType.CREATE_TIME);
             assertThat(record.hasTimestamp()).isTrue();
-            assertThat(record.key()).containsExactly((byte) 1);
-            assertThat(record.value()).containsExactly((byte) 2);
+            assertThat(record.key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
+            assertThat(record.value()).isEqualTo(ByteBuffer.wrap(new byte[] {2}));
             assertThat(record.headers()).hasSize(1);
             assertThat(record.headers().get(0).value()).isNull();
-            byte[] key = record.key();
-            key[0] = 9;
-            assertThat(record.key()).containsExactly((byte) 1);
+            ByteBuffer key = record.key();
+            assertThatThrownBy(() -> key.put((byte) 9)).isInstanceOf(ReadOnlyBufferException.class);
+            assertThat(key.get()).isEqualTo((byte) 1);
+            assertThat(record.key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
         }
     }
 
@@ -146,7 +149,7 @@ class KafkaProduceProtocolTest {
                             assertThat(copied).hasSize(2);
                             // The protocol command preserves null and empty values for the adapter.
                             assertThat(copied.get(0).value()).isNull();
-                            assertThat(copied.get(1).value()).isEmpty();
+                            assertThat(copied.get(1).value()).isEqualTo(ByteBuffer.allocate(0));
                             List<TopicResult> results =
                                     new ArrayList<>(successful(command).join().topics());
                             Collections.reverse(results);
@@ -395,17 +398,21 @@ class KafkaProduceProtocolTest {
         assertThat(result).hasSize(2);
         assertThat(result.get(0).timestamp()).isEqualTo(123L);
         assertThat(result.get(0).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
-        assertThat(result.get(0).key()).containsExactly((byte) 1);
-        assertThat(result.get(0).value()).containsExactly(value);
+        assertThat(result.get(0).key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
+        assertThat(result.get(0).value()).isEqualTo(ByteBuffer.wrap(value));
+        assertThat(result.get(0).key().isReadOnly()).isTrue();
+        assertThat(result.get(0).value().isReadOnly()).isTrue();
         assertThat(result.get(0).headers())
                 .extracting(KafkaProduceCommand.RecordHeader::name)
                 .containsExactly("header", "header");
-        assertThat(result.get(0).headers().get(0).value()).containsExactly((byte) 2, (byte) 3);
+        assertThat(result.get(0).headers().get(0).value())
+                .isEqualTo(ByteBuffer.wrap(new byte[] {2, 3}));
+        assertThat(result.get(0).headers().get(0).value().isReadOnly()).isTrue();
         assertThat(result.get(0).headers().get(1).value()).isNull();
         assertThat(result.get(1).timestamp()).isEqualTo(456L);
         assertThat(result.get(1).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
         assertThat(result.get(1).key()).isNull();
-        assertThat(result.get(1).value()).isEmpty();
+        assertThat(result.get(1).value()).isEqualTo(ByteBuffer.allocate(0));
     }
 
     @ParameterizedTest
