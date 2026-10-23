@@ -111,7 +111,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                     partitions.add(
                             new PartitionWrite(
                                     partition.index(),
-                                    copyRecords(request.version(), partition.records())));
+                                    readRecords(request.version(), partition.records())));
                 } catch (RuntimeException failure) {
                     failures.put(
                             new TopicPartition(topic.name(), partition.index()),
@@ -131,6 +131,8 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                         clientAddress(context.remoteAddress()));
         CompletableFuture<KafkaProduceResult> result;
         try {
+            // The backend consumes borrowed payloads before returning. Only the write result may
+            // outlive request processing and the request buffer's release.
             result =
                     topics.isEmpty()
                             ? CompletableFuture.completedFuture(
@@ -206,7 +208,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
         }
     }
 
-    private static List<KafkaProduceCommand.Record> copyRecords(
+    private static List<KafkaProduceCommand.Record> readRecords(
             short version, BaseRecords baseRecords) {
         if (!(baseRecords instanceof Records)) {
             throw new InvalidRequestException("Unsupported Kafka records representation.");
@@ -216,7 +218,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
         if (records.sizeInBytes() == 0) {
             throw new InvalidRequestException("Empty or truncated Kafka record batch.");
         }
-        List<KafkaProduceCommand.Record> copied = new ArrayList<>();
+        List<KafkaProduceCommand.Record> parsedRecords = new ArrayList<>();
         int validBytes = 0;
         for (RecordBatch batch : records.batches()) {
             validBytes += batch.sizeInBytes();
@@ -225,7 +227,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                 throw new InvalidRequestException(
                         "Idempotent, transactional, and control record batches are not supported.");
             }
-            // Validate the incoming Kafka batch before copying away its offset metadata. Fluss
+            // Validate the incoming Kafka batch before discarding its offset metadata. Fluss
             // assigns its own storage offsets later, independently of this input validation.
             long countFromOffsets = batch.lastOffset() - batch.baseOffset() + 1;
             Integer recordCount = batch.countOrNull();
@@ -250,20 +252,20 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                 while (iterator.hasNext()) {
                     org.apache.kafka.common.record.Record record = iterator.next();
                     record.ensureValid();
-                    copied.add(
+                    parsedRecords.add(
                             new KafkaProduceCommand.Record(
                                     record.timestamp(),
                                     timestampType,
                                     record.hasKey() ? record.key() : null,
                                     record.hasValue() ? record.value() : null,
-                                    copyHeaders(record.headers())));
+                                    readHeaders(record.headers())));
                 }
             }
         }
-        if (copied.isEmpty() || validBytes != records.sizeInBytes()) {
+        if (parsedRecords.isEmpty() || validBytes != records.sizeInBytes()) {
             throw new InvalidRequestException("Empty or truncated Kafka record batch.");
         }
-        return copied;
+        return parsedRecords;
     }
 
     private static TimestampType timestampType(RecordBatch batch) {
@@ -301,7 +303,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
         return new ProduceResponse(data);
     }
 
-    private static List<RecordHeader> copyHeaders(Header[] headers) {
+    private static List<RecordHeader> readHeaders(Header[] headers) {
         List<RecordHeader> copied = new ArrayList<>(headers.length);
         for (Header header : headers) {
             copied.add(new RecordHeader(header.key(), header.value()));

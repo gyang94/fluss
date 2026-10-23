@@ -68,7 +68,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -78,14 +77,36 @@ import static org.assertj.core.api.Assertions.tuple;
 class KafkaProduceProtocolTest {
 
     @Test
-    void testSupportedVersionsCopyRecordsAndForwardContext() {
+    void testSupportedVersionsExposeRecordsAndForwardContext() {
         for (short version = 3; version <= 11; version++) {
-            AtomicReference<KafkaProduceCommand> copied = new AtomicReference<>();
             ProduceResponse response =
                     dispatch(
                             request(version, (short) -1, partition(0, records())),
                             command -> {
-                                copied.set(command);
+                                assertThat(command.acks()).isEqualTo((short) -1);
+                                assertThat(command.timeoutMs()).isEqualTo(4321);
+                                assertThat(command.listenerName()).isEqualTo("KAFKA");
+                                KafkaProduceCommand.Record record =
+                                        command.topics()
+                                                .get(0)
+                                                .partitions()
+                                                .get(0)
+                                                .records()
+                                                .get(0);
+                                assertThat(record.timestamp()).isEqualTo(123L);
+                                assertThat(record.timestampType())
+                                        .isEqualTo(TimestampType.CREATE_TIME);
+                                assertThat(record.hasTimestamp()).isTrue();
+                                assertThat(record.key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
+                                assertThat(record.value())
+                                        .isEqualTo(ByteBuffer.wrap(new byte[] {2}));
+                                assertThat(record.headers()).hasSize(1);
+                                assertThat(record.headers().get(0).value()).isNull();
+                                ByteBuffer key = record.key();
+                                assertThatThrownBy(() -> key.put((byte) 9))
+                                        .isInstanceOf(ReadOnlyBufferException.class);
+                                assertThat(key.get()).isEqualTo((byte) 1);
+                                assertThat(record.key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
                                 return successful(command);
                             });
             assertThat(response.errorCounts()).containsOnlyKeys(Errors.NONE);
@@ -97,23 +118,6 @@ class KafkaProduceProtocolTest {
                                     .get(0)
                                     .baseOffset())
                     .isEqualTo(42L);
-            KafkaProduceCommand command = copied.get();
-            assertThat(command.acks()).isEqualTo((short) -1);
-            assertThat(command.timeoutMs()).isEqualTo(4321);
-            assertThat(command.listenerName()).isEqualTo("KAFKA");
-            KafkaProduceCommand.Record record =
-                    command.topics().get(0).partitions().get(0).records().get(0);
-            assertThat(record.timestamp()).isEqualTo(123L);
-            assertThat(record.timestampType()).isEqualTo(TimestampType.CREATE_TIME);
-            assertThat(record.hasTimestamp()).isTrue();
-            assertThat(record.key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
-            assertThat(record.value()).isEqualTo(ByteBuffer.wrap(new byte[] {2}));
-            assertThat(record.headers()).hasSize(1);
-            assertThat(record.headers().get(0).value()).isNull();
-            ByteBuffer key = record.key();
-            assertThatThrownBy(() -> key.put((byte) 9)).isInstanceOf(ReadOnlyBufferException.class);
-            assertThat(key.get()).isEqualTo((byte) 1);
-            assertThat(record.key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
         }
     }
 
@@ -144,12 +148,13 @@ class KafkaProduceProtocolTest {
                                         .extracting(KafkaProduceCommand.PartitionWrite::partitionId)
                                         .containsExactly(0);
                             }
-                            List<KafkaProduceCommand.Record> copied =
+                            List<KafkaProduceCommand.Record> recordViews =
                                     command.topics().get(0).partitions().get(0).records();
-                            assertThat(copied).hasSize(2);
+                            assertThat(recordViews).hasSize(2);
                             // The protocol command preserves null and empty values for the adapter.
-                            assertThat(copied.get(0).value()).isNull();
-                            assertThat(copied.get(1).value()).isEqualTo(ByteBuffer.allocate(0));
+                            assertThat(recordViews.get(0).value()).isNull();
+                            assertThat(recordViews.get(1).value())
+                                    .isEqualTo(ByteBuffer.allocate(0));
                             List<TopicResult> results =
                                     new ArrayList<>(successful(command).join().topics());
                             Collections.reverse(results);
@@ -276,7 +281,6 @@ class KafkaProduceProtocolTest {
                         RecordBatch.NO_TIMESTAMP,
                         RecordBatch.NO_TIMESTAMP,
                         RecordBatch.NO_TIMESTAMP);
-        AtomicReference<KafkaProduceCommand> copied = new AtomicReference<>();
         ProduceResponse response =
                 dispatch(
                         request(
@@ -287,43 +291,38 @@ class KafkaProduceProtocolTest {
                                 partition(2, missingCreateTime),
                                 partition(3, missingAppendTime)),
                         command -> {
-                            copied.set(command);
+                            List<KafkaProduceCommand.PartitionWrite> partitions =
+                                    command.topics().get(0).partitions();
+                            assertThat(partitions).hasSize(4);
+                            assertThat(partitions.get(0).records())
+                                    .extracting(KafkaProduceCommand.Record::timestamp)
+                                    .containsExactly(123L, 456L);
+                            // The same numeric timestamp can have a different batch type.
+                            assertThat(partitions.get(1).records())
+                                    .extracting(KafkaProduceCommand.Record::timestamp)
+                                    .containsExactly(123L, 123L);
+                            for (int i = 0; i < partitions.size(); i++) {
+                                TimestampType expectedType =
+                                        i % 2 == 0
+                                                ? TimestampType.CREATE_TIME
+                                                : TimestampType.LOG_APPEND_TIME;
+                                assertThat(partitions.get(i).records())
+                                        .extracting(KafkaProduceCommand.Record::timestampType)
+                                        .containsExactly(expectedType, expectedType);
+                                assertThat(partitions.get(i).records())
+                                        .extracting(KafkaProduceCommand.Record::hasTimestamp)
+                                        .containsExactly(i < 2, i < 2);
+                                if (i >= 2) {
+                                    assertThat(partitions.get(i).records())
+                                            .extracting(KafkaProduceCommand.Record::timestamp)
+                                            .containsExactly(
+                                                    RecordBatch.NO_TIMESTAMP,
+                                                    RecordBatch.NO_TIMESTAMP);
+                                }
+                            }
                             return successful(command);
                         });
         assertErrors(response, Errors.NONE, Errors.NONE, Errors.NONE, Errors.NONE);
-        for (MemoryRecords input :
-                Arrays.asList(createTime, appendTime, missingCreateTime, missingAppendTime)) {
-            ByteBuffer buffer = input.buffer().duplicate();
-            while (buffer.hasRemaining()) {
-                buffer.put((byte) 0);
-            }
-        }
-
-        List<KafkaProduceCommand.PartitionWrite> partitions =
-                copied.get().topics().get(0).partitions();
-        assertThat(partitions).hasSize(4);
-        assertThat(partitions.get(0).records())
-                .extracting(KafkaProduceCommand.Record::timestamp)
-                .containsExactly(123L, 456L);
-        // The same numeric timestamp can have a different batch type.
-        assertThat(partitions.get(1).records())
-                .extracting(KafkaProduceCommand.Record::timestamp)
-                .containsExactly(123L, 123L);
-        for (int i = 0; i < partitions.size(); i++) {
-            TimestampType expectedType =
-                    i % 2 == 0 ? TimestampType.CREATE_TIME : TimestampType.LOG_APPEND_TIME;
-            assertThat(partitions.get(i).records())
-                    .extracting(KafkaProduceCommand.Record::timestampType)
-                    .containsExactly(expectedType, expectedType);
-            assertThat(partitions.get(i).records())
-                    .extracting(KafkaProduceCommand.Record::hasTimestamp)
-                    .containsExactly(i < 2, i < 2);
-            if (i >= 2) {
-                assertThat(partitions.get(i).records())
-                        .extracting(KafkaProduceCommand.Record::timestamp)
-                        .containsExactly(RecordBatch.NO_TIMESTAMP, RecordBatch.NO_TIMESTAMP);
-            }
-        }
     }
 
     @ParameterizedTest
@@ -361,7 +360,7 @@ class KafkaProduceProtocolTest {
 
     @ParameterizedTest
     @EnumSource(CompressionType.class)
-    void testStreamedRecordsRemainIndependentOfInput(CompressionType compressionType) {
+    void testStreamedRecordsAreReadableDuringBackendInvocation(CompressionType compressionType) {
         byte[] value = new byte[32 * 1024];
         Arrays.fill(value, (byte) 7);
         MemoryRecords records =
@@ -378,41 +377,36 @@ class KafkaProduceProtocolTest {
                                     new RecordHeader("header", null)
                                 }),
                         new SimpleRecord(456L, null, new byte[0]));
-        AtomicReference<KafkaProduceCommand> copied = new AtomicReference<>();
 
         ProduceResponse response =
                 dispatch(
                         request((short) 11, (short) 1, partition(0, records)),
                         command -> {
-                            copied.set(command);
+                            List<KafkaProduceCommand.Record> result =
+                                    command.topics().get(0).partitions().get(0).records();
+                            assertThat(result).hasSize(2);
+                            assertThat(result.get(0).timestamp()).isEqualTo(123L);
+                            assertThat(result.get(0).timestampType())
+                                    .isEqualTo(TimestampType.CREATE_TIME);
+                            assertThat(result.get(0).key())
+                                    .isEqualTo(ByteBuffer.wrap(new byte[] {1}));
+                            assertThat(result.get(0).value()).isEqualTo(ByteBuffer.wrap(value));
+                            assertThat(result.get(0).key().isReadOnly()).isTrue();
+                            assertThat(result.get(0).value().isReadOnly()).isTrue();
+                            assertThat(result.get(0).headers())
+                                    .extracting(KafkaProduceCommand.RecordHeader::name)
+                                    .containsExactly("header", "header");
+                            assertThat(result.get(0).headers().get(0).value())
+                                    .containsExactly((byte) 2, (byte) 3);
+                            assertThat(result.get(0).headers().get(1).value()).isNull();
+                            assertThat(result.get(1).timestamp()).isEqualTo(456L);
+                            assertThat(result.get(1).timestampType())
+                                    .isEqualTo(TimestampType.CREATE_TIME);
+                            assertThat(result.get(1).key()).isNull();
+                            assertThat(result.get(1).value()).isEqualTo(ByteBuffer.allocate(0));
                             return successful(command);
                         });
         assertErrors(response, Errors.NONE);
-        ByteBuffer input = records.buffer().duplicate();
-        while (input.hasRemaining()) {
-            input.put((byte) 0);
-        }
-
-        List<KafkaProduceCommand.Record> result =
-                copied.get().topics().get(0).partitions().get(0).records();
-        assertThat(result).hasSize(2);
-        assertThat(result.get(0).timestamp()).isEqualTo(123L);
-        assertThat(result.get(0).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
-        assertThat(result.get(0).key()).isEqualTo(ByteBuffer.wrap(new byte[] {1}));
-        assertThat(result.get(0).value()).isEqualTo(ByteBuffer.wrap(value));
-        assertThat(result.get(0).key().isReadOnly()).isTrue();
-        assertThat(result.get(0).value().isReadOnly()).isTrue();
-        assertThat(result.get(0).headers())
-                .extracting(KafkaProduceCommand.RecordHeader::name)
-                .containsExactly("header", "header");
-        assertThat(result.get(0).headers().get(0).value())
-                .isEqualTo(ByteBuffer.wrap(new byte[] {2, 3}));
-        assertThat(result.get(0).headers().get(0).value().isReadOnly()).isTrue();
-        assertThat(result.get(0).headers().get(1).value()).isNull();
-        assertThat(result.get(1).timestamp()).isEqualTo(456L);
-        assertThat(result.get(1).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
-        assertThat(result.get(1).key()).isNull();
-        assertThat(result.get(1).value()).isEqualTo(ByteBuffer.allocate(0));
     }
 
     @ParameterizedTest

@@ -75,7 +75,7 @@ class KafkaProduceCommandTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testBothConstructorsOwnTheirRecordData(boolean explicitTimestampType) {
+    void testBothConstructorsBorrowPayloadsAndCopyHeaders(boolean explicitTimestampType) {
         byte[] key = {1};
         byte[] value = {2};
         byte[] headerValue = {3};
@@ -97,12 +97,15 @@ class KafkaProduceCommandTest {
         value[0] = 5;
         headerValue[0] = 6;
         headers.clear();
-        assertReadOnlyViews(record::key, (byte) 1);
-        assertReadOnlyViews(record::value, (byte) 2);
+        assertReadOnlyViews(record::key, (byte) 4);
+        assertReadOnlyViews(record::value, (byte) 5);
         assertThat(record.headers())
                 .extracting(RecordHeader::name)
                 .containsExactly("header", "header");
-        assertReadOnlyViews(record.headers().get(0)::value, (byte) 3);
+        byte[] returnedHeaderValue = record.headers().get(0).value();
+        assertThat(returnedHeaderValue).containsExactly((byte) 3);
+        returnedHeaderValue[0] = 7;
+        assertThat(record.headers().get(0).value()).containsExactly((byte) 3);
         assertThat(record.headers().get(1).value()).isNull();
         assertThat(record.timestamp()).isEqualTo(123L);
         assertThat(record.timestampType())
@@ -116,7 +119,7 @@ class KafkaProduceCommandTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"heap", "direct", "read-only", "slice"})
-    void testCopiesRemainingBufferRange(String kind) {
+    void testBorrowsRemainingBufferRangeWithoutSharingCursors(String kind) {
         ByteBuffer storage =
                 kind.equals("direct") ? ByteBuffer.allocateDirect(6) : ByteBuffer.allocate(6);
         storage.put(new byte[] {9, 1, 2, 3, 4, 9});
@@ -147,12 +150,17 @@ class KafkaProduceCommandTest {
         assertThat(source.limit()).isEqualTo(limit);
         source.reset();
         assertThat(source.position()).isEqualTo(position);
-        storage.clear();
-        while (storage.hasRemaining()) {
-            storage.put((byte) 0);
-        }
         assertReadOnlyViews(record::key, (byte) 2, (byte) 3);
         assertReadOnlyViews(record::value, (byte) 2, (byte) 3);
+        assertThat(record.key().isDirect()).isEqualTo(source.isDirect());
+        assertThat(record.value().isDirect()).isEqualTo(source.isDirect());
+
+        source.clear();
+        storage.clear();
+        storage.put(2, (byte) 7);
+        storage.put(3, (byte) 8);
+        assertReadOnlyViews(record::key, (byte) 7, (byte) 8);
+        assertReadOnlyViews(record::value, (byte) 7, (byte) 8);
     }
 
     @Test
@@ -170,7 +178,7 @@ class KafkaProduceCommandTest {
 
         assertReadOnlyViews(record::key);
         assertReadOnlyViews(record::value);
-        assertReadOnlyViews(record.headers().get(0)::value);
+        assertThat(record.headers().get(0).value()).isEmpty();
         assertThat(record.headers().get(1).value()).isNull();
         assertThat(exhausted.position()).isEqualTo(1);
     }
@@ -236,7 +244,7 @@ class KafkaProduceCommandTest {
         assertThat(first.position()).isZero();
         assertThat(first.limit()).isEqualTo(expected.length);
         assertThat(first.capacity()).isEqualTo(expected.length);
-        assertThatThrownBy(first::array).isInstanceOf(ReadOnlyBufferException.class);
+        assertThatThrownBy(first::array).isInstanceOf(UnsupportedOperationException.class);
         assertThatThrownBy(() -> first.put((byte) 9)).isInstanceOf(ReadOnlyBufferException.class);
         if (expected.length > 0) {
             assertThat(first.get()).isEqualTo(expected[0]);

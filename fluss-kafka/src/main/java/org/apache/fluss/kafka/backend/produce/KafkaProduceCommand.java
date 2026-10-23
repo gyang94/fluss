@@ -29,7 +29,12 @@ import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Protocol-independent write command used by the Kafka Produce backend. */
+/**
+ * Protocol-independent write command used by the Kafka Produce backend.
+ *
+ * <p>Record key/value buffers borrow their backing storage. They must be consumed during {@link
+ * KafkaProduceBackend#write(KafkaProduceCommand)}, before that method returns.
+ */
 @Internal
 public final class KafkaProduceCommand {
 
@@ -82,14 +87,8 @@ public final class KafkaProduceCommand {
         return Collections.unmodifiableList(new ArrayList<>(checkNotNull(values)));
     }
 
-    private static @Nullable ByteBuffer copyBuffer(@Nullable ByteBuffer source) {
-        if (source == null) {
-            return null;
-        }
-        ByteBuffer copy = ByteBuffer.allocate(source.remaining());
-        copy.put(source.duplicate());
-        copy.flip();
-        return copy.asReadOnlyBuffer();
+    private static @Nullable ByteBuffer readOnlySlice(@Nullable ByteBuffer source) {
+        return source == null ? null : source.slice().asReadOnlyBuffer();
     }
 
     private static @Nullable ByteBuffer readOnlyView(@Nullable ByteBuffer buffer) {
@@ -136,7 +135,7 @@ public final class KafkaProduceCommand {
             return partitionId;
         }
 
-        /** Returns copied records in append order. */
+        /** Returns records with borrowed key/value buffers in append order. */
         public List<Record> records() {
             return records;
         }
@@ -156,8 +155,11 @@ public final class KafkaProduceCommand {
     }
 
     /**
-     * A Kafka record that copies its input bytes once, independently of the network request buffer.
-     * Accessors return read-only views with independent positions and limits.
+     * A Kafka record with borrowed key/value bytes and copied headers.
+     *
+     * <p>Accessors return read-only views with independent positions and limits. These views share
+     * the input storage and do not retain it. The caller must keep that storage alive and unchanged
+     * until {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns.
      */
     @Internal
     public static final class Record {
@@ -171,13 +173,13 @@ public final class KafkaProduceCommand {
         private final List<RecordHeader> headers;
 
         /**
-         * Creates a copied record without batch timestamp provenance.
+         * Creates a record with borrowed key/value bytes without batch timestamp provenance.
          *
          * <p>The type is {@link TimestampType#UNKNOWN} even when a timestamp is present. Callers
          * that know the batch type should use the explicit constructor instead of inferring it from
          * the timestamp value.
          */
-        public Record(
+        Record(
                 long timestamp,
                 @Nullable ByteBuffer key,
                 @Nullable ByteBuffer value,
@@ -186,8 +188,9 @@ public final class KafkaProduceCommand {
         }
 
         /**
-         * Copies the remaining key/value bytes with the timestamp type supplied by the source
-         * batch. The input buffers' positions and limits are unchanged.
+         * Borrows the remaining key/value bytes with the timestamp type supplied by the source
+         * batch. The input buffers' positions and limits are unchanged, and subsequent cursor
+         * changes do not affect the borrowed ranges. No payload bytes are copied.
          */
         public Record(
                 long timestamp,
@@ -197,8 +200,8 @@ public final class KafkaProduceCommand {
                 List<RecordHeader> headers) {
             this.timestamp = timestamp;
             this.timestampType = checkNotNull(timestampType);
-            this.key = copyBuffer(key);
-            this.value = copyBuffer(value);
+            this.key = readOnlySlice(key);
+            this.value = readOnlySlice(value);
             this.headers = immutableCopy(headers);
         }
 
@@ -237,12 +240,12 @@ public final class KafkaProduceCommand {
     @Internal
     public static final class RecordHeader {
         private final String name;
-        private final @Nullable ByteBuffer value;
+        private final @Nullable byte[] value;
 
         /** Creates a copied Kafka record header. */
         public RecordHeader(String name, @Nullable byte[] value) {
             this.name = checkNotNull(name);
-            this.value = copyBuffer(value == null ? null : ByteBuffer.wrap(value));
+            this.value = value;
         }
 
         /** Returns the header name. */
@@ -250,11 +253,9 @@ public final class KafkaProduceCommand {
             return name;
         }
 
-        /**
-         * Returns a read-only header value view with an independent position and limit, or null.
-         */
-        public @Nullable ByteBuffer value() {
-            return readOnlyView(value);
+        /** Returns a copy of the header value, or null. */
+        public @Nullable byte[] value() {
+            return value;
         }
     }
 }
