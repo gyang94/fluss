@@ -248,7 +248,7 @@ public final class KafkaProduceCommand {
          */
         public RecordHeader(String name, @Nullable byte[] value) {
             this.name = checkNotNull(name);
-            this.value = value;
+            this.value = value == null ? null : value.clone();
         }
 
         /** Returns the header name. */
@@ -260,7 +260,7 @@ public final class KafkaProduceCommand {
          * Returns the shared header value array, or null. The returned array must not be modified.
          */
         public @Nullable byte[] value() {
-            return value;
+            return value == null ? null : value.clone();
         }
     }
 }

@@ -42,12 +42,14 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
+import org.apache.fluss.shaded.netty4.io.netty.buffer.PooledByteBufAllocator;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.CloseableIterator;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
@@ -131,42 +133,65 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testReadOnlyPayloadViewsRemainUsableAcrossTranscoding(boolean string) throws Exception {
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void testTranscodedRowsOutliveBorrowedBuffers(boolean string, boolean direct) throws Exception {
         byte[] expectedValue = bytes("消息-value");
-        ByteBuffer source = ByteBuffer.allocateDirect(expectedValue.length + 2);
-        source.put((byte) 0xff).put(expectedValue).put((byte) 0xff);
-        source.flip();
-        source.position(1);
-        source.limit(1 + expectedValue.length);
+        ByteBuf storage =
+                direct
+                        ? PooledByteBufAllocator.DEFAULT.directBuffer(expectedValue.length + 2)
+                        : PooledByteBufAllocator.DEFAULT.heapBuffer(expectedValue.length + 2);
         byte[] key = bytes("key");
         byte[] header = bytes("header");
-        Record input =
-                new Record(
-                        123L,
-                        TimestampType.CREATE_TIME,
-                        ByteBuffer.wrap(key),
-                        source.asReadOnlyBuffer(),
-                        Collections.singletonList(new RecordHeader("h", header)));
-        ByteBuffer keyView = input.key();
-        ByteBuffer valueView = input.value();
-        ByteBuffer headerView = input.headers().get(0).value();
-        for (ByteBuffer view : Arrays.asList(keyView, valueView, headerView)) {
-            assertThat(view.isReadOnly()).isTrue();
-            view.get();
-            view.limit(1);
-        }
-        Arrays.fill(key, (byte) 0);
-        Arrays.fill(header, (byte) 0);
-        source.clear();
-        while (source.hasRemaining()) {
-            source.put((byte) 0);
-        }
-
         TableInfo table = envelope(string, 15);
-        for (int partition : new int[] {7, 3}) {
+        int[] partitions = {7, 3};
+        List<BytesView> encoded = new ArrayList<>();
+        try {
+            storage.writeByte(0xff).writeBytes(expectedValue).writeByte(0xff);
+            ByteBuffer source = storage.nioBuffer();
+            source.position(1);
+            source.limit(1 + expectedValue.length);
+            Record input =
+                    new Record(
+                            123L,
+                            TimestampType.CREATE_TIME,
+                            ByteBuffer.wrap(key),
+                            source.asReadOnlyBuffer(),
+                            Collections.singletonList(new RecordHeader("h", header)));
+            ByteBuffer keyView = input.key();
+            ByteBuffer valueView = input.value();
+            assertThat(valueView.isDirect()).isEqualTo(direct);
+            for (ByteBuffer view : Arrays.asList(keyView, valueView)) {
+                assertThat(view.isReadOnly()).isTrue();
+                view.get();
+                view.limit(1);
+            }
+            // Changing caller/view cursors must not change the record's borrowed range.
+            source.clear();
+            for (int partition : partitions) {
+                encoded.add(
+                        transcoder.transcode(partition, Collections.singletonList(input), table));
+            }
+            for (ByteBuffer view : Arrays.asList(keyView, valueView)) {
+                assertThat(view.position()).isEqualTo(1);
+                assertThat(view.limit()).isEqualTo(1);
+            }
+            assertThat(input.key()).isEqualTo(ByteBuffer.wrap(bytes("key")));
+            assertThat(input.value()).isEqualTo(ByteBuffer.wrap(expectedValue));
+            assertThat(input.headers().get(0).value()).isEqualTo(bytes("header"));
+
+            // Destroy borrowed payloads only after synchronous transcoding has finished.
+            Arrays.fill(key, (byte) 0);
+            Arrays.fill(header, (byte) 0);
+            Arrays.fill(input.headers().get(0).value(), (byte) 0);
+            storage.setZero(0, storage.readableBytes());
+        } finally {
+            storage.release();
+        }
+        assertThat(storage.refCnt()).isZero();
+        for (int i = 0; i < partitions.length; i++) {
+            int partition = partitions[i];
             read(
-                    transcoder.transcode(partition, Collections.singletonList(input), table),
+                    encoded.get(i),
                     table,
                     1,
                     row -> {
@@ -176,13 +201,6 @@ class ArrowKafkaRecordTranscoderTest {
                         assertMetadata(row, 4, 123L, 0, partition);
                     });
         }
-        for (ByteBuffer view : Arrays.asList(keyView, valueView, headerView)) {
-            assertThat(view.position()).isEqualTo(1);
-            assertThat(view.limit()).isEqualTo(1);
-        }
-        assertThat(input.key()).isEqualTo(ByteBuffer.wrap(bytes("key")));
-        assertThat(input.value()).isEqualTo(ByteBuffer.wrap(expectedValue));
-        assertThat(input.headers().get(0).value()).isEqualTo(ByteBuffer.wrap(bytes("header")));
     }
 
     @ParameterizedTest
@@ -493,7 +511,7 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @Test
-    void testLegacyRecordDoesNotInferBatchTimestampType() throws Exception {
+    void testUnknownBatchTimestampTypeIsNotInferredFromTimestamp() throws Exception {
         TableInfo table = metadataTable(true, true, true);
         read(
                 transcoder.transcode(
@@ -1014,7 +1032,7 @@ class ArrowKafkaRecordTranscoderTest {
             @Nullable byte[] key,
             @Nullable byte[] value,
             List<RecordHeader> headers) {
-        return new Record(timestamp, buffer(key), buffer(value), headers);
+        return record(timestamp, TimestampType.UNKNOWN, key, value, headers);
     }
 
     private static Record record(

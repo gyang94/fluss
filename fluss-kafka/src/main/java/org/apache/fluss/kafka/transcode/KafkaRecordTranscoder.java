@@ -24,12 +24,15 @@ import org.apache.fluss.record.bytesview.BytesView;
 
 import java.util.List;
 
-/** Converts copied Kafka records into the native Fluss log representation. */
+/** Converts borrowed Kafka records into the native Fluss log representation. */
 @Internal
 public interface KafkaRecordTranscoder {
     /**
      * Transcodes records from the requested Kafka partition according to the target Fluss table
      * schema and log format.
+     *
+     * <p>The caller keeps input storage alive and unchanged until this method returns or throws.
+     * The returned bytes own their storage and remain valid after the input buffers are released.
      */
     BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
             throws Exception;

@@ -149,7 +149,7 @@ public final class KafkaRowAssembler {
             RecordHeader header = headers.get(i);
             BinaryString name = BinaryString.fromString(header.name());
             if (!values.containsKey(name)) {
-                values.put(name, copyBytes(header.value()));
+                values.put(name, header.value());
             }
         }
         // Validate the final map: an overwritten null must not reject a non-null last value.
