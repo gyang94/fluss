@@ -100,7 +100,6 @@ public final class KafkaClusterMetadata {
         NONE,
         UNKNOWN_TOPIC_OR_PARTITION,
         UNKNOWN_TOPIC_ID,
-        UNKNOWN_SERVER_ERROR,
         INVALID_TOPIC
     }
 

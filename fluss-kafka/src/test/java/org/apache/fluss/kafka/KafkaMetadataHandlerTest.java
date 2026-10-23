@@ -75,6 +75,7 @@ import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.entry;
 
 /** Protocol compatibility tests for the Kafka Metadata API. */
 public class KafkaMetadataHandlerTest {
@@ -188,82 +189,32 @@ public class KafkaMetadataHandlerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    public void testMissingTablesOnlyAffectTheirOwnTopics(boolean failedFuture) {
-        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
-        service.putTable("fluss.events", 777L);
-        service.failTableMetadataAsFuture = failedFuture;
-        service.tableMetadataFailures.put(
-                "kafka.topic",
-                new FlussRuntimeException(
-                        "Failed to get table", new TableNotExistException("table was deleted")));
-        service.tableMetadataFailures.put(
-                "kafka.other", new TableNotExistException("another table was deleted"));
+    public void testMetadataFailureDoesNotRetryOrRediscover(boolean failedFuture) {
+        for (MetadataRequest request :
+                Arrays.asList(
+                        topicsRequest((short) 11, "kafka.topic", "kafka.other"),
+                        allTopicsRequest((short) 11))) {
+            TestingMetadataGatewayService service = new TestingMetadataGatewayService();
+            service.metadataFailure =
+                    new FlussRuntimeException(
+                            "Failed to get table", new TableNotExistException("table was deleted"));
+            service.failMetadataAsFuture = failedFuture;
 
-        MetadataResponse response =
-                handle(
-                        service,
-                        topicsRequest(
-                                (short) 11, "kafka.topic", "events", "kafka.other", "fluss.events"),
-                        (short) 11);
+            MetadataResponse response = handle(service, request, (short) 11);
 
-        assertThat(response.brokers()).hasSize(2);
-        assertThat(response.errors())
-                .containsEntry("kafka.topic", Errors.UNKNOWN_TOPIC_OR_PARTITION)
-                .containsEntry("kafka.other", Errors.UNKNOWN_TOPIC_OR_PARTITION);
-        for (String name : Arrays.asList("events", "fluss.events")) {
-            assertThat(response.data().topics().find(name).errorCode())
-                    .isEqualTo(Errors.NONE.code());
-            assertThat(response.data().topics().find(name).partitions()).hasSize(2);
+            assertThat(response.brokers()).isEmpty();
+            if (request.isAllTopics()) {
+                assertThat(response.data().topics()).isEmpty();
+            } else {
+                assertThat(response.errors())
+                        .containsOnly(
+                                entry("kafka.topic", Errors.UNKNOWN_SERVER_ERROR),
+                                entry("kafka.other", Errors.UNKNOWN_SERVER_ERROR));
+            }
+            assertThat(service.metadataCalls).isOne();
+            assertThat(service.listDatabasesCalls).isEqualTo(request.isAllTopics() ? 1 : 0);
+            assertThat(service.listTablesCalls).isEqualTo(request.isAllTopics() ? 1 : 0);
         }
-        assertThat(service.brokerMetadataCalls).isOne();
-        assertThat(service.tableMetadataCalls)
-                .containsOnlyKeys("kafka.topic", "kafka.other", "fluss.events")
-                .allSatisfy((table, calls) -> assertThat(calls).isOne());
-        assertThat(service.listDatabasesCalls).isZero();
-        assertThat(service.listTablesCalls).isZero();
-
-        // Tables may disappear after discovery. Omit them without repeating the catalog scan.
-        MetadataResponse all = handle(service, allTopicsRequest((short) 11), (short) 11);
-        assertThat(all.brokers()).hasSize(2);
-        assertThat(all.data().topics())
-                .extracting(MetadataResponseTopic::name)
-                .containsExactly("fluss.events");
-        assertThat(service.tableMetadataCalls)
-                .allSatisfy((table, calls) -> assertThat(calls).isEqualTo(2));
-        assertThat(service.listDatabasesCalls).isOne();
-        assertThat(service.listTablesCalls).isEqualTo(2);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    public void testUnexpectedTableFailureRetainsOtherTopics(boolean failedFuture) {
-        TestingMetadataGatewayService service = new TestingMetadataGatewayService();
-        service.putTable("fluss.events", 777L);
-        service.failTableMetadataAsFuture = failedFuture;
-        service.tableMetadataFailures.put("fluss.events", new IllegalStateException("read failed"));
-
-        MetadataResponse response =
-                handle(
-                        service,
-                        topicsRequest((short) 11, "events", "kafka.topic", "fluss.events"),
-                        (short) 11);
-        assertThat(response.brokers()).hasSize(2);
-        assertThat(response.errors())
-                .containsEntry("events", Errors.UNKNOWN_SERVER_ERROR)
-                .containsEntry("fluss.events", Errors.UNKNOWN_SERVER_ERROR);
-        assertThat(response.data().topics().find("kafka.topic").errorCode())
-                .isEqualTo(Errors.NONE.code());
-        assertThat(response.data().topics().find("events").partitions()).isEmpty();
-        assertThat(service.tableMetadataCalls)
-                .containsOnlyKeys("fluss.events", "kafka.topic")
-                .allSatisfy((table, calls) -> assertThat(calls).isOne());
-        assertThat(service.listDatabasesCalls).isZero();
-        assertThat(service.listTablesCalls).isZero();
-
-        MetadataResponse all = handle(service, allTopicsRequest((short) 11), (short) 11);
-        assertThat(all.errors()).containsEntry("fluss.events", Errors.UNKNOWN_SERVER_ERROR);
-        assertThat(all.data().topics().find("kafka.topic").errorCode())
-                .isEqualTo(Errors.NONE.code());
     }
 
     @Test
@@ -347,7 +298,7 @@ public class KafkaMetadataHandlerTest {
     @Test
     public void testUnexpectedGatewayFailureUsesRequestErrorResponse() {
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
-        service.failMetadata = true;
+        service.metadataFailure = new IllegalStateException("metadata unavailable");
         MetadataRequest request = namedTopicRequest("kafka.topic");
 
         MetadataResponse response = handle(service, request, (short) 11);
@@ -448,48 +399,28 @@ public class KafkaMetadataHandlerTest {
         assertThat(service.gatewayCalls).isZero();
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    public void testMissingDatabaseRetainsBrokersAndAliases(boolean failedFuture) {
+    @Test
+    public void testMissingDatabaseFailsBatchWithoutDiscovery() {
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
         service.putTable("fluss.topic", 777L);
-        service.failTableMetadataAsFuture = failedFuture;
         for (short version = 0; version <= 11; version++) {
-            for (List<String> names :
-                    Arrays.asList(
-                            Collections.singletonList("missing_db.topic"),
-                            Arrays.asList(
-                                    "missing_db.topic", "topic", "fluss.topic", "kafka.topic"))) {
-                MetadataResponse response =
-                        handle(
-                                service,
-                                topicsRequest(version, names.toArray(new String[0])),
-                                version);
-                assertThat(response.brokers()).hasSize(2);
-                assertThat(response.data().topics()).hasSize(names.size());
-                assertThat(response.data().topics().find("missing_db.topic").errorCode())
-                        .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-                if (names.contains("topic")) {
-                    for (String name : Arrays.asList("topic", "fluss.topic", "kafka.topic")) {
-                        MetadataResponseTopic valid = response.data().topics().find(name);
-                        assertThat(valid.errorCode()).isEqualTo(Errors.NONE.code());
-                        assertThat(valid.partitions()).hasSize(2);
-                    }
-                    assertThat(response.data().topics().find("topic").topicId())
-                            .isEqualTo(
-                                    version >= 10
-                                            ? new Uuid(0x466c757373410000L, 777L)
-                                            : Uuid.ZERO_UUID);
-                    assertThat(response.data().topics().find("fluss.topic").topicId())
-                            .isEqualTo(
-                                    version >= 10
-                                            ? new Uuid(0x466c757373000000L, 777L)
-                                            : Uuid.ZERO_UUID);
-                }
-            }
+            MetadataResponse response =
+                    handle(
+                            service,
+                            topicsRequest(
+                                    version,
+                                    "topic",
+                                    "fluss.topic",
+                                    "kafka.topic",
+                                    "missing_db.topic"),
+                            version);
+            assertThat(response.brokers()).isEmpty();
+            assertThat(response.errorCounts())
+                    .containsExactlyEntriesOf(
+                            Collections.singletonMap(Errors.UNKNOWN_SERVER_ERROR, 4));
         }
+        assertThat(service.metadataCalls).isEqualTo(12);
         assertThat(service.listDatabasesCalls).isZero();
-        assertThat(service.listedDatabases).isEmpty();
         assertThat(service.listTablesCalls).isZero();
     }
 
@@ -549,6 +480,7 @@ public class KafkaMetadataHandlerTest {
                     .extracting(MetadataResponseTopic::name)
                     .containsExactly("topic", canonical, "sales.topic");
             assertThat(named.errorCounts()).containsOnlyKeys(Errors.NONE);
+            assertThat(service.metadataCalls).isEqualTo(version * 2 + 1);
             MetadataResponseTopic alias = named.data().topics().find("topic");
             MetadataResponseTopic qualified = named.data().topics().find(canonical);
             assertThat(alias.partitions()).isEqualTo(qualified.partitions());
@@ -562,6 +494,7 @@ public class KafkaMetadataHandlerTest {
                         .isNotEqualTo(named.data().topics().find("sales.topic").topicId());
             }
             MetadataResponse all = handle(service, allTopicsRequest(version), version, config);
+            assertThat(service.metadataCalls).isEqualTo(version * 2 + 2);
             assertThat(all.data().topics())
                     .extracting(MetadataResponseTopic::name)
                     .contains(canonical, "sales.topic")
@@ -578,54 +511,42 @@ public class KafkaMetadataHandlerTest {
         MetadataResponse response =
                 handle(
                         service,
-                        topicsRequest((short) 11, "topic", "kafka.topic"),
+                        topicsRequest((short) 11, "kafka.topic", "topic"),
                         (short) 11,
                         config);
-        assertThat(response.data().topics().find("topic").errorCode())
-                .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-        assertThat(response.data().topics().find("kafka.topic").errorCode())
-                .isEqualTo(Errors.NONE.code());
+        assertThat(response.brokers()).isEmpty();
+        assertThat(response.errorCounts())
+                .containsExactlyEntriesOf(Collections.singletonMap(Errors.UNKNOWN_SERVER_ERROR, 2));
+        assertThat(service.metadataCalls).isOne();
         assertThat(service.listDatabasesCalls).isZero();
         assertThat(service.requestedTables)
                 .containsExactlyInAnyOrder("missing_default.topic", "kafka.topic");
-        assertThat(service.listedDatabases).isEmpty();
         assertThat(service.listTablesCalls).isZero();
     }
 
     @Test
-    public void testUnauthorizedAliasesRemainHiddenWithMissingTopics() {
+    public void testUnauthorizedAliasesRemainHidden() {
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
         service.putTable("fluss.topic", 777L);
         service.hiddenTopics.add("fluss.topic");
         service.putTable("sales.topic", 778L);
         for (short version = 0; version <= 11; version++) {
-            for (List<String> names :
-                    Arrays.asList(
-                            Arrays.asList("topic", "fluss.topic", "sales.topic"),
-                            Arrays.asList(
-                                    "topic", "fluss.topic", "sales.topic", "missing_db.topic"))) {
-                MetadataResponse response =
-                        handle(
-                                service,
-                                topicsRequest(version, names.toArray(new String[0])),
-                                version);
-                assertThat(response.brokers()).hasSize(2);
-                assertThat(response.data().topics()).hasSize(names.size());
-                for (String hidden : Arrays.asList("topic", "fluss.topic")) {
-                    MetadataResponseTopic topic = response.data().topics().find(hidden);
-                    assertThat(topic.errorCode())
-                            .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-                    assertThat(topic.topicId()).isEqualTo(Uuid.ZERO_UUID);
-                    assertThat(topic.partitions()).isEmpty();
-                }
-                MetadataResponseTopic visible = response.data().topics().find("sales.topic");
-                assertThat(visible.errorCode()).isEqualTo(Errors.NONE.code());
-                assertThat(visible.partitions()).hasSize(2);
-                if (names.contains("missing_db.topic")) {
-                    assertThat(response.data().topics().find("missing_db.topic").errorCode())
-                            .isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
-                }
+            MetadataResponse response =
+                    handle(
+                            service,
+                            topicsRequest(version, "topic", "fluss.topic", "sales.topic"),
+                            version);
+            assertThat(response.brokers()).hasSize(2);
+            assertThat(response.data().topics()).hasSize(3);
+            for (String hidden : Arrays.asList("topic", "fluss.topic")) {
+                MetadataResponseTopic topic = response.data().topics().find(hidden);
+                assertThat(topic.errorCode()).isEqualTo(Errors.UNKNOWN_TOPIC_OR_PARTITION.code());
+                assertThat(topic.topicId()).isEqualTo(Uuid.ZERO_UUID);
+                assertThat(topic.partitions()).isEmpty();
             }
+            MetadataResponseTopic visible = response.data().topics().find("sales.topic");
+            assertThat(visible.errorCode()).isEqualTo(Errors.NONE.code());
+            assertThat(visible.partitions()).hasSize(2);
             MetadataResponse all = handle(service, allTopicsRequest(version), version);
             assertThat(all.brokers()).hasSize(2);
             assertThat(all.data().topics())
@@ -864,17 +785,14 @@ public class KafkaMetadataHandlerTest {
         private int gatewayCalls;
         private int listDatabasesCalls;
         private int listTablesCalls;
-        private int brokerMetadataCalls;
-        private final Map<String, Integer> tableMetadataCalls = new LinkedHashMap<>();
-        private final Map<String, RuntimeException> tableMetadataFailures = new LinkedHashMap<>();
+        private int metadataCalls;
         private final Set<String> requestedTables = new LinkedHashSet<>();
-        private final Set<String> listedDatabases = new LinkedHashSet<>();
         private String lastListenerName;
         private boolean topicLeaderAvailable = true;
         private int[] topicIsr = new int[] {1, 2};
         private Integer topicBucketEpoch = 7;
-        private boolean failMetadata;
-        private boolean failTableMetadataAsFuture;
+        private RuntimeException metadataFailure;
+        private boolean failMetadataAsFuture;
         private boolean failListTablesAsFuture;
         private String deleteDatabaseBeforeListing;
         private RuntimeException listTablesFailure;
@@ -900,7 +818,6 @@ public class KafkaMetadataHandlerTest {
             listTablesCalls++;
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             String database = request.getDatabaseName();
-            listedDatabases.add(database);
             if (database.equals(deleteDatabaseBeforeListing)) {
                 databases.remove(database);
                 tables.keySet().removeIf(name -> name.startsWith(database + "."));
@@ -931,40 +848,26 @@ public class KafkaMetadataHandlerTest {
         public CompletableFuture<org.apache.fluss.rpc.messages.MetadataResponse> metadata(
                 org.apache.fluss.rpc.messages.MetadataRequest request) {
             gatewayCalls++;
+            metadataCalls++;
             lastListenerName = currentListenerName();
-            if (failMetadata) {
-                CompletableFuture<org.apache.fluss.rpc.messages.MetadataResponse> failure =
-                        new CompletableFuture<>();
-                failure.completeExceptionally(new IllegalStateException("metadata unavailable"));
-                return failure;
-            }
-            if (request.getTablePathsList().isEmpty()) {
-                brokerMetadataCalls++;
+            if (metadataFailure != null) {
+                if (failMetadataAsFuture) {
+                    return FutureUtils.completedExceptionally(
+                            new CompletionException(new CompletionException(metadataFailure)));
+                }
+                throw metadataFailure;
             }
             List<PbTableMetadata> topics = new ArrayList<>();
             for (PbTablePath tablePath : request.getTablePathsList()) {
                 String topicName = tablePath.getDatabaseName() + "." + tablePath.getTableName();
                 requestedTables.add(topicName);
-                tableMetadataCalls.merge(topicName, 1, Integer::sum);
                 // Native Metadata and listTables omit tables without DESCRIBE permission.
                 if (hiddenTopics.contains(topicName)) {
                     continue;
                 }
-                RuntimeException failure = tableMetadataFailures.get(topicName);
                 Long tableId = tables.get(topicName);
-                if (failure == null && tableId == null) {
-                    failure =
-                            databases.contains(tablePath.getDatabaseName())
-                                    ? new TableNotExistException(
-                                            "Table does not exist: " + topicName)
-                                    : new DatabaseNotExistException("Database does not exist.");
-                }
-                if (failure != null) {
-                    if (failTableMetadataAsFuture) {
-                        return FutureUtils.completedExceptionally(
-                                new CompletionException(new CompletionException(failure)));
-                    }
-                    throw failure;
+                if (tableId == null) {
+                    throw new TableNotExistException("Table does not exist: " + topicName);
                 }
                 topics.add(
                         tableMetadata(
