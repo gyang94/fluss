@@ -157,9 +157,9 @@ public final class KafkaProduceCommand {
     /**
      * A Kafka record with borrowed key/value bytes and a snapshot of the header list.
      *
-     * <p>Accessors return read-only views with independent positions and limits. These views share
-     * the input storage and do not retain it. The caller must keep that storage alive and unchanged
-     * until {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns.
+     * <p>Key/value accessors return read-only views with independent positions and limits. These
+     * views share the input storage and do not retain it. The caller must keep that storage alive
+     * and unchanged until {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns.
      */
     @Internal
     public static final class Record {
@@ -236,13 +236,16 @@ public final class KafkaProduceCommand {
         }
     }
 
-    /** A Kafka record header with a byte-array value. */
+    /** A Kafka record header backed by a shared value array. */
     @Internal
     public static final class RecordHeader {
         private final String name;
         private final @Nullable byte[] value;
 
-        /** Creates a Kafka record header without copying the supplied value. */
+        /**
+         * Creates a Kafka record header without copying its value array. The caller must not modify
+         * the array while the header is in use.
+         */
         public RecordHeader(String name, @Nullable byte[] value) {
             this.name = checkNotNull(name);
             this.value = value;
@@ -253,7 +256,9 @@ public final class KafkaProduceCommand {
             return name;
         }
 
-        /** Returns the header value directly, or null. */
+        /**
+         * Returns the shared header value array, or null. The returned array must not be modified.
+         */
         public @Nullable byte[] value() {
             return value;
         }
