@@ -617,7 +617,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Collections.singletonList(TABLET_SERVER_ID),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
 
         List<NotifyLeaderAndIsrResultForBucket> results = future.get();
@@ -643,7 +645,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Collections.singletonList(TABLET_SERVER_ID),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
 
         assertThat(future.get()).containsOnly(new NotifyLeaderAndIsrResultForBucket(logTb));
@@ -1510,6 +1514,11 @@ class ReplicaManagerTest extends ReplicaTestBase {
         PutKvResultForBucket putResult = putFuture.get().get(0);
         assertThat(putResult.failed()).isFalse();
 
+        // Lookups read RocksDB only, never the kv pre-write buffer, so wait until the
+        // asynchronous flush has published the just-written value.
+        flushAndWait(
+                replicaManager.getReplicaOrException(tableBucket).getKvTablet(), Long.MAX_VALUE);
+
         CompactedKeyEncoder keyEncoder = new CompactedKeyEncoder(DATA1_ROW_TYPE, new int[] {0});
         byte[] keyBytes = keyEncoder.encodeKey(row(DATA_1_WITH_KEY_AND_VALUE.get(0).f0));
 
@@ -1578,7 +1587,7 @@ class ReplicaManagerTest extends ReplicaTestBase {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void testListOffsets(boolean isPartitioned) throws Exception {
-        TableBucket tb = new TableBucket(DATA1_TABLE_ID, isPartitioned ? 10L : null, 1);
+        TableBucket tb = makeTableBucket(DATA1_TABLE_ID, isPartitioned ? 10L : null, false);
         makeLogTableAsLeader(tb, isPartitioned);
 
         // produce one batch to this bucket.
@@ -1787,7 +1796,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Arrays.asList(1, 2, 3),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
         assertThat(future.get()).containsOnly(new NotifyLeaderAndIsrResultForBucket(tb));
         assertReplicaEpochEquals(
@@ -1808,7 +1819,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Arrays.asList(1, 2, 3),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
         assertThat(future.get())
                 .containsOnly(
@@ -1857,7 +1870,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Collections.singletonList(TABLET_SERVER_ID),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
 
         assertThat(future.get()).containsOnly(new NotifyLeaderAndIsrResultForBucket(tableBucket));
@@ -1884,7 +1899,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Arrays.asList(1, 2, 3),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
         assertThat(future.get()).containsOnly(new NotifyLeaderAndIsrResultForBucket(tb));
         assertReplicaEpochEquals(
@@ -1916,7 +1933,9 @@ class ReplicaManagerTest extends ReplicaTestBase {
                                         Arrays.asList(1, 2, 3),
                                         Collections.emptyList(),
                                         INITIAL_COORDINATOR_EPOCH,
-                                        INITIAL_BUCKET_EPOCH))),
+                                        INITIAL_BUCKET_EPOCH),
+                                3,
+                                0L)),
                 future::complete);
         assertThat(future.get()).containsOnly(new NotifyLeaderAndIsrResultForBucket(tb));
         assertReplicaEpochEquals(
