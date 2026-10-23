@@ -60,9 +60,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                         consumer.append(
                                 assembler.assemble(
                                         new Object[] {
-                                            decode(
-                                                    schema.valueConversionType(),
-                                                    record.borrowedValue())
+                                            decode(schema.valueConversionType(), record.value())
                                         },
                                         record,
                                         partitionId));
@@ -72,9 +70,12 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     }
 
     private static @Nullable Object decode(
-            KafkaValueConversionType format, @Nullable byte[] bytes) {
-        if (bytes == null || format == KafkaValueConversionType.BINARY) {
-            return bytes;
+            KafkaValueConversionType format, @Nullable ByteBuffer bytes) {
+        if (bytes == null) {
+            return null;
+        }
+        if (format == KafkaValueConversionType.BINARY) {
+            return KafkaRowAssembler.copyBytes(bytes);
         }
         try {
             return BinaryString.fromString(
@@ -82,7 +83,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                             .newDecoder()
                             .onMalformedInput(CodingErrorAction.REPORT)
                             .onUnmappableCharacter(CodingErrorAction.REPORT)
-                            .decode(ByteBuffer.wrap(bytes))
+                            .decode(bytes)
                             .toString());
         } catch (CharacterCodingException e) {
             throw new KafkaRecordEncodingException("Kafka string field is not valid UTF-8.", e);

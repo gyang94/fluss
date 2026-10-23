@@ -30,6 +30,9 @@ import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.types.MapType;
 import org.apache.fluss.types.RowType;
 
+import javax.annotation.Nullable;
+
+import java.nio.ByteBuffer;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,20 +54,20 @@ public final class KafkaRowAssembler {
      * Assembles one Fluss row from a record and its requested partition for immediate synchronous
      * encoding.
      *
-     * <p>The row borrows decoded values, keys and header payloads; it must not modify them or
-     * retain them after conversion.
+     * <p>Binary fields are materialized from the command's read-only views for Arrow. The row must
+     * not be retained after conversion.
      */
     public GenericRow assemble(Object[] valueValues, Record record, int partitionId) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
         setProjectedFields(row, topicSchema.valueProjection(), valueValues);
         if (topicSchema.keyPosition() >= 0) {
             int position = topicSchema.keyPosition();
-            byte[] key = record.borrowedKey();
+            ByteBuffer key = record.key();
             if (key == null && !topicSchema.rowType().getTypeAt(position).isNullable()) {
                 throw new KafkaRecordEncodingException(
                         "Null Kafka key cannot populate NOT NULL _kafka_key.");
             }
-            row.setField(position, key);
+            row.setField(position, copyBytes(key));
         }
         if (topicSchema.headersPosition() >= 0) {
             int position = topicSchema.headersPosition();
@@ -91,6 +94,15 @@ public final class KafkaRowAssembler {
         }
         // A declared _kafka_rescue stays null for binary/string; omitted columns do not exist.
         return row;
+    }
+
+    static @Nullable byte[] copyBytes(@Nullable ByteBuffer buffer) {
+        if (buffer == null) {
+            return null;
+        }
+        byte[] bytes = new byte[buffer.remaining()];
+        buffer.duplicate().get(bytes);
+        return bytes;
     }
 
     private static int timestampTypeId(TimestampType type) {
@@ -132,8 +144,13 @@ public final class KafkaRowAssembler {
 
     private static GenericMap toHeaders(List<RecordHeader> headers, MapType type) {
         Map<BinaryString, byte[]> values = new LinkedHashMap<>();
-        for (RecordHeader header : headers) {
-            values.put(BinaryString.fromString(header.name()), header.borrowedValue());
+        // Walk backwards so overwritten header values never need a payload copy.
+        for (int i = headers.size() - 1; i >= 0; i--) {
+            RecordHeader header = headers.get(i);
+            BinaryString name = BinaryString.fromString(header.name());
+            if (!values.containsKey(name)) {
+                values.put(name, copyBytes(header.value()));
+            }
         }
         // Validate the final map: an overwritten null must not reject a non-null last value.
         for (Map.Entry<BinaryString, byte[]> entry : values.entrySet()) {
