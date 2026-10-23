@@ -20,6 +20,8 @@ package org.apache.fluss.kafka.backend.produce;
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
@@ -49,6 +51,7 @@ import org.apache.kafka.common.protocol.Errors;
 
 import javax.annotation.Nullable;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -101,10 +104,56 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     @Override
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
+        // The request owns the payloads only until write returns. Metadata lookup can also
+        // complete asynchronously when no conversion executor is configured.
+        KafkaProduceCommand ownedCommand = copyCommand(command);
         if (conversionExecutor != null) {
-            return writePartitions(command);
+            return writePartitions(ownedCommand);
         }
-        return writeTopics(command);
+        return writeTopics(ownedCommand);
+    }
+
+    private static KafkaProduceCommand copyCommand(KafkaProduceCommand command) {
+        List<TopicWrite> topics = new ArrayList<>(command.topics().size());
+        for (TopicWrite topic : command.topics()) {
+            List<PartitionWrite> partitions = new ArrayList<>(topic.partitions().size());
+            for (PartitionWrite partition : topic.partitions()) {
+                List<Record> records = new ArrayList<>(partition.records().size());
+                for (Record record : partition.records()) {
+                    List<RecordHeader> headers = new ArrayList<>(record.headers().size());
+                    for (RecordHeader header : record.headers()) {
+                        byte[] value = header.value();
+                        headers.add(
+                                new RecordHeader(
+                                        header.name(), value == null ? null : value.clone()));
+                    }
+                    records.add(
+                            new Record(
+                                    record.timestamp(),
+                                    record.timestampType(),
+                                    copyPayload(record.key()),
+                                    copyPayload(record.value()),
+                                    headers));
+                }
+                partitions.add(new PartitionWrite(partition.partitionId(), records));
+            }
+            topics.add(new TopicWrite(topic.topicName(), partitions));
+        }
+        return new KafkaProduceCommand(
+                command.acks(),
+                command.timeoutMs(),
+                topics,
+                command.listenerName(),
+                command.clientAddress());
+    }
+
+    private static @Nullable ByteBuffer copyPayload(@Nullable ByteBuffer payload) {
+        if (payload == null) {
+            return null;
+        }
+        byte[] bytes = new byte[payload.remaining()];
+        payload.get(bytes);
+        return ByteBuffer.wrap(bytes);
     }
 
     private CompletableFuture<KafkaProduceResult> writePartitions(KafkaProduceCommand command) {

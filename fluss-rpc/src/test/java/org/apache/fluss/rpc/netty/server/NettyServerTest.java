@@ -118,6 +118,7 @@ public class NettyServerTest {
             }
         }
     }
+
     @Test
     void testProtocolsCloseOnlyAfterTransportShutdown() {
         CompletableFuture<Void> transportShutdown = new CompletableFuture<>();

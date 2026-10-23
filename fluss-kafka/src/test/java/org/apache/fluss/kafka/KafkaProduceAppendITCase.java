@@ -233,7 +233,8 @@ class KafkaProduceAppendITCase {
                             () -> admin.createTable(path, descriptor(format, false), false).get())
                     .hasCauseInstanceOf(InvalidTableException.class)
                     .rootCause()
-                    .hasMessageContaining("Kafka requires nullable fields");
+                    .hasMessageContaining("_kafka_value")
+                    .hasMessageContaining("NOT NULL");
         }
     }
 

@@ -26,6 +26,8 @@ import org.apache.fluss.exception.DatabaseNotExistException;
 import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
@@ -54,6 +56,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetAddress;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -68,6 +71,104 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Tests append admission, error isolation, session propagation and asynchronous acknowledgements.
  */
 class GatewayKafkaProduceBackendTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testAsyncConversionOwnsPayloadsAfterWriteReturns(boolean useExecutor) throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        service.pendingMetadata = new CompletableFuture<>();
+        KafkaProduceConversionExecutor executor =
+                useExecutor ? new KafkaProduceConversionExecutor(1, 2) : null;
+        List<Record> seen = new ArrayList<>();
+        ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(
+                        service,
+                        service,
+                        mapper(),
+                        (partitionId, records, table) -> {
+                            seen.addAll(records);
+                            return arrow.transcode(partitionId, records, table);
+                        },
+                        executor);
+        ByteBuffer key = ByteBuffer.allocateDirect(4);
+        key.put(new byte[] {0, 1, 2, 0});
+        key.position(1).limit(3);
+        byte[] value = new byte[] {0, 65, 66, 0};
+        ByteBuffer valueView = ByteBuffer.wrap(value, 1, 2).slice().asReadOnlyBuffer();
+        byte[] headerValue = new byte[] {3, 4};
+        Record record =
+                new Record(
+                        123L,
+                        TimestampType.CREATE_TIME,
+                        key.asReadOnlyBuffer(),
+                        valueView,
+                        Arrays.asList(
+                                new RecordHeader("header", headerValue),
+                                new RecordHeader("header", null),
+                                new RecordHeader("empty", new byte[0])));
+        Record nullRecord =
+                new Record(-1L, TimestampType.LOG_APPEND_TIME, null, null, Collections.emptyList());
+        Record emptyRecord =
+                new Record(
+                        1L,
+                        ByteBuffer.allocate(0),
+                        ByteBuffer.allocate(0),
+                        Collections.emptyList());
+        try {
+            CompletableFuture<KafkaProduceResult> result =
+                    backend.write(
+                            command(
+                                    (short) 1,
+                                    topic(
+                                            "kafka.topic",
+                                            new PartitionWrite(
+                                                    0,
+                                                    Arrays.asList(
+                                                            record, nullRecord, emptyRecord)))));
+            assertThat(result).isNotDone();
+            assertThat(key.position()).isEqualTo(1);
+            assertThat(key.limit()).isEqualTo(3);
+            assertThat(valueView.position()).isZero();
+            assertThat(valueView.remaining()).isEqualTo(2);
+
+            // Simulate the network request releasing or reusing its buffers after write returns.
+            key.put(1, (byte) 9).put(2, (byte) 9);
+            Arrays.fill(value, (byte) 9);
+            Arrays.fill(headerValue, (byte) 9);
+            key.clear();
+            valueView.position(valueView.limit());
+            service.pendingMetadata.complete(metadata(false));
+
+            assertErrors(result.get(10, TimeUnit.SECONDS), Errors.NONE);
+            assertThat(seen).hasSize(3);
+            assertThat(seen.get(0)).isNotSameAs(record);
+            assertThat(seen.get(0).timestamp()).isEqualTo(123L);
+            assertThat(seen.get(0).timestampType()).isEqualTo(TimestampType.CREATE_TIME);
+            assertThat(seen.get(0).key()).isEqualTo(ByteBuffer.wrap(new byte[] {1, 2}));
+            assertThat(seen.get(0).value()).isEqualTo(ByteBuffer.wrap(new byte[] {65, 66}));
+            assertThat(seen.get(0).headers())
+                    .extracting(RecordHeader::name)
+                    .containsExactly("header", "header", "empty");
+            assertThat(seen.get(0).headers().get(0).value())
+                    .isNotSameAs(headerValue)
+                    .containsExactly((byte) 3, (byte) 4);
+            assertThat(seen.get(0).headers().get(1).value()).isNull();
+            assertThat(seen.get(0).headers().get(2).value()).isEmpty();
+            assertThat(seen.get(1).hasTimestamp()).isFalse();
+            assertThat(seen.get(1).timestampType()).isEqualTo(TimestampType.LOG_APPEND_TIME);
+            assertThat(seen.get(1).key()).isNull();
+            assertThat(seen.get(1).value()).isNull();
+            assertThat(seen.get(2).key()).isEqualTo(ByteBuffer.allocate(0));
+            assertThat(seen.get(2).value()).isEqualTo(ByteBuffer.allocate(0));
+            assertThat(service.appends).hasSize(1);
+        } finally {
+            service.pendingMetadata.complete(metadata(false));
+            if (executor != null) {
+                executor.closeAsync().get(10, TimeUnit.SECONDS);
+            }
+        }
+    }
 
     @Test
     void testAllNullValuesUseNativeAppendAndAuthorization() throws Exception {
@@ -159,7 +260,7 @@ class GatewayKafkaProduceBackendTest {
                             return transcoder.transcode(partitionId, records, table);
                         });
         Record nullRecord = nullValue(0).records().get(0);
-        Record empty = new Record(1L, null, new byte[0], Collections.emptyList());
+        Record empty = new Record(1L, null, ByteBuffer.allocate(0), Collections.emptyList());
         Record valid = good(0).records().get(0);
         KafkaProduceResult result =
                 backend.write(
@@ -172,7 +273,9 @@ class GatewayKafkaProduceBackendTest {
                                                         Arrays.asList(nullRecord, empty, valid)))))
                         .join();
         assertErrors(result, Errors.NONE);
-        assertThat(seen).containsExactly(nullRecord, empty, valid);
+        assertThat(seen)
+                .extracting(Record::value)
+                .containsExactly(nullRecord.value(), empty.value(), valid.value());
         assertThat(result.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
     }
 
@@ -180,7 +283,11 @@ class GatewayKafkaProduceBackendTest {
         return new PartitionWrite(
                 partition,
                 Collections.singletonList(
-                        new Record(-1L, new byte[] {(byte) 0xff}, null, Collections.emptyList())));
+                        new Record(
+                                -1L,
+                                ByteBuffer.wrap(new byte[] {(byte) 0xff}),
+                                null,
+                                Collections.emptyList())));
     }
 
     @Test
@@ -218,7 +325,7 @@ class GatewayKafkaProduceBackendTest {
                                 new Record(
                                         1L,
                                         null,
-                                        new byte[] {(byte) 0xff},
+                                        ByteBuffer.wrap(new byte[] {(byte) 0xff}),
                                         Collections.emptyList())));
         KafkaProduceResult result =
                 backend(service)
@@ -451,7 +558,9 @@ class GatewayKafkaProduceBackendTest {
         CountDownLatch releaseFirst = new CountDownLatch(1);
         KafkaRecordTranscoder transcoder =
                 (partitionId, records, table) -> {
-                    byte[] value = records.get(0).value();
+                    ByteBuffer buffer = records.get(0).value();
+                    byte[] value = new byte[buffer.remaining()];
+                    buffer.get(value);
                     if (value[0] == 1) {
                         firstConverting.countDown();
                         assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
@@ -846,7 +955,12 @@ class GatewayKafkaProduceBackendTest {
                                                                 .build())
                                                 .build()
                                                 .toJsonBytes()));
-        Record valid = new Record(1L, new byte[] {1}, new byte[] {65}, Collections.emptyList());
+        Record valid =
+                new Record(
+                        1L,
+                        ByteBuffer.wrap(new byte[] {1}),
+                        ByteBuffer.wrap(new byte[] {65}),
+                        Collections.emptyList());
         assertErrors(
                 backend(service)
                         .write(
@@ -998,7 +1112,10 @@ class GatewayKafkaProduceBackendTest {
                 id,
                 Collections.singletonList(
                         new Record(
-                                123L, null, new byte[] {(byte) value}, Collections.emptyList())));
+                                123L,
+                                null,
+                                ByteBuffer.wrap(new byte[] {(byte) value}),
+                                Collections.emptyList())));
     }
 
     private static GetTableInfoResponse metadata(boolean invalid) {
