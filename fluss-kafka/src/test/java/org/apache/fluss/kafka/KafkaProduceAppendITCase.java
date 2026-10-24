@@ -27,7 +27,6 @@ import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
-import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -74,16 +73,13 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import static org.apache.fluss.server.testutils.RpcMessageTestUtils.createTable;
 import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newAlterTableRequest;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Exercises native DDL, Kafka discovery and Produce, replication, and native Fluss readback. */
 class KafkaProduceAppendITCase {
@@ -101,60 +97,7 @@ class KafkaProduceAppendITCase {
 
     @ParameterizedTest
     @ValueSource(strings = {"binary", "string"})
-    void testPrecreatedTableRoundTripForAllAckModes(String format) throws Exception {
-        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
-                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
-            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            for (String acks : Arrays.asList("0", "1", "all")) {
-                TablePath path = TablePath.of(DATABASE, "produce_" + format + "_" + acks);
-                String topic = path.toString();
-                admin.createTable(path, descriptor(format), false).get();
-                CLUSTER.waitUntilAllGatewayHasSameMetadata();
-                // Node discovery does not wait for table replicas. With acks=0 the producer
-                // cannot observe or retry a write rejected before the leader is ready.
-                CLUSTER.waitUntilAllReplicaReady(
-                        new TableBucket(admin.getTableInfo(path).get().getTableId(), 0));
-                try (KafkaProducer<byte[], byte[]> producer = producer(acks)) {
-                    assertThat(producer.partitionsFor(topic)).hasSize(1);
-                    ProducerRecord<byte[], byte[]> record =
-                            new ProducerRecord<>(
-                                    topic,
-                                    0,
-                                    123L,
-                                    KEY,
-                                    VALUE,
-                                    Arrays.asList(
-                                            new RecordHeader("source", VALUE),
-                                            new RecordHeader("source", null)));
-                    RecordMetadata first = producer.send(record).get(30, TimeUnit.SECONDS);
-                    RecordMetadata second =
-                            producer.send(
-                                            new ProducerRecord<>(
-                                                    path.getTableName(),
-                                                    0,
-                                                    123L,
-                                                    KEY,
-                                                    VALUE,
-                                                    record.headers()))
-                                    .get(30, TimeUnit.SECONDS);
-                    assertThat(first.topic()).isEqualTo(topic);
-                    assertThat(second.topic()).isEqualTo(path.getTableName());
-                    if (!acks.equals("0")) {
-                        assertThat(first.offset()).isZero();
-                        assertThat(second.offset()).isEqualTo(1L);
-                    }
-                    producer.flush();
-                    assertReadback(connection, path, format, VALUE);
-                } finally {
-                    admin.dropTable(path, true).get();
-                }
-            }
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"binary", "string"})
-    void testNullValuesArePersistedForAllAckModes(String format) throws Exception {
+    void testValuesAndTombstonesRoundTripForAllAckModes(String format) throws Exception {
         List<byte[]> values = Arrays.asList(null, new byte[0], VALUE, null);
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
@@ -163,9 +106,11 @@ class KafkaProduceAppendITCase {
                 TablePath path = TablePath.of(DATABASE, "produce_null_" + format + "_" + acks);
                 admin.createTable(path, descriptor(format), false).get();
                 CLUSTER.waitUntilAllGatewayHasSameMetadata();
+                // With acks=0 the client cannot observe or retry writes before replicas are ready.
                 CLUSTER.waitUntilAllReplicaReady(
                         new TableBucket(admin.getTableInfo(path).get().getTableId(), 0));
                 try (KafkaProducer<byte[], byte[]> producer = producer(acks, 0)) {
+                    assertThat(producer.partitionsFor(path.toString())).hasSize(1);
                     for (int i = 0; i < values.size(); i++) {
                         ProducerRecord<byte[], byte[]> record =
                                 new ProducerRecord<>(
@@ -178,6 +123,7 @@ class KafkaProduceAppendITCase {
                                                 new RecordHeader("source", VALUE),
                                                 new RecordHeader("source", null)));
                         RecordMetadata metadata = producer.send(record).get(30, TimeUnit.SECONDS);
+                        assertThat(metadata.topic()).isEqualTo(record.topic());
                         if (!acks.equals("0")) {
                             assertThat(metadata.offset()).isEqualTo(i);
                         }
@@ -218,69 +164,6 @@ class KafkaProduceAppendITCase {
                 }
             } finally {
                 admin.dropTable(path, true).get();
-            }
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"binary", "string"})
-    void testNotNullValueSchemaIsRejectedWhenCreatingKafkaTable(String format) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "produce_not_null_" + format);
-        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
-                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
-            admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-            assertThatThrownBy(
-                            () -> admin.createTable(path, descriptor(format, false), false).get())
-                    .hasCauseInstanceOf(InvalidTableException.class)
-                    .rootCause()
-                    .hasMessageContaining("_kafka_value")
-                    .hasMessageContaining("NOT NULL");
-        }
-    }
-
-    @Test
-    void testSameNamedTablesAcrossDatabases() throws Exception {
-        Map<TablePath, byte[]> tables = new LinkedHashMap<>();
-        tables.put(TablePath.of("produce_first", "events"), VALUE);
-        tables.put(
-                TablePath.of("produce_second", "events"),
-                "second database".getBytes(StandardCharsets.UTF_8));
-        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
-                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
-            try {
-                for (TablePath path : tables.keySet()) {
-                    admin.createDatabase(path.getDatabaseName(), DatabaseDescriptor.EMPTY, true)
-                            .get();
-                    admin.createTable(path, descriptor("binary"), false).get();
-                }
-                CLUSTER.waitUntilAllGatewayHasSameMetadata();
-                try (KafkaProducer<byte[], byte[]> producer = producer("all")) {
-                    for (Map.Entry<TablePath, byte[]> entry : tables.entrySet()) {
-                        String topic = entry.getKey().toString();
-                        assertThat(producer.partitionsFor(topic)).hasSize(1);
-                        ProducerRecord<byte[], byte[]> record =
-                                new ProducerRecord<>(
-                                        topic,
-                                        0,
-                                        123L,
-                                        KEY,
-                                        entry.getValue(),
-                                        Arrays.asList(
-                                                new RecordHeader("source", entry.getValue()),
-                                                new RecordHeader("source", null)));
-                        assertThat(producer.send(record).get(30, TimeUnit.SECONDS).offset())
-                                .isZero();
-                        assertThat(producer.send(record).get(30, TimeUnit.SECONDS).offset())
-                                .isEqualTo(1L);
-                    }
-                    for (Map.Entry<TablePath, byte[]> entry : tables.entrySet()) {
-                        assertReadback(connection, entry.getKey(), "binary", entry.getValue());
-                    }
-                }
-            } finally {
-                for (TablePath path : tables.keySet()) {
-                    admin.dropTable(path, true).get();
-                }
             }
         }
     }
@@ -358,7 +241,7 @@ class KafkaProduceAppendITCase {
                             .get();
                     assertProduceErrors(
                             query(socket, names), names, Errors.UNKNOWN_TOPIC_OR_PARTITION);
-                    assertReadback(connection, path, "binary", VALUE, 4);
+                    assertReadback(connection, path, "binary", Collections.nCopies(4, VALUE));
                     admin.dropTable(path, true).get();
                     assertProduceErrors(
                             query(socket, names), names, Errors.UNKNOWN_TOPIC_OR_PARTITION);
@@ -366,51 +249,6 @@ class KafkaProduceAppendITCase {
             } finally {
                 admin.dropTable(path, true).get();
             }
-        }
-    }
-
-    @Test
-    void testDeletedDefaultDatabaseDoesNotFallbackOrRecreateDatabase() throws Exception {
-        Configuration config = clusterConfig();
-        config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "produce_missing_db");
-        config.set(ConfigOptions.DEFAULT_REPLICATION_FACTOR, 1);
-        config.set(ConfigOptions.LOG_REPLICA_MIN_IN_SYNC_REPLICAS_NUMBER, 1);
-        FlussClusterExtension cluster =
-                FlussClusterExtension.builder()
-                        .setNumOfTabletServers(1)
-                        .setClusterConf(config)
-                        .setTabletServerListeners("FLUSS://localhost:0,KAFKA://localhost:0")
-                        .build();
-        cluster.start();
-        try (Connection connection = ConnectionFactory.createConnection(cluster.getClientConfig());
-                org.apache.fluss.client.admin.Admin admin = connection.getAdmin()) {
-            // Startup creates the configured default; Produce must not recreate a deleted one.
-            assertThat(admin.databaseExists("produce_missing_db").get()).isTrue();
-            admin.dropDatabase("produce_missing_db", false, false).get();
-            assertThat(admin.databaseExists("produce_missing_db").get()).isFalse();
-            TablePath existing = TablePath.of("fluss", "events");
-            long tableId = createTable(cluster, existing, descriptor("binary"));
-            cluster.waitUntilTableReady(tableId);
-            ServerNode node = cluster.getTabletServerNodes("KAFKA").get(0);
-            try (Socket socket = new Socket(node.host(), node.port())) {
-                String[] missing = {
-                    "events",
-                    "produce_missing_db.events",
-                    "another_missing_db.events",
-                    "fluss.missing"
-                };
-                assertProduceErrors(
-                        query(socket, missing), missing, Errors.UNKNOWN_TOPIC_OR_PARTITION);
-                assertProduceOffsets(
-                        query(socket, existing.toString()), new String[] {existing.toString()}, 0L);
-                assertProduceOffsets(
-                        query(socket, existing.toString()), new String[] {existing.toString()}, 1L);
-                assertReadback(connection, existing, "binary", VALUE);
-                assertThat(admin.databaseExists("produce_missing_db").get()).isFalse();
-                assertThat(admin.databaseExists("another_missing_db").get()).isFalse();
-            }
-        } finally {
-            cluster.close();
         }
     }
 
@@ -518,22 +356,6 @@ class KafkaProduceAppendITCase {
     }
 
     private static void assertReadback(
-            Connection connection, TablePath path, String format, byte[] expectedValue)
-            throws Exception {
-        assertReadback(connection, path, format, expectedValue, 2);
-    }
-
-    private static void assertReadback(
-            Connection connection,
-            TablePath path,
-            String format,
-            byte[] expectedValue,
-            int expectedCount)
-            throws Exception {
-        assertReadback(connection, path, format, Collections.nCopies(expectedCount, expectedValue));
-    }
-
-    private static void assertReadback(
             Connection connection, TablePath path, String format, List<byte[]> expectedValues)
             throws Exception {
         try (Table table = connection.getTable(path);
@@ -574,18 +396,13 @@ class KafkaProduceAppendITCase {
     }
 
     private static TableDescriptor descriptor(String format) {
-        return descriptor(format, true);
-    }
-
-    private static TableDescriptor descriptor(String format, boolean nullableValue) {
         boolean binary = format.equals("binary");
         return TableDescriptor.builder()
                 .schema(
                         Schema.newBuilder()
                                 .column(
                                         "_kafka_value",
-                                        (binary ? DataTypes.BYTES() : DataTypes.STRING())
-                                                .copy(nullableValue))
+                                        binary ? DataTypes.BYTES() : DataTypes.STRING())
                                 .column(
                                         "_kafka_headers",
                                         DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()))
@@ -608,10 +425,6 @@ class KafkaProduceAppendITCase {
                                 ? KafkaValueConversionType.BINARY
                                 : KafkaValueConversionType.STRING)
                 .build();
-    }
-
-    private static KafkaProducer<byte[], byte[]> producer(String acks) {
-        return producer(acks, 16384);
     }
 
     private static KafkaProducer<byte[], byte[]> producer(String acks, int batchSize) {

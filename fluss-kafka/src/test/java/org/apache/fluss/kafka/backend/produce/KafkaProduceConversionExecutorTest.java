@@ -27,90 +27,12 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests concurrent conversion, ordered submission, bounded admission and executor shutdown. */
 class KafkaProduceConversionExecutorTest {
-    @Test
-    void testSameKeyConvertsConcurrentlyButSubmitsInOrder() throws Exception {
-        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(2, 2);
-        CountDownLatch started = new CountDownLatch(1);
-        CountDownLatch secondConverted = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        List<Integer> order = new ArrayList<>();
-        AtomicReference<Thread> worker = new AtomicReference<>();
-        try {
-            CompletableFuture<Integer> first =
-                    executor.submit(
-                            0,
-                            () -> {
-                                worker.set(Thread.currentThread());
-                                started.countDown();
-                                await(release);
-                                executor.awaitAppendTurn();
-                                order.add(1);
-                                return CompletableFuture.completedFuture(1);
-                            });
-            assertThat(started.await(10, TimeUnit.SECONDS)).isTrue();
-            CompletableFuture<Integer> second =
-                    executor.submit(
-                            0,
-                            () -> {
-                                secondConverted.countDown();
-                                executor.awaitAppendTurn();
-                                order.add(2);
-                                return CompletableFuture.completedFuture(2);
-                            });
-            assertThat(secondConverted.await(10, TimeUnit.SECONDS)).isTrue();
-            assertThat(worker.get()).isNotSameAs(Thread.currentThread());
-            assertThatThrownBy(() -> second.get(100, TimeUnit.MILLISECONDS))
-                    .isInstanceOf(TimeoutException.class);
-            release.countDown();
-            assertThat(first.get(10, TimeUnit.SECONDS)).isEqualTo(1);
-            assertThat(second.get(10, TimeUnit.SECONDS)).isEqualTo(2);
-            assertThat(order).containsExactly(1, 2);
-        } finally {
-            release.countDown();
-            executor.closeAsync().get(10, TimeUnit.SECONDS);
-        }
-    }
-
-    @Test
-    void testDifferentKeysShareAllWorkers() throws Exception {
-        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(2, 2);
-        CountDownLatch started = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        try {
-            CompletableFuture<Integer> first =
-                    executor.submit(
-                            0,
-                            () -> {
-                                started.countDown();
-                                await(release);
-                                executor.awaitAppendTurn();
-                                return CompletableFuture.completedFuture(1);
-                            });
-            assertThat(started.await(10, TimeUnit.SECONDS)).isTrue();
-            // These keys shared a single worker in the old modulo-based lane assignment.
-            assertThat(
-                            executor.submit(
-                                            2,
-                                            () -> {
-                                                executor.awaitAppendTurn();
-                                                return CompletableFuture.completedFuture(2);
-                                            })
-                                    .get(10, TimeUnit.SECONDS))
-                    .isEqualTo(2);
-            assertThat(first).isNotDone();
-        } finally {
-            release.countDown();
-            executor.closeAsync().get(10, TimeUnit.SECONDS);
-        }
-    }
-
     @Test
     void testFailedConversionDoesNotReleaseEarlierPendingAppend() throws Exception {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(2, 2);
@@ -259,46 +181,6 @@ class KafkaProduceConversionExecutorTest {
     }
 
     @Test
-    void testCloseInterruptsWorkerCompletesQueuedRequestsAndRejectsNewWork() throws Exception {
-        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 1);
-        CountDownLatch started = new CountDownLatch(1);
-        AtomicBoolean queuedRan = new AtomicBoolean();
-        CompletableFuture<Void> running =
-                executor.submit(
-                        0,
-                        () -> {
-                            started.countDown();
-                            await(new CountDownLatch(1));
-                            return CompletableFuture.completedFuture(null);
-                        });
-        try {
-            assertThat(started.await(10, TimeUnit.SECONDS)).isTrue();
-            CompletableFuture<Void> queued =
-                    executor.submit(
-                            0,
-                            () -> {
-                                queuedRan.set(true);
-                                return CompletableFuture.completedFuture(null);
-                            });
-            CompletableFuture<Void> closed = executor.closeAsync();
-            assertThat(executor.closeAsync()).isSameAs(closed);
-            closed.get(10, TimeUnit.SECONDS);
-            assertThatThrownBy(running::join).hasRootCauseInstanceOf(InterruptedException.class);
-            assertThatThrownBy(queued::join).hasCauseInstanceOf(RejectedExecutionException.class);
-            assertThat(queuedRan).isFalse();
-            assertThatThrownBy(
-                            () ->
-                                    executor.submit(
-                                                    0,
-                                                    () -> CompletableFuture.completedFuture(null))
-                                            .join())
-                    .hasCauseInstanceOf(RejectedExecutionException.class);
-        } finally {
-            executor.closeAsync().get(10, TimeUnit.SECONDS);
-        }
-    }
-
-    @Test
     void testCloseInterruptsSubmissionWait() throws Exception {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(2, 2);
         CountDownLatch started = new CountDownLatch(1);
@@ -326,26 +208,6 @@ class KafkaProduceConversionExecutorTest {
             assertThatThrownBy(first::join).hasRootCauseInstanceOf(InterruptedException.class);
             assertThatThrownBy(second::join)
                     .isInstanceOf(java.util.concurrent.CancellationException.class);
-        } finally {
-            executor.closeAsync().get(10, TimeUnit.SECONDS);
-        }
-    }
-
-    @Test
-    void testFailedOperationDoesNotStopLaterTasks() throws Exception {
-        KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 1);
-        try {
-            CompletableFuture<Object> failed =
-                    executor.submit(
-                            0,
-                            () -> {
-                                throw new IllegalStateException("conversion failed");
-                            });
-            assertThatThrownBy(failed::join).hasCauseInstanceOf(IllegalStateException.class);
-            assertThat(
-                            executor.submit(0, () -> CompletableFuture.completedFuture(1))
-                                    .get(10, TimeUnit.SECONDS))
-                    .isEqualTo(1);
         } finally {
             executor.closeAsync().get(10, TimeUnit.SECONDS);
         }

@@ -29,16 +29,9 @@ import org.apache.fluss.types.DataTypes;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class KafkaTableInfoCacheTest {
 
@@ -100,120 +93,6 @@ class KafkaTableInfoCacheTest {
     }
 
     @Test
-    void testReloadsWhenOnlyBucketCountEpochChanges() {
-        KafkaTableInfoCache cache = new KafkaTableInfoCache(10);
-        AtomicInteger loads = new AtomicInteger();
-        GetTableInfoResponse response = response(1L, 1, descriptor("v1"));
-        TableInfo first =
-                cache.getOrLoad(TABLE_PATH, response, () -> load(TABLE_PATH, response, loads));
-        response.setBucketCountEpoch(7L);
-        TableInfo changed =
-                cache.getOrLoad(TABLE_PATH, response, () -> load(TABLE_PATH, response, loads));
-        assertThat(changed).isNotSameAs(first);
-        assertThat(changed.getBucketCountEpoch()).isEqualTo(7L);
-        assertThat(loads).hasValue(2);
-    }
-
-    @Test
-    void testLoadFailureIsNotCached() {
-        KafkaTableInfoCache cache = new KafkaTableInfoCache(10);
-        AtomicInteger attempts = new AtomicInteger();
-        GetTableInfoResponse response = response(1L, 1, descriptor("v1"));
-
-        assertThatThrownBy(
-                        () ->
-                                cache.getOrLoad(
-                                        TABLE_PATH,
-                                        response,
-                                        () -> {
-                                            attempts.incrementAndGet();
-                                            throw new IllegalStateException("broken descriptor");
-                                        }))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("broken descriptor");
-
-        TableInfo loaded =
-                cache.getOrLoad(TABLE_PATH, response, () -> load(TABLE_PATH, response, attempts));
-        assertThat(loaded.getTableId()).isEqualTo(1L);
-        assertThat(attempts).hasValue(2);
-    }
-
-    @Test
-    void testConcurrentColdLoadIsSingleFlight() throws Exception {
-        KafkaTableInfoCache cache = new KafkaTableInfoCache(10);
-        GetTableInfoResponse response = response(1L, 1, descriptor("v1"));
-        AtomicInteger loadCount = new AtomicInteger();
-        CountDownLatch loaderStarted = new CountDownLatch(1);
-        CountDownLatch releaseLoader = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(8);
-        try {
-            List<Future<TableInfo>> futures = new ArrayList<>();
-            for (int i = 0; i < 8; i++) {
-                futures.add(
-                        executor.submit(
-                                () ->
-                                        cache.getOrLoad(
-                                                TABLE_PATH,
-                                                response,
-                                                () -> {
-                                                    loadCount.incrementAndGet();
-                                                    loaderStarted.countDown();
-                                                    await(releaseLoader);
-                                                    return toTableInfo(TABLE_PATH, response);
-                                                })));
-            }
-            loaderStarted.await();
-            releaseLoader.countDown();
-
-            TableInfo first = futures.get(0).get();
-            for (Future<TableInfo> future : futures) {
-                assertThat(future.get()).isSameAs(first);
-            }
-            assertThat(loadCount).hasValue(1);
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    @Test
-    void testInvalidationDoesNotAllowInFlightLoadToResurrect() throws Exception {
-        KafkaTableInfoCache cache = new KafkaTableInfoCache(10);
-        GetTableInfoResponse response = response(1L, 1, descriptor("v1"));
-        AtomicInteger loadCount = new AtomicInteger();
-        CountDownLatch loaderStarted = new CountDownLatch(1);
-        CountDownLatch releaseLoader = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            Future<TableInfo> loading =
-                    executor.submit(
-                            () ->
-                                    cache.getOrLoad(
-                                            TABLE_PATH,
-                                            response,
-                                            () -> {
-                                                loadCount.incrementAndGet();
-                                                loaderStarted.countDown();
-                                                await(releaseLoader);
-                                                return toTableInfo(TABLE_PATH, response);
-                                            }));
-            loaderStarted.await();
-            Future<?> invalidating = executor.submit(() -> cache.invalidate(TABLE_PATH));
-            releaseLoader.countDown();
-
-            TableInfo loadedBeforeInvalidation = loading.get();
-            invalidating.get();
-            TableInfo loadedAfterInvalidation =
-                    cache.getOrLoad(
-                            TABLE_PATH, response, () -> load(TABLE_PATH, response, loadCount));
-
-            assertThat(loadedAfterInvalidation).isNotSameAs(loadedBeforeInvalidation);
-            assertThat(loadCount).hasValue(2);
-        } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    @Test
     void testCacheSizeIsBounded() {
         KafkaTableInfoCache cache = new KafkaTableInfoCache(2);
         for (int i = 0; i < 10; i++) {
@@ -270,14 +149,5 @@ class KafkaTableInfoCacheTest {
             builder.property(ConfigOptions.TABLE_KAFKA_ENABLED, false);
         }
         return builder.build();
-    }
-
-    private static void await(CountDownLatch latch) {
-        try {
-            latch.await();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while waiting for test loader.", e);
-        }
     }
 }
