@@ -32,9 +32,8 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 /**
  * Protocol-independent write command used by the Kafka Produce backend.
  *
- * <p>Record key/value buffers and header value arrays borrow their backing storage. The caller must
- * keep these bytes alive and unchanged until {@link KafkaProduceBackend#write(KafkaProduceCommand)}
- * returns or throws. Consumers must not modify the borrowed bytes or retain them beyond that call.
+ * <p>Record key/value buffers borrow their backing storage. They must be consumed during {@link
+ * KafkaProduceBackend#write(KafkaProduceCommand)}, before that method returns.
  */
 @Internal
 public final class KafkaProduceCommand {
@@ -132,7 +131,7 @@ public final class KafkaProduceCommand {
             return partitionId;
         }
 
-        /** Returns records with borrowed payloads in append order. */
+        /** Returns records with borrowed key/value buffers in append order. */
         public List<Record> records() {
             return records;
         }
@@ -152,13 +151,11 @@ public final class KafkaProduceCommand {
     }
 
     /**
-     * A Kafka record with borrowed key/value bytes and header value arrays.
+     * A Kafka record with borrowed key/value bytes and a snapshot of the header list.
      *
      * <p>Key/value accessors return read-only views with independent positions and limits. These
-     * views share the input storage and do not retain it. Header values share their input arrays;
-     * only the header list is copied and made unmodifiable. The caller must keep all payload bytes
-     * alive and unchanged until {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns or
-     * throws.
+     * views share the input storage and do not retain it. The caller must keep that storage alive
+     * and unchanged until {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns.
      */
     @Internal
     public static final class Record {
@@ -172,7 +169,7 @@ public final class KafkaProduceCommand {
         private final List<RecordHeader> headers;
 
         /**
-         * Creates a record with borrowed payloads without batch timestamp provenance.
+         * Creates a record with borrowed key/value bytes without batch timestamp provenance.
          *
          * <p>The type is {@link TimestampType#UNKNOWN} even when a timestamp is present. Callers
          * that know the batch type should use the explicit constructor instead of inferring it from
@@ -187,10 +184,9 @@ public final class KafkaProduceCommand {
         }
 
         /**
-         * Borrows the remaining key/value bytes and header value arrays with the timestamp type
-         * supplied by the source batch. The input buffers' positions and limits are unchanged, and
-         * subsequent cursor changes do not affect the borrowed ranges. Only the header list is
-         * copied; no payload bytes are copied.
+         * Borrows the remaining key/value bytes with the timestamp type supplied by the source
+         * batch. The input buffers' positions and limits are unchanged, and subsequent cursor
+         * changes do not affect the borrowed ranges. No payload bytes are copied.
          */
         public Record(
                 long timestamp,
@@ -230,21 +226,21 @@ public final class KafkaProduceCommand {
             return readOnlyView(value);
         }
 
-        /** Returns an unmodifiable header list in record order, with borrowed value arrays. */
+        /** Returns an unmodifiable snapshot of the header list in record order. */
         public List<RecordHeader> headers() {
             return headers;
         }
     }
 
-    /** A Kafka record header with a borrowed value array for synchronous consumption. */
+    /** A Kafka record header backed by a shared value array. */
     @Internal
     public static final class RecordHeader {
         private final String name;
         private final @Nullable byte[] value;
 
         /**
-         * Borrows the nullable header value without copying. The caller must keep the array
-         * unchanged until {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns or throws.
+         * Creates a Kafka record header without copying its value array. The caller must not modify
+         * the array while the header is in use.
          */
         public RecordHeader(String name, @Nullable byte[] value) {
             this.name = checkNotNull(name);
@@ -257,8 +253,7 @@ public final class KafkaProduceCommand {
         }
 
         /**
-         * Returns the borrowed header value array, or null. Consumers must not modify it or retain
-         * it after {@link KafkaProduceBackend#write(KafkaProduceCommand)} returns or throws.
+         * Returns the shared header value array, or null. The returned array must not be modified.
          */
         public @Nullable byte[] value() {
             return value;
