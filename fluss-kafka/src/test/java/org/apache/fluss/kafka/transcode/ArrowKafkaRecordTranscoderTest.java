@@ -47,6 +47,7 @@ import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.CloseableIterator;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -72,9 +73,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
-/** Verifies fixed-column Arrow records after transcoding resources have closed. */
+/** Verifies fixed-column Arrow records and the lifetime of borrowed input and owned output. */
 class ArrowKafkaRecordTranscoderTest {
     private final ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+
+    @AfterEach
+    void closeTranscoder() throws Exception {
+        transcoder.close();
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -94,7 +100,8 @@ class ArrowKafkaRecordTranscoderTest {
                                 new RecordHeader("duplicate", bytes("last")),
                                 new RecordHeader("nullable", null)));
         for (int mask = 0; mask < 16; mask++) {
-            TableInfo table = envelope(string, mask);
+            // Each distinct schema has its own schema ID, as required by native Fluss writes.
+            TableInfo table = table(42L, mask, envelope(string, mask).toTableDescriptor());
             TableDescriptor before = table.toTableDescriptor();
             KafkaTableSchema contract = KafkaTableSchema.resolve(before);
             read(
@@ -210,7 +217,7 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {3, 4})
+    @ValueSource(ints = {4, 5})
     void testSchemaChangeRebuildsFieldMapping(int schemaId) throws Exception {
         TableInfo original = envelope(false, 15);
         KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
@@ -866,22 +873,24 @@ class ArrowKafkaRecordTranscoderTest {
                         null,
                         value,
                         key);
-        BytesView encoded =
-                new FlussArrowRecordEncoder()
-                        .encodeStreaming(
-                                consumer -> {
-                                    for (int i = 0; i < 3; i++) {
-                                        key[0] = (byte) i;
-                                        value[0] = (byte) (i + 10);
-                                        headerValue[0] = (byte) (i + 20);
-                                        consumer.append(row);
-                                    }
-                                    Arrays.fill(key, (byte) -1);
-                                    Arrays.fill(value, (byte) -1);
-                                    Arrays.fill(headerValue, (byte) -1);
-                                    row.setField(2, null);
-                                },
-                                table);
+        BytesView encoded;
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
+            encoded =
+                    encoder.encodeStreaming(
+                            consumer -> {
+                                for (int i = 0; i < 3; i++) {
+                                    key[0] = (byte) i;
+                                    value[0] = (byte) (i + 10);
+                                    headerValue[0] = (byte) (i + 20);
+                                    consumer.append(row);
+                                }
+                                Arrays.fill(key, (byte) -1);
+                                Arrays.fill(value, (byte) -1);
+                                Arrays.fill(headerValue, (byte) -1);
+                                row.setField(2, null);
+                            },
+                            table);
+        }
         AtomicInteger next = new AtomicInteger();
         read(
                 encoded,
@@ -997,36 +1006,77 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @Test
-    void testArrowWriterFailureClosesAllocatorWithoutLeaking() {
-        Throwable failure =
-                catchThrowable(
-                        () ->
-                                new FlussArrowRecordEncoder()
-                                        .encode(
-                                                Collections.singletonList(GenericRow.of(123)),
-                                                valueTable(false)));
-        assertThat(failure).isInstanceOf(ClassCastException.class);
-        assertThat(failure.getSuppressed()).isEmpty();
+    void testArrowWriterFailureRecyclesWriter() throws Exception {
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
+            TableInfo table = valueTable(false);
+            Throwable failure =
+                    catchThrowable(
+                            () ->
+                                    encoder.encode(
+                                            Collections.singletonList(GenericRow.of(123)), table));
+            assertThat(failure).isInstanceOf(ClassCastException.class);
+            assertThat(failure.getSuppressed()).isEmpty();
+            assertEncoderRemainsUsable(encoder, table);
+        }
     }
 
     @Test
-    void testStreamingSourceFailureClosesAllocator() {
+    void testStreamingSourceFailureRecyclesWriter() throws Exception {
         IOException expected = new IOException("source failed after the first row");
-        Throwable failure =
-                catchThrowable(
-                        () ->
-                                new FlussArrowRecordEncoder()
-                                        .encodeStreaming(
-                                                consumer -> {
-                                                    consumer.append(
-                                                            GenericRow.of(
-                                                                    BinaryString.fromString(
-                                                                            "valid")));
-                                                    throw expected;
-                                                },
-                                                valueTable(false)));
-        assertThat(failure).isSameAs(expected);
-        assertThat(failure.getSuppressed()).isEmpty();
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
+            TableInfo table = valueTable(false);
+            Throwable failure =
+                    catchThrowable(
+                            () ->
+                                    encoder.encodeStreaming(
+                                            consumer -> {
+                                                consumer.append(
+                                                        GenericRow.of(
+                                                                BinaryString.fromString("valid")));
+                                                throw expected;
+                                            },
+                                            table));
+            assertThat(failure).isSameAs(expected);
+            assertThat(failure.getSuppressed()).isEmpty();
+            assertEncoderRemainsUsable(encoder, table);
+        }
+    }
+
+    @Test
+    void testCloseReleasesOwnedEncoderAndOutputRemainsValid() throws Exception {
+        TableInfo table = valueTable(false);
+        FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder();
+        BytesView output;
+        List<Record> records =
+                Collections.singletonList(
+                        record(1L, null, bytes("value"), Collections.emptyList()));
+        KafkaRecordTranscoder owned = new ArrowKafkaRecordTranscoder(encoder);
+        try (KafkaRecordTranscoder resource = owned) {
+            output = resource.transcode(0, records, table);
+            assertThat(encoder.writerPool().freeWriters()).isNotEmpty();
+        }
+        owned.close();
+        assertThat(encoder.writerPool().freeWriters()).isEmpty();
+        assertThatThrownBy(encoder.allocator()::assertOpen)
+                .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> owned.transcode(0, records, table))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+        read(output, table, 1, row -> assertThat(row.getString(0).toString()).isEqualTo("value"));
+    }
+
+    private static void assertEncoderRemainsUsable(FlussArrowRecordEncoder encoder, TableInfo table)
+            throws Exception {
+        assertThat(encoder.allocator().getAllocatedMemory()).isZero();
+        assertThat(encoder.writerPool().freeWriters()).hasSize(1);
+        assertThat(encoder.writerPool().freeWriters().values().iterator().next()).hasSize(1);
+        read(
+                encoder.encode(
+                        Collections.singletonList(GenericRow.of(BinaryString.fromString("next"))),
+                        table),
+                table,
+                1,
+                row -> assertThat(row.getString(0).toString()).isEqualTo("next"));
     }
 
     private static TableInfo valueTable(boolean notNull) {

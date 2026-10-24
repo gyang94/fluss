@@ -25,9 +25,12 @@ import org.apache.fluss.record.bytesview.BytesView;
 
 import java.util.List;
 
-/** Converts borrowed Kafka records into the native Fluss log representation. */
+/**
+ * Converts borrowed Kafka records into the native Fluss log representation. The owner must close
+ * the transcoder when it is no longer needed.
+ */
 @Internal
-public interface KafkaRecordTranscoder {
+public interface KafkaRecordTranscoder extends AutoCloseable {
     /**
      * Validates an authoritative table snapshot and prepares a plan that partitions can share.
      *
@@ -61,4 +64,8 @@ public interface KafkaRecordTranscoder {
      */
     BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
             throws Exception;
+
+    /** Releases resources owned by the transcoder; stateless implementations need no cleanup. */
+    @Override
+    default void close() throws Exception {}
 }

@@ -27,7 +27,7 @@ import javax.annotation.concurrent.ThreadSafe;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
- * Immutable binary/string conversion plan; mutable Arrow resources are owned by each conversion.
+ * Immutable binary/string conversion plan, independent of the encoder's reusable Arrow resources.
  *
  * <p>The table metadata must be treated as an immutable snapshot. This plan retains no record
  * payloads or request buffers and may be shared across partitions and concurrent requests using

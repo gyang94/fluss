@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.memory.UnmanagedPagedOutputView;
 import org.apache.fluss.metadata.TableInfo;
@@ -30,41 +31,62 @@ import org.apache.fluss.row.arrow.ArrowWriterPool;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
+import org.apache.fluss.utils.IOUtils;
 
+import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.List;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
+import static org.apache.fluss.utils.Preconditions.checkState;
 
 /**
  * Encodes borrowed rows synchronously into independently owned Arrow log batches.
  *
- * <p>Each batch creates and closes its own allocator and writer pool. The allocator limit covers
- * Arrow vectors and compression buffers. Input data, Java objects and independently owned heap
- * output pages are outside this limit. Concurrent batches have independent allocators.
+ * <p>The encoder owns one allocator and an {@link ArrowWriterPool}, as in the Put KV path. Each
+ * batch borrows a writer and recycles it on completion. Concurrent batches use distinct writers and
+ * share the allocator limit for Arrow vectors and compression buffers. Input data, Java objects and
+ * independently owned heap output pages are outside this limit. Recycling releases vector buffers
+ * while retaining the writer's schema and field writers.
+ *
+ * <p>The owner must close the encoder when it is no longer needed. Closing waits for in-flight
+ * batches before releasing the pool and allocator.
  */
 @Internal
 @ThreadSafe
-public final class FlussArrowRecordEncoder {
+public final class FlussArrowRecordEncoder implements AutoCloseable {
 
     private static final int PAGE_SIZE = 4096;
     private static final long DEFAULT_ARROW_MEMORY_LIMIT = Integer.MAX_VALUE;
 
     private final long arrowMemoryLimit;
+    private final BufferAllocator allocator;
+    private final ArrowWriterPool writerPool;
+    private final ReentrantReadWriteLock lifecycleLock = new ReentrantReadWriteLock();
+
+    @GuardedBy("lifecycleLock")
+    private boolean closed;
 
     /** Creates an encoder with an {@link Integer#MAX_VALUE} byte limit on Arrow allocations. */
     public FlussArrowRecordEncoder() {
         this(DEFAULT_ARROW_MEMORY_LIMIT);
     }
 
-    /** Creates an encoder with a limit on each batch's Arrow allocations, in bytes. */
+    /** Creates an encoder with a shared limit on all its Arrow allocations, in bytes. */
     public FlussArrowRecordEncoder(long arrowMemoryLimit) {
         checkArgument(arrowMemoryLimit > 0, "Arrow memory limit must be positive.");
         this.arrowMemoryLimit = arrowMemoryLimit;
+        this.allocator = BufferAllocatorUtil.createBufferAllocator(null);
+        this.allocator.setLimit(arrowMemoryLimit);
+        this.writerPool = new ArrowWriterPool(allocator);
     }
 
-    /** Encodes all rows using the table's current schema ID and Arrow compression settings. */
+    /**
+     * Encodes all rows using the table's current schema ID and Arrow compression settings. A table
+     * ID and schema ID must identify an immutable schema, as in native Fluss writes.
+     */
     public BytesView encode(List<GenericRow> rows, TableInfo tableInfo) throws Exception {
         return encodeStreaming(
                 consumer -> {
@@ -75,12 +97,25 @@ public final class FlussArrowRecordEncoder {
                 tableInfo);
     }
 
+    @Override
+    public void close() throws Exception {
+        lifecycleLock.writeLock().lock();
+        try {
+            if (!closed) {
+                closed = true;
+                IOUtils.closeAll(writerPool, allocator);
+            }
+        } finally {
+            lifecycleLock.writeLock().unlock();
+        }
+    }
+
     BytesView encodeStreaming(RowSource rowSource, TableInfo tableInfo) throws Exception {
-        try (BufferAllocator allocator = BufferAllocatorUtil.createBufferAllocator(null);
-                ArrowWriterPool provider = new ArrowWriterPool(allocator)) {
-            allocator.setLimit(arrowMemoryLimit);
+        lifecycleLock.readLock().lock();
+        try {
+            checkState(!closed, "Arrow record encoder is closed.");
             ArrowWriter writer =
-                    provider.getOrCreateWriter(
+                    writerPool.getOrCreateWriter(
                             tableInfo.getTableId(),
                             tableInfo.getSchemaId(),
                             // Keep the whole conversion in one batch, as in the Put KV WAL path.
@@ -97,7 +132,7 @@ public final class FlussArrowRecordEncoder {
                                 true,
                                 null);
                 rowSource.produce(row -> builder.append(ChangeType.APPEND_ONLY, row));
-                // The result owns heap pages and remains valid after these resources close.
+                // Heap output pages remain valid after the writer is recycled or encoder closed.
                 return builder.build();
             } finally {
                 writer.recycle(epoch);
@@ -108,7 +143,19 @@ public final class FlussArrowRecordEncoder {
                             + arrowMemoryLimit
                             + " bytes).",
                     e);
+        } finally {
+            lifecycleLock.readLock().unlock();
         }
+    }
+
+    @VisibleForTesting
+    BufferAllocator allocator() {
+        return allocator;
+    }
+
+    @VisibleForTesting
+    ArrowWriterPool writerPool() {
+        return writerPool;
     }
 
     @FunctionalInterface

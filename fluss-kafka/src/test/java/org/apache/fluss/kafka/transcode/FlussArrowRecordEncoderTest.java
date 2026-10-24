@@ -33,6 +33,9 @@ import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.record.TestingSchemaGetter;
 import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.row.arrow.ArrowWriter;
+import org.apache.fluss.row.arrow.ArrowWriterPool;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.types.DataTypes;
@@ -46,6 +49,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -65,11 +74,12 @@ class FlussArrowRecordEncoderTest {
         new Random(42).nextBytes(value);
         TableInfo table = table(1, compression);
         byte[] lastValue = {7};
-        BytesView output =
-                new FlussArrowRecordEncoder()
-                        .encode(
-                                Arrays.asList(GenericRow.of(value), GenericRow.of(lastValue)),
-                                table);
+        BytesView output;
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
+            output =
+                    encoder.encode(
+                            Arrays.asList(GenericRow.of(value), GenericRow.of(lastValue)), table);
+        }
         assertThat(output.getBytesLength()).isGreaterThan(16 * MIB);
         assertValue(output, table, value, lastValue);
     }
@@ -78,16 +88,34 @@ class FlussArrowRecordEncoderTest {
     @EnumSource(
             value = ArrowCompressionType.class,
             names = {"NONE", "ZSTD", "LZ4_FRAME"})
-    void testOutputOutlivesBatchResourcesAndInput(ArrowCompressionType compression)
+    void testReusesAllocatorAndWriterAndOutputOutlivesEncoder(ArrowCompressionType compression)
             throws Exception {
-        FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder();
         TableInfo table = table(1, compression);
         byte[] value = {1};
-        // Allocator and writer pool are already closed when each encode call returns.
-        BytesView first = encode(encoder, table, value);
-        value[0] = 2;
-        BytesView second = encode(encoder, table, value);
-        value[0] = 3;
+        BytesView first;
+        BytesView second;
+        BufferAllocator allocator;
+        ArrowWriterPool pool;
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
+            allocator = encoder.allocator();
+            pool = encoder.writerPool();
+            assertThat(allocator.getLimit()).isEqualTo(Integer.MAX_VALUE);
+            first = encode(encoder, table, value);
+            ArrowWriter writer = idleWriter(encoder);
+            long epoch = writer.getEpoch();
+            assertThat(allocator.getAllocatedMemory()).isZero();
+            value[0] = 2;
+            second = encode(encoder, table, value);
+            value[0] = 3;
+            assertThat(encoder.allocator()).isSameAs(allocator);
+            assertThat(encoder.writerPool()).isSameAs(pool);
+            assertThat(idleWriter(encoder)).isSameAs(writer);
+            // build() and the finally block must recycle this batch only once.
+            assertThat(writer.getEpoch()).isEqualTo(epoch + 1);
+            assertThat(allocator.getAllocatedMemory()).isZero();
+        }
+        assertThat(pool.freeWriters()).isEmpty();
+        assertThatThrownBy(allocator::assertOpen).isInstanceOf(IllegalStateException.class);
         assertValue(first, table, new byte[] {1});
         assertValue(second, table, new byte[] {2});
     }
@@ -96,22 +124,27 @@ class FlussArrowRecordEncoderTest {
     @EnumSource(
             value = ArrowCompressionType.class,
             names = {"NONE", "ZSTD", "LZ4_FRAME"})
-    void testOversizedRecordClosesAllocatorAndNextBatchSucceeds(ArrowCompressionType compression)
+    void testOversizedRecordRecyclesWriterAndNextBatchSucceeds(ArrowCompressionType compression)
             throws Exception {
-        FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder(128 * 1024);
-        TableInfo table = table(1, compression);
-        Throwable failure = catchThrowable(() -> encode(encoder, table, new byte[MIB]));
-        assertAllocationFailure(failure);
-        assertValue(encode(encoder, table, new byte[] {7}), table, new byte[] {7});
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder(128 * 1024)) {
+            TableInfo table = table(1, compression);
+            Throwable failure = catchThrowable(() -> encode(encoder, table, new byte[MIB]));
+            assertAllocationFailure(failure);
+            ArrowWriter writer = idleWriter(encoder);
+            assertThat(encoder.allocator().getAllocatedMemory()).isZero();
+            assertValue(encode(encoder, table, new byte[] {7}), table, new byte[] {7});
+            assertThat(idleWriter(encoder)).isSameAs(writer);
+        }
     }
 
     @Test
     void testOutputPagesDoNotConsumeArrowAllocationLimit() throws Exception {
-        FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder(128 * 1024);
-        TableInfo table = table(1, ArrowCompressionType.NONE);
-        byte[] value = new byte[64 * 1024];
-        assertValue(encode(encoder, table, value), table, value);
-        assertValue(encode(encoder, table, new byte[] {7}), table, new byte[] {7});
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder(128 * 1024)) {
+            TableInfo table = table(1, ArrowCompressionType.NONE);
+            byte[] value = new byte[64 * 1024];
+            assertValue(encode(encoder, table, value), table, value);
+            assertValue(encode(encoder, table, new byte[] {7}), table, new byte[] {7});
+        }
     }
 
     @ParameterizedTest
@@ -121,12 +154,128 @@ class FlussArrowRecordEncoderTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void testInFlightBatchesShareAllocatorLimit() throws Exception {
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder(256 * 1024)) {
+            TableInfo table = table(1, ArrowCompressionType.NONE);
+            byte[] value = new byte[128 * 1024];
+            // This row fits by itself, but two active writers must share the same limit.
+            assertValue(encode(encoder, table, value), table, value);
+            BytesView output =
+                    encoder.encodeStreaming(
+                            consumer -> {
+                                consumer.append(GenericRow.of(value));
+                                long inUse = encoder.allocator().getAllocatedMemory();
+                                assertAllocationFailure(
+                                        catchThrowable(() -> encode(encoder, table, value)));
+                                assertThat(encoder.allocator().getAllocatedMemory())
+                                        .isEqualTo(inUse);
+                            },
+                            table);
+            assertValue(output, table, value);
+            assertThat(encoder.allocator().getAllocatedMemory()).isZero();
+            assertValue(encode(encoder, table, value), table, value);
+        }
+    }
+
+    @Test
+    void testWritersAreSeparatedByTableSchemaAndCompression() throws Exception {
+        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
+            TableInfo original = table(1, ArrowCompressionType.NONE);
+            encode(encoder, original, new byte[] {1});
+            ArrowWriter originalWriter = idleWriter(encoder);
+            for (TableInfo changed :
+                    Arrays.asList(
+                            table(2, ArrowCompressionType.NONE),
+                            table(1, 2, ArrowCompressionType.NONE),
+                            table(1, ArrowCompressionType.LZ4_FRAME))) {
+                assertValue(encode(encoder, changed, new byte[] {2}), changed, new byte[] {2});
+            }
+            assertThat(encoder.writerPool().freeWriters()).hasSize(4);
+            assertThat(encoder.writerPool().freeWriters().values())
+                    .allSatisfy(writers -> assertThat(writers).hasSize(1));
+            long epoch = originalWriter.getEpoch();
+            assertValue(encode(encoder, original, new byte[] {3}), original, new byte[] {3});
+            assertThat(originalWriter.getEpoch()).isEqualTo(epoch + 1);
+            assertThat(encoder.allocator().getAllocatedMemory()).isZero();
+        }
+    }
+
+    @Test
+    void testConcurrentBatchesUseSeparateWritersAndCloseWaitsForThem() throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        CountDownLatch entered = new CountDownLatch(2);
+        CountDownLatch finish = new CountDownLatch(1);
+        FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder();
+        TableInfo table = table(1, ArrowCompressionType.NONE);
+        try {
+            Future<BytesView> first =
+                    executor.submit(() -> encodeBlocked(encoder, table, (byte) 1, entered, finish));
+            Future<BytesView> second =
+                    executor.submit(() -> encodeBlocked(encoder, table, (byte) 2, entered, finish));
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(encoder.allocator().getAllocatedMemory()).isPositive();
+            CountDownLatch closing = new CountDownLatch(1);
+            Future<?> close =
+                    executor.submit(
+                            () -> {
+                                closing.countDown();
+                                encoder.close();
+                                return null;
+                            });
+            assertThat(closing.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThatThrownBy(() -> close.get(100, TimeUnit.MILLISECONDS))
+                    .isInstanceOf(TimeoutException.class);
+            finish.countDown();
+            BytesView firstOutput = first.get(10, TimeUnit.SECONDS);
+            BytesView secondOutput = second.get(10, TimeUnit.SECONDS);
+            close.get(10, TimeUnit.SECONDS);
+            encoder.close();
+            assertThat(encoder.allocator().getAllocatedMemory()).isZero();
+            assertThat(encoder.writerPool().freeWriters()).isEmpty();
+            assertThatThrownBy(encoder.allocator()::assertOpen)
+                    .isInstanceOf(IllegalStateException.class);
+            assertThatThrownBy(() -> encode(encoder, table, new byte[] {3}))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("closed");
+            assertValue(firstOutput, table, new byte[] {1}, new byte[] {1});
+            assertValue(secondOutput, table, new byte[] {2}, new byte[] {2});
+        } finally {
+            finish.countDown();
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            encoder.close();
+        }
+    }
+
+    private static BytesView encodeBlocked(
+            FlussArrowRecordEncoder encoder,
+            TableInfo table,
+            byte value,
+            CountDownLatch entered,
+            CountDownLatch finish)
+            throws Exception {
+        return encoder.encodeStreaming(
+                consumer -> {
+                    consumer.append(GenericRow.of(new byte[] {value}));
+                    entered.countDown();
+                    assertThat(finish.await(10, TimeUnit.SECONDS)).isTrue();
+                    consumer.append(GenericRow.of(new byte[] {value}));
+                },
+                table);
+    }
+
+    private static ArrowWriter idleWriter(FlussArrowRecordEncoder encoder) {
+        assertThat(encoder.writerPool().freeWriters()).hasSize(1);
+        return encoder.writerPool().freeWriters().values().iterator().next().getFirst();
+    }
+
     private static void assertAllocationFailure(Throwable failure) {
         assertThat(failure)
                 .isInstanceOf(FlussRuntimeException.class)
                 .hasMessageContaining("memory limit exceeded")
                 .hasCauseInstanceOf(OutOfMemoryException.class);
-        // try-with-resources must close cleanly even if creation or writing fails partway through.
+        // The original write failure must not be masked by recycling failures.
         assertThat(failure.getSuppressed()).isEmpty();
         assertThat(failure.getCause().getSuppressed()).isEmpty();
     }
@@ -137,10 +286,14 @@ class FlussArrowRecordEncoderTest {
     }
 
     private static TableInfo table(long id, ArrowCompressionType compression) {
+        return table(id, 1, compression);
+    }
+
+    private static TableInfo table(long id, int schemaId, ArrowCompressionType compression) {
         return TableInfo.of(
                 TablePath.of("kafka", "topic"),
                 id,
-                1,
+                schemaId,
                 TableDescriptor.builder()
                         .schema(
                                 Schema.newBuilder()

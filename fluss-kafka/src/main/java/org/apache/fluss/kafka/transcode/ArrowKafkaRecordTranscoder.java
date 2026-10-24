@@ -49,7 +49,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
         this(new FlussArrowRecordEncoder());
     }
 
-    /** Creates a transcoder using an encoder with a custom Arrow allocation limit. */
+    /** Creates a transcoder that owns and closes the supplied encoder. */
     public ArrowKafkaRecordTranscoder(FlussArrowRecordEncoder arrowRecordEncoder) {
         this.arrowRecordEncoder = checkNotNull(arrowRecordEncoder);
     }
@@ -89,6 +89,11 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                     }
                 },
                 plan.tableInfo());
+    }
+
+    @Override
+    public void close() throws Exception {
+        arrowRecordEncoder.close();
     }
 
     private static @Nullable Object decode(
