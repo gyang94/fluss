@@ -121,7 +121,7 @@ public class NettyServerTest {
 
     @Test
     void testProtocolsCloseOnlyAfterListenersStop() {
-        CompletableFuture<Void> listenerShutdown = new CompletableFuture<>();
+        CompletableFuture<Void> workerShutdown = new CompletableFuture<>();
         AtomicInteger closeCalls = new AtomicInteger();
         NetworkProtocolPlugin protocol =
                 testingProtocol(
@@ -132,18 +132,18 @@ public class NettyServerTest {
 
         CompletableFuture<Void> result =
                 NettyServer.closeProtocolsAfter(
-                        listenerShutdown, Collections.singletonList(protocol));
+                        workerShutdown, Collections.singletonList(protocol));
         assertThat(closeCalls).hasValue(0);
         assertThat(result).isNotDone();
 
-        listenerShutdown.complete(null);
+        workerShutdown.complete(null);
         result.join();
         assertThat(closeCalls).hasValue(1);
     }
 
     @Test
-    void testAllProtocolsCloseAfterExceptionalListenerShutdown() {
-        CompletableFuture<Void> listenerShutdown = new CompletableFuture<>();
+    void testAllProtocolsCloseAfterExceptionalWorkerShutdown() {
+        CompletableFuture<Void> workerShutdown = new CompletableFuture<>();
         AtomicInteger closeCalls = new AtomicInteger();
         RuntimeException asyncFailure = new RuntimeException("async protocol close failure");
         RuntimeException synchronousFailure =
@@ -164,12 +164,12 @@ public class NettyServerTest {
                         });
         CompletableFuture<Void> result =
                 NettyServer.closeProtocolsAfter(
-                        listenerShutdown, Arrays.asList(asyncFailing, synchronouslyFailing));
+                        workerShutdown, Arrays.asList(asyncFailing, synchronouslyFailing));
 
-        listenerShutdown.completeExceptionally(new RuntimeException("listener failure"));
+        workerShutdown.completeExceptionally(new RuntimeException("worker failure"));
 
         assertThatThrownBy(result::join)
-                .hasStackTraceContaining("listener failure")
+                .hasStackTraceContaining("worker failure")
                 .hasStackTraceContaining("async protocol close failure")
                 .hasStackTraceContaining("synchronous protocol close failure");
         assertThat(closeCalls).hasValue(2);

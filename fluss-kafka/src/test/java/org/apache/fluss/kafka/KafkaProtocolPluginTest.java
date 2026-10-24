@@ -18,8 +18,6 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.cluster.Endpoint;
-import org.apache.fluss.cluster.ServerNode;
-import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
@@ -35,14 +33,11 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metrics.groups.MetricGroup;
 import org.apache.fluss.metrics.util.NOPMetricsGroup;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
-import org.apache.fluss.rpc.messages.ApiVersionsRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
-import org.apache.fluss.rpc.metrics.TestingClientMetricGroup;
-import org.apache.fluss.rpc.netty.client.NettyClient;
 import org.apache.fluss.rpc.netty.server.NettyServer;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.rpc.netty.server.RequestsMetrics;
@@ -73,15 +68,12 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -145,74 +137,16 @@ class KafkaProtocolPluginTest {
         assertThat(transcoders).hasSize(2);
     }
 
-    @Test
-    void testClosesTranscoderAfterConversionWorkerStops() throws Exception {
-        CountDownLatch converting = new CountDownLatch(1);
-        CountDownLatch interrupted = new CountDownLatch(1);
-        CountDownLatch releaseConversion = new CountDownLatch(1);
-        TrackingTranscoder transcoder =
-                new TrackingTranscoder() {
-                    @Override
-                    public EncodedRecords transcode(
-                            int partitionId, List<Record> records, TableInfo table)
-                            throws Exception {
-                        converting.countDown();
-                        boolean done = false;
-                        while (!done) {
-                            try {
-                                assertThat(releaseConversion.await(10, TimeUnit.SECONDS)).isTrue();
-                                done = true;
-                            } catch (InterruptedException e) {
-                                interrupted.countDown();
-                            }
-                        }
-                        assertThat(closeCalls).isZero();
-                        return arrow.transcode(partitionId, records, table);
-                    }
-                };
-        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin(() -> transcoder);
-        plugin.setup(new Configuration());
-        KafkaRequestHandler handler =
-                (KafkaRequestHandler) plugin.createRequestHandler(new ProduceMetadataService());
-        KafkaRequest request = produceRequest();
-        try {
-            handler.processRequest(request);
-            assertThat(converting.await(10, TimeUnit.SECONDS)).isTrue();
-            CompletableFuture<Void> closed = plugin.closeAsync();
-            assertThat(interrupted.await(10, TimeUnit.SECONDS)).isTrue();
-            assertThat(closed).isNotDone();
-            assertThat(transcoder.closeCalls).isZero();
-            releaseConversion.countDown();
-            closed.get(10, TimeUnit.SECONDS);
-            request.future().get(10, TimeUnit.SECONDS);
-            assertThat(transcoder.closeCalls).isEqualTo(1);
-        } finally {
-            releaseConversion.countDown();
-            plugin.closeAsync().get(10, TimeUnit.SECONDS);
-            request.releaseBuffer();
-        }
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testCloseWaitsForNativeAppend(boolean failAppend) throws Exception {
-        TrackingTranscoder transcoder =
-                new TrackingTranscoder() {
-                    @Override
-                    public EncodedRecords transcode(
-                            int partitionId, List<Record> records, TableInfo table)
-                            throws Exception {
-                        return arrow.transcode(partitionId, records, table);
-                    }
-                };
+    void testCloseDoesNotWaitForAcknowledgement(boolean failAppend) throws Exception {
+        TrackingTranscoder transcoder = new TrackingTranscoder();
         CompletableFuture<ProduceLogResponse> appended = new CompletableFuture<>();
-        CountDownLatch submitted = new CountDownLatch(1);
         ProduceMetadataService service =
                 new ProduceMetadataService() {
                     @Override
                     public CompletableFuture<ProduceLogResponse> produceLog(
                             ProduceLogRequest request) {
-                        submitted.countDown();
                         return appended;
                     }
                 };
@@ -222,23 +156,17 @@ class KafkaProtocolPluginTest {
         KafkaRequest request = produceRequest();
         try {
             handler.processRequest(request);
-            assertThat(submitted.await(10, TimeUnit.SECONDS)).isTrue();
-            CompletableFuture<Void> closed = plugin.closeAsync();
-            assertThatThrownBy(() -> closed.get(100, TimeUnit.MILLISECONDS))
-                    .isInstanceOf(TimeoutException.class);
-            assertThat(transcoder.closeCalls).isZero();
+            assertThat(request.future()).isNotDone();
+            assertThat(transcoder.memorySegmentPool.usedPages()).isZero();
+            plugin.closeAsync().get(10, TimeUnit.SECONDS);
+            assertThat(transcoder.closeCalls).isEqualTo(1);
+            assertThat(appended).isNotDone();
             if (failAppend) {
                 appended.completeExceptionally(new IOException("append failed"));
             } else {
-                ProduceLogResponse response = new ProduceLogResponse();
-                response.addAllBucketsResps(
-                        Collections.singletonList(
-                                new PbProduceLogRespForBucket().setBucketId(0).setBaseOffset(0L)));
-                appended.complete(response);
+                appended.complete(success());
             }
-            closed.get(10, TimeUnit.SECONDS);
             request.future().get(10, TimeUnit.SECONDS);
-            assertThat(transcoder.closeCalls).isEqualTo(1);
         } finally {
             appended.completeExceptionally(new IOException("test cleanup"));
             plugin.closeAsync().get(10, TimeUnit.SECONDS);
@@ -247,63 +175,10 @@ class KafkaProtocolPluginTest {
     }
 
     @Test
-    void testCloseTimeoutKeepsNativeAppendResourcesUntilCompletion() throws Exception {
-        TrackingTranscoder transcoder =
-                new TrackingTranscoder() {
-                    @Override
-                    public EncodedRecords transcode(
-                            int partitionId, List<Record> records, TableInfo table)
-                            throws Exception {
-                        return arrow.transcode(partitionId, records, table);
-                    }
-                };
-        CompletableFuture<ProduceLogResponse> appended = new CompletableFuture<>();
-        CountDownLatch submitted = new CountDownLatch(1);
-        ProduceMetadataService service =
-                new ProduceMetadataService() {
-                    @Override
-                    public CompletableFuture<ProduceLogResponse> produceLog(
-                            ProduceLogRequest request) {
-                        submitted.countDown();
-                        return appended;
-                    }
-                };
-        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin(() -> transcoder, 0L);
-        plugin.setup(new Configuration());
-        KafkaRequestHandler handler = (KafkaRequestHandler) plugin.createRequestHandler(service);
-        KafkaRequest request = produceRequest();
-        try {
-            handler.processRequest(request);
-            assertThat(submitted.await(10, TimeUnit.SECONDS)).isTrue();
-            CompletableFuture<Void> closed = plugin.closeAsync();
-            Throwable closeFailure =
-                    closed.handle((ignored, failure) -> failure).get(10, TimeUnit.SECONDS);
-            assertThat(closeFailure).isInstanceOf(TimeoutException.class);
-            assertThat(appended).isNotDone();
-            assertThat(transcoder.closeCalls).isZero();
-            assertThat(transcoder.memorySegmentPool.usedPages()).isPositive();
-
-            appended.completeExceptionally(new IOException("native append failed"));
-            transcoder.closed.get(10, TimeUnit.SECONDS);
-            assertThat(transcoder.memorySegmentPool.usedPages()).isZero();
-            assertThat(transcoder.closeCalls).isEqualTo(1);
-            assertThat(plugin.closeAsync()).isSameAs(closed);
-            handler.close();
-            assertThat(transcoder.closeCalls).isEqualTo(1);
-        } finally {
-            appended.completeExceptionally(new IOException("test cleanup"));
-            plugin.closeAsync().handle((ignored, failure) -> null).get(10, TimeUnit.SECONDS);
-            transcoder.closed.get(10, TimeUnit.SECONDS);
-            request.releaseBuffer();
-        }
-    }
-
-    @Test
-    void testNettyStopsProtocolWorkersBeforeClosingTransport() throws Exception {
+    void testNettyWaitsForRequestWorkerBeforeClosingProtocol() throws Exception {
         CountDownLatch metadataStarted = new CountDownLatch(1);
         CountDownLatch releaseMetadata = new CountDownLatch(1);
-        AtomicReference<ScheduledExecutorService> transport = new AtomicReference<>();
-        CompletableFuture<Boolean> interruptedWithTransportActive = new CompletableFuture<>();
+        AtomicBoolean appended = new AtomicBoolean();
         ProduceMetadataService service =
                 new ProduceMetadataService() {
                     @Override
@@ -311,21 +186,19 @@ class KafkaProtocolPluginTest {
                             GetTableInfoRequest request) {
                         metadataStarted.countDown();
                         try {
-                            releaseMetadata.await();
-                            return super.getTableInfo(request);
-                        } catch (InterruptedException interrupted) {
-                            interruptedWithTransportActive.complete(!transport.get().isShutdown());
-                            try {
-                                releaseMetadata.await();
-                            } catch (InterruptedException ignored) {
-                                Thread.currentThread().interrupt();
-                            }
+                            assertThat(releaseMetadata.await(10, TimeUnit.SECONDS)).isTrue();
+                        } catch (InterruptedException failure) {
                             Thread.currentThread().interrupt();
-                            CompletableFuture<GetTableInfoResponse> failed =
-                                    new CompletableFuture<>();
-                            failed.completeExceptionally(interrupted);
-                            return failed;
+                            throw new AssertionError(failure);
                         }
+                        return super.getTableInfo(request);
+                    }
+
+                    @Override
+                    public CompletableFuture<ProduceLogResponse> produceLog(
+                            ProduceLogRequest request) {
+                        appended.set(true);
+                        return CompletableFuture.completedFuture(success());
                     }
                 };
         Configuration conf = new Configuration();
@@ -335,28 +208,14 @@ class KafkaProtocolPluginTest {
         MetricGroup metricGroup = NOPMetricsGroup.newInstance();
         KafkaRequest request = produceRequest();
         try (NettyServer server =
-                        new NettyServer(
-                                conf,
-                                Arrays.asList(
-                                        new Endpoint("localhost", 0, "KAFKA"),
-                                        new Endpoint("localhost", 0, "INTERNAL")),
-                                service,
-                                metricGroup,
-                                RequestsMetrics.createCoordinatorServerRequestMetrics(
-                                        metricGroup));
-                NettyClient nativeClient =
-                        new NettyClient(conf, TestingClientMetricGroup.newInstance())) {
+                new NettyServer(
+                        conf,
+                        Collections.singletonList(new Endpoint("localhost", 0, "KAFKA")),
+                        service,
+                        metricGroup,
+                        RequestsMetrics.createCoordinatorServerRequestMetrics(metricGroup))) {
             server.start();
-            transport.set(server.getScheduledExecutor());
             Endpoint endpoint = server.getBindEndpoints().get(0);
-            Endpoint nativeEndpoint = server.getBindEndpoints().get(1);
-            ServerNode nativeNode =
-                    new ServerNode(
-                            1,
-                            nativeEndpoint.getHost(),
-                            nativeEndpoint.getPort(),
-                            ServerType.TABLET_SERVER);
-            assertNativeRequestSucceeds(nativeClient, nativeNode);
             try (Socket socket = new Socket(endpoint.getHost(), endpoint.getPort())) {
                 ProduceRequest produce = request.request();
                 ByteBuffer serialized = produce.serializeWithHeader(request.header());
@@ -369,10 +228,10 @@ class KafkaProtocolPluginTest {
                 assertThat(metadataStarted.await(10, TimeUnit.SECONDS)).isTrue();
 
                 CompletableFuture<Void> closed = server.closeAsync();
-                assertThat(interruptedWithTransportActive.get(10, TimeUnit.SECONDS)).isTrue();
-                assertNativeRequestSucceeds(nativeClient, nativeNode);
+                assertThat(closed).isNotDone();
                 releaseMetadata.countDown();
                 closed.get(10, TimeUnit.SECONDS);
+                assertThat(appended).isTrue();
             } finally {
                 releaseMetadata.countDown();
             }
@@ -381,19 +240,11 @@ class KafkaProtocolPluginTest {
         }
     }
 
-    private static void assertNativeRequestSucceeds(NettyClient client, ServerNode node)
-            throws Exception {
-        ApiVersionsRequest request =
-                new ApiVersionsRequest()
-                        .setClientSoftwareName("shutdown-test")
-                        .setClientSoftwareVersion("1.0");
-        assertThat(
-                        client.sendRequest(
-                                        node,
-                                        org.apache.fluss.rpc.protocol.ApiKeys.API_VERSIONS,
-                                        request)
-                                .get(10, TimeUnit.SECONDS))
-                .isNotNull();
+    private static ProduceLogResponse success() {
+        return new ProduceLogResponse()
+                .addAllBucketsResps(
+                        Collections.singletonList(
+                                new PbProduceLogRespForBucket().setBucketId(0).setBaseOffset(0L)));
     }
 
     private static KafkaRequest produceRequest() {
@@ -436,13 +287,12 @@ class KafkaProtocolPluginTest {
         protected final ArrowKafkaRecordTranscoder arrow =
                 new ArrowKafkaRecordTranscoder(allocator, memorySegmentPool);
         protected volatile int closeCalls;
-        private final CompletableFuture<Void> closed = new CompletableFuture<>();
         private boolean failClose;
 
         @Override
         public EncodedRecords transcode(int partitionId, List<Record> records, TableInfo table)
                 throws Exception {
-            throw new AssertionError("Unexpected conversion");
+            return arrow.transcode(partitionId, records, table);
         }
 
         @Override
@@ -450,7 +300,6 @@ class KafkaProtocolPluginTest {
             closeCalls++;
             assertThat(memorySegmentPool.usedPages()).isZero();
             IOUtils.closeAll(arrow, allocator, memorySegmentPool);
-            closed.complete(null);
             if (failClose) {
                 throw new IOException("test close failure");
             }

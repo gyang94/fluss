@@ -25,7 +25,7 @@ import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
 import org.apache.fluss.utils.IOUtils;
 
-/** Shared conversion memory, closed after all handlers have drained native appends. */
+/** Shared conversion memory, closed after the RPC request processors have stopped. */
 final class KafkaProduceResources implements AutoCloseable {
     private final LazyMemorySegmentPool memorySegmentPool;
     private final BufferAllocator allocator;

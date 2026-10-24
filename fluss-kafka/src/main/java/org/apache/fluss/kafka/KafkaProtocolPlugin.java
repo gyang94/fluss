@@ -20,7 +20,6 @@ package org.apache.fluss.kafka;
 import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.kafka.backend.produce.KafkaProduceConversionExecutor;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
@@ -33,21 +32,17 @@ import org.apache.fluss.utils.concurrent.FutureUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
-import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkState;
 
 /** The Kafka protocol plugin. */
 public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
 
     private final Supplier<KafkaRecordTranscoder> transcoderFactory;
-    private final long shutdownTimeoutMillis;
     private final List<KafkaRequestHandler> requestHandlers = new ArrayList<>();
     private Configuration conf;
     private KafkaProduceResources resources;
-    private KafkaProduceConversionExecutor conversionExecutor;
     private CompletableFuture<Void> closeFuture;
 
     /** Creates a plugin that owns the conversion resources of its request handlers. */
@@ -57,15 +52,7 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
 
     @VisibleForTesting
     KafkaProtocolPlugin(Supplier<KafkaRecordTranscoder> transcoderFactory) {
-        this(transcoderFactory, 10_000L);
-    }
-
-    @VisibleForTesting
-    KafkaProtocolPlugin(
-            Supplier<KafkaRecordTranscoder> transcoderFactory, long shutdownTimeoutMillis) {
-        checkArgument(shutdownTimeoutMillis >= 0, "Shutdown timeout must be non-negative.");
         this.transcoderFactory = transcoderFactory;
-        this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     }
 
     @Override
@@ -97,30 +84,13 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
     @Override
     public synchronized RequestHandler<?> createRequestHandler(RpcGatewayService service) {
         checkState(closeFuture == null, "Kafka protocol plugin has already been closed.");
-        if (conversionExecutor == null) {
-            // Mirror the RPC worker concurrency, with a separate queue capped at 1024 requests.
-            int queueCapacity =
-                    Math.max(
-                            1,
-                            Math.min(
-                                    1024,
-                                    conf.get(ConfigOptions.NETTY_SERVER_MAX_QUEUED_REQUESTS)));
-            int threads =
-                    Math.max(
-                            1,
-                            Math.min(
-                                    queueCapacity,
-                                    conf.get(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS)));
-            conversionExecutor = new KafkaProduceConversionExecutor(threads, queueCapacity);
-        }
         if (transcoderFactory == null && resources == null) {
             resources = new KafkaProduceResources(conf);
         }
         KafkaRecordTranscoder transcoder =
                 transcoderFactory == null ? resources.createTranscoder() : transcoderFactory.get();
         try {
-            KafkaRequestHandler handler =
-                    new KafkaRequestHandler(conf, service, conversionExecutor, transcoder);
+            KafkaRequestHandler handler = new KafkaRequestHandler(conf, service, transcoder);
             requestHandlers.add(handler);
             return handler;
         } catch (RuntimeException | Error failure) {
@@ -129,37 +99,18 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
         }
     }
 
-    /**
-     * Stops conversion and bounds the shutdown wait without cancelling native append ownership.
-     * Resources held by an unfinished append are released only when its actual completion arrives,
-     * even if this shutdown future has already timed out.
-     */
+    /** Releases conversion resources after the RPC request processors have stopped. */
     @Override
     public synchronized CompletableFuture<Void> closeAsync() {
         if (closeFuture == null) {
-            CompletableFuture<Void> workersClosed =
-                    conversionExecutor == null
-                            ? CompletableFuture.completedFuture(null)
-                            : conversionExecutor.closeAsync();
-            CompletableFuture<Void> handlersClosed =
-                    FutureUtils.composeAfterwards(
-                            workersClosed,
-                            () -> {
-                                List<CompletableFuture<Void>> futures = new ArrayList<>();
-                                for (KafkaRequestHandler handler : requestHandlers) {
-                                    futures.add(handler.closeAsync());
-                                }
-                                return FutureUtils.completeAll(futures);
-                            });
-            CompletableFuture<Void> resourcesClosed =
-                    FutureUtils.runAfterwards(handlersClosed, () -> IOUtils.closeAll(resources));
-            // Timeout only the caller's wait. Native completions still own the cleanup chain.
-            closeFuture =
-                    FutureUtils.orTimeout(
-                            resourcesClosed.thenApply(ignored -> null),
-                            shutdownTimeoutMillis,
-                            TimeUnit.MILLISECONDS,
-                            "Timed out draining Kafka Produce requests during shutdown.");
+            List<AutoCloseable> resourcesToClose = new ArrayList<>(requestHandlers);
+            resourcesToClose.add(resources);
+            try {
+                IOUtils.closeAll(resourcesToClose);
+                closeFuture = CompletableFuture.completedFuture(null);
+            } catch (Exception failure) {
+                closeFuture = FutureUtils.completedExceptionally(failure);
+            }
         }
         return closeFuture;
     }

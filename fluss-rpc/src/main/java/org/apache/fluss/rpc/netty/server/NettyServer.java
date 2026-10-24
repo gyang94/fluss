@@ -313,16 +313,15 @@ public final class NettyServer implements RpcServer {
                                     .collect(Collectors.toList()));
             CompletableFuture<Void> workerShutdownFuture =
                     FutureUtils.composeAfterwards(
-                            closeProtocolsAfter(channelShutdownFuture, protocols),
+                            channelShutdownFuture,
                             () ->
                                     workerPool == null
                                             ? CompletableFuture.completedFuture(null)
                                             : workerPool.closeAsync());
-            // Replication acknowledgements need both request processors and event loops while
-            // protocols drain accepted writes. Stop transport only after protocol shutdown.
+            // Protocol resources may still be used by an active request processor.
             closeFuture =
                     FutureUtils.composeAfterwards(
-                            workerShutdownFuture,
+                            closeProtocolsAfter(workerShutdownFuture, protocols),
                             () ->
                                     CompletableFuture.allOf(
                                             shutdownGroup(acceptorGroup),
