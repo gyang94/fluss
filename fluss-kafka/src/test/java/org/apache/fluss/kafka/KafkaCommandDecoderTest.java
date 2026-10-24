@@ -17,8 +17,7 @@
 
 package org.apache.fluss.kafka;
 
-import org.apache.fluss.config.Configuration;
-import org.apache.fluss.rpc.TestingTabletGatewayService;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
@@ -45,7 +44,7 @@ import java.nio.ByteBuffer;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Tests response ordering and ownership in {@link KafkaCommandDecoder}. */
-public class KafkaCommandDecoderTest {
+public class KafkaCommandDecoderTest extends KafkaServerTestBase {
 
     @Test
     public void testUnsupportedApiVersionsRequestReturnsVersionZeroErrorResponse()
@@ -63,7 +62,8 @@ public class KafkaCommandDecoderTest {
                 serialize(header, new ApiVersionsRequest.Builder().build((short) 0));
         KafkaRequest request = null;
         ByteBuf responseBuffer = null;
-        try {
+        try (KafkaRequestHandler handler =
+                new KafkaRequestHandler(new KafkaTopicMapper(conf), createTabletService())) {
             channel.writeInbound(requestBuffer);
             request = (KafkaRequest) requestChannel.pollRequest(1000);
             assertThat(request).isNotNull();
@@ -73,11 +73,7 @@ public class KafkaCommandDecoderTest {
             assertThat(parsedRequest.hasUnsupportedRequestVersion()).isTrue();
             assertThat(parsedRequest.version()).isZero();
 
-            TestingTabletGatewayService service = new TestingTabletGatewayService();
-            try (KafkaRequestHandler handler =
-                    new KafkaRequestHandler(new Configuration(), service)) {
-                handler.processRequest(request);
-            }
+            handler.processRequest(request);
             channel.runPendingTasks();
 
             responseBuffer = channel.readOutbound();

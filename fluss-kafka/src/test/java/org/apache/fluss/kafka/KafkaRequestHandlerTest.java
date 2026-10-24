@@ -17,15 +17,13 @@
 
 package org.apache.fluss.kafka;
 
-import org.apache.fluss.config.Configuration;
-import org.apache.fluss.rpc.TestingTabletGatewayService;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
-import org.apache.fluss.utils.IOUtils;
 
 import org.apache.kafka.common.message.ApiVersionsRequestData;
 import org.apache.kafka.common.message.ApiVersionsResponseData;
@@ -45,33 +43,38 @@ import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.RequestUtils;
 import org.apache.kafka.common.requests.ResponseHeader;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.tuple;
 
 /** Tests for {@link KafkaRequestHandler}. */
-public class KafkaRequestHandlerTest {
+public class KafkaRequestHandlerTest extends KafkaServerTestBase {
 
-    private final List<KafkaRequestHandler> handlers = new ArrayList<>();
+    private KafkaRequestHandler handler;
+
+    @BeforeEach
+    void createRequestHandler() {
+        handler = new KafkaRequestHandler(new KafkaTopicMapper(conf), createTabletService());
+    }
 
     @AfterEach
-    void closeHandlers() throws Exception {
-        IOUtils.closeAll(handlers);
+    void closeRequestHandler() throws Exception {
+        if (handler != null) {
+            handler.close();
+        }
     }
 
     @Test
     public void testUnsupportedWireVersionFallsBackAndAllowsRenegotiation() {
-        KafkaRequestHandler handler = createKafkaRequestHandler();
         RequestChannel requests = new RequestChannel(100);
         EmbeddedChannel channel =
                 new EmbeddedChannel(
@@ -121,7 +124,6 @@ public class KafkaRequestHandlerTest {
     @ParameterizedTest
     @ValueSource(shorts = {0, 1, 2, 3, 4})
     public void testKafkaApiVersionsRequest(short version) {
-        KafkaRequestHandler handler = createKafkaRequestHandler();
         ApiVersionsResponse response = requestApiVersions(handler, version);
 
         assertSuccessfulResponseDefaults(response);
@@ -176,7 +178,6 @@ public class KafkaRequestHandlerTest {
     })
     public void testInvalidApiVersionsRequest(
             short version, String softwareName, String softwareVersion) {
-        KafkaRequestHandler handler = createKafkaRequestHandler();
         ApiVersionsRequest requestBody =
                 new ApiVersionsRequest.Builder(
                                 new ApiVersionsRequestData()
@@ -202,7 +203,6 @@ public class KafkaRequestHandlerTest {
 
     @Test
     public void testUnregisteredApiIsNotRouted() {
-        KafkaRequestHandler handler = createKafkaRequestHandler();
         short version = ApiKeys.CREATE_TOPICS.latestVersion();
         CreateTopicsRequestData requestData =
                 new CreateTopicsRequestData()
@@ -308,12 +308,5 @@ public class KafkaRequestHandlerTest {
         } finally {
             responseBuffer.release();
         }
-    }
-
-    private KafkaRequestHandler createKafkaRequestHandler() {
-        TestingTabletGatewayService service = new TestingTabletGatewayService();
-        KafkaRequestHandler handler = new KafkaRequestHandler(new Configuration(), service);
-        handlers.add(handler);
-        return handler;
     }
 }

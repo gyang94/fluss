@@ -23,6 +23,9 @@ import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.DatabaseNotExistException;
 import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.exception.TableNotExistException;
+import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
+import org.apache.fluss.kafka.backend.produce.KafkaProduceResult;
+import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -39,7 +42,6 @@ import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
-import org.apache.fluss.utils.IOUtils;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.clients.Metadata;
@@ -59,7 +61,6 @@ import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.utils.LogContext;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -83,13 +84,6 @@ import static org.assertj.core.api.Assertions.entry;
 public class KafkaMetadataHandlerTest {
 
     private static final Uuid TOPIC_ID = new Uuid(0x466c757373000000L, 123L);
-
-    private final List<KafkaRequestHandler> handlers = new ArrayList<>();
-
-    @AfterEach
-    void closeHandlers() throws Exception {
-        IOUtils.closeAll(handlers);
-    }
 
     @Test
     public void testNamedTopicForEverySupportedVersion() {
@@ -746,18 +740,24 @@ public class KafkaMetadataHandlerTest {
         return new MetadataRequest(data, version);
     }
 
-    private MetadataResponse handle(
+    private static MetadataResponse handle(
             TestingMetadataGatewayService service, MetadataRequest requestBody, short version) {
         return handle(service, requestBody, version, new Configuration());
     }
 
-    private MetadataResponse handle(
+    private static MetadataResponse handle(
             TestingMetadataGatewayService service,
             MetadataRequest requestBody,
             short version,
             Configuration config) {
-        KafkaRequestHandler handler = new KafkaRequestHandler(config, service);
-        handlers.add(handler);
+        KafkaTopicMapper mapper = new KafkaTopicMapper(config);
+        KafkaRequestHandler handler =
+                new KafkaRequestHandler(
+                        mapper,
+                        new GatewayKafkaMetadataBackend(service, mapper),
+                        command ->
+                                CompletableFuture.completedFuture(
+                                        new KafkaProduceResult(Collections.emptyList())));
         ByteBuf requestBuffer = ByteBufAllocator.DEFAULT.buffer();
         KafkaRequest request;
         try {

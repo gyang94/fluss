@@ -23,26 +23,25 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
+import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
+import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.EncodedRecords;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
-import org.apache.fluss.metadata.TableDescriptor;
+import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.MemoryLogRecords;
-import org.apache.fluss.record.bytesview.MemorySegmentBytesView;
-import org.apache.fluss.rpc.RpcGatewayService;
-import org.apache.fluss.rpc.gateway.TabletServerGateway;
-import org.apache.fluss.rpc.messages.GetTableInfoRequest;
-import org.apache.fluss.rpc.messages.GetTableInfoResponse;
-import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
-import org.apache.fluss.rpc.messages.ProduceLogRequest;
-import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.rpc.entity.ProduceLogResultForBucket;
 import org.apache.fluss.rpc.netty.server.Session;
 import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.server.entity.UserContext;
+import org.apache.fluss.server.metadata.TabletServerMetadataCache;
+import org.apache.fluss.server.replica.ReplicaManager;
+import org.apache.fluss.server.tablet.TabletService;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -54,247 +53,96 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static org.apache.fluss.kafka.error.KafkaErrorMapper.unwrap;
+import static org.apache.fluss.security.acl.OperationType.WRITE;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Adapts the local TabletServer write gateway to the Kafka Produce backend contract. */
+/** Adapts local replicas to the Kafka Produce backend contract. */
 @Internal
 public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
-    private final RpcGatewayService service;
-    private final TabletServerGateway gateway;
+    private final TabletService service;
+    private final TabletServerMetadataCache metadataCache;
+    private final ReplicaManager replicaManager;
     private final KafkaTopicMapper topicMapper;
-    private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
     private final KafkaRecordTranscoder transcoder;
-    private final KafkaTableInfoCache tableInfoCache = new KafkaTableInfoCache();
 
-    /** Creates a Produce backend that runs on the calling RPC request processor. */
-    public GatewayKafkaProduceBackend(
-            RpcGatewayService service,
-            TabletServerGateway gateway,
-            KafkaTopicMapper topicMapper,
-            KafkaRecordTranscoder transcoder) {
+    /** Creates a Produce backend using the TabletServer's shared conversion memory. */
+    public GatewayKafkaProduceBackend(TabletService service, KafkaTopicMapper topicMapper) {
         this.service = checkNotNull(service);
-        this.gateway = checkNotNull(gateway);
+        this.metadataCache = service.getMetadataCache();
+        this.replicaManager = service.getReplicaManager();
         this.topicMapper = checkNotNull(topicMapper);
-        this.transcoder = checkNotNull(transcoder);
+        this.transcoder =
+                new ArrowKafkaRecordTranscoder(
+                        replicaManager.getArrowBufferAllocator(),
+                        replicaManager.getMemorySegmentPool());
     }
 
     @Override
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
-        // Consume borrowed payloads and submit every append before returning to the RPC worker.
-        // Only the acknowledgements remain asynchronous, as in the native Produce path.
-        Map<TablePath, TableInfo> metadataByTable = new HashMap<>();
+        setCurrentSession(command);
         List<CompletableFuture<TopicResult>> topics = new ArrayList<>();
-        for (TopicWrite topic : command.topics()) {
-            topics.add(writeTopic(command, topic, metadataByTable));
+        try (AppendBatch batch = new AppendBatch(command.timeoutMs(), command.acks())) {
+            for (TopicWrite topic : command.topics()) {
+                List<CompletableFuture<PartitionResult>> partitions = new ArrayList<>();
+                for (PartitionWrite partition : topic.partitions()) {
+                    CompletableFuture<PartitionResult> result = new CompletableFuture<>();
+                    partitions.add(result);
+                    TablePath path;
+                    TableBucket bucket;
+                    TableInfo tableInfo;
+                    try {
+                        path = topicMapper.toTablePath(topic.topicName());
+                        long tableId =
+                                metadataCache
+                                        .getTableId(path)
+                                        .orElseThrow(
+                                                () ->
+                                                        new TableNotExistException(
+                                                                "Unknown table: " + path));
+                        bucket = new TableBucket(tableId, partition.partitionId());
+                        tableInfo = replicaManager.getReplicaOrException(bucket).getTableInfo();
+                        if (!KafkaTableSchema.isEnabled(tableInfo.toTableDescriptor())) {
+                            throw new TableNotExistException(
+                                    "Table " + path + " is not enabled for Kafka.");
+                        }
+                    } catch (Exception failure) {
+                        result.complete(
+                                new PartitionResult(
+                                        partition.partitionId(),
+                                        Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                                        -1L,
+                                        failure.getMessage()));
+                        continue;
+                    }
+                    try {
+                        service.authorizeTable(WRITE, path);
+                        EncodedRecords converted =
+                                transcoder.transcode(
+                                        partition.partitionId(), partition.records(), tableInfo);
+                        batch.convertedRecords.add(converted);
+                        batch.entriesPerBucket.put(bucket, converted.records());
+                        batch.results.put(bucket, result);
+                    } catch (Exception failure) {
+                        result.complete(failedPartition(partition.partitionId(), failure));
+                    }
+                }
+                String topicName = topic.topicName();
+                topics.add(
+                        FutureUtils.combineAll(partitions)
+                                .thenApply(
+                                        results ->
+                                                new TopicResult(
+                                                        topicName, new ArrayList<>(results))));
+            }
+            batch.appendLogs();
         }
         return FutureUtils.combineAll(topics)
                 .thenApply(results -> new KafkaProduceResult(new ArrayList<>(results)));
-    }
-
-    private CompletableFuture<TopicResult> writeTopic(
-            KafkaProduceCommand command,
-            TopicWrite topic,
-            Map<TablePath, TableInfo> metadataByTable) {
-        try {
-            TablePath path = topicMapper.toTablePath(topic.topicName());
-            TableInfo tableInfo = metadataByTable.get(path);
-            if (tableInfo == null) {
-                tableInfo = loadTableInfo(command, path);
-                metadataByTable.put(path, tableInfo);
-            }
-            List<CompletableFuture<PartitionResult>> partitions = new ArrayList<>();
-            for (PartitionWrite partition : topic.partitions()) {
-                partitions.add(producePartition(command, partition, tableInfo));
-            }
-            // Do not retain the topic's borrowed records while waiting for acknowledgements.
-            String topicName = topic.topicName();
-            return FutureUtils.combineAll(partitions)
-                    .thenApply(results -> new TopicResult(topicName, new ArrayList<>(results)));
-        } catch (InterruptedException failure) {
-            Thread.currentThread().interrupt();
-            return CompletableFuture.completedFuture(failedTopic(topic, failure));
-        } catch (Exception failure) {
-            return CompletableFuture.completedFuture(failedTopic(topic, failure));
-        }
-    }
-
-    private TableInfo loadTableInfo(KafkaProduceCommand command, TablePath path) throws Exception {
-        setCurrentSession(command);
-        GetTableInfoRequest request = new GetTableInfoRequest();
-        request.setTablePath()
-                .setDatabaseName(path.getDatabaseName())
-                .setTableName(path.getTableName());
-        GetTableInfoResponse response =
-                gateway.getTableInfo(request)
-                        .get(Math.max(0, command.timeoutMs()), TimeUnit.MILLISECONDS);
-        return toTableInfo(path, response);
-    }
-
-    private CompletableFuture<PartitionResult> producePartition(
-            KafkaProduceCommand command, PartitionWrite partition, TableInfo tableInfo) {
-        int partitionId = partition.partitionId();
-        if (partitionId < 0 || partitionId >= tableInfo.getNumBuckets()) {
-            return CompletableFuture.completedFuture(
-                    new PartitionResult(
-                            partitionId,
-                            Errors.UNKNOWN_TOPIC_OR_PARTITION,
-                            -1L,
-                            "Partition is outside the table bucket range."));
-        }
-        try (EncodedRecords converted =
-                transcoder.transcode(partitionId, partition.records(), tableInfo)) {
-            MemoryLogRecords records = converted.records();
-            ProduceLogRequest request =
-                    new ProduceLogRequest()
-                            .setTableId(tableInfo.getTableId())
-                            .setAcks(command.acks())
-                            .setTimeoutMs(command.timeoutMs());
-            request.addBucketsReq()
-                    .setBucketId(partitionId)
-                    .setRecordsBytesView(
-                            new MemorySegmentBytesView(
-                                    records.getMemorySegment(),
-                                    records.getPosition(),
-                                    records.sizeInBytes()));
-            setCurrentSession(command);
-            CompletableFuture<ProduceLogResponse> appended = gateway.produceLog(request);
-            // The local gateway consumes the records before returning; its future only waits
-            // for acknowledgements. Return pooled memory even while replication is pending.
-            return appended.handle(
-                    (response, failure) ->
-                            failure == null
-                                    ? toPartitionResult(partitionId, response)
-                                    : failedPartition(partitionId, failure));
-        } catch (Exception failure) {
-            return CompletableFuture.completedFuture(failedPartition(partitionId, failure));
-        }
-    }
-
-    private TableInfo toTableInfo(TablePath path, GetTableInfoResponse response) {
-        return tableInfoCache.getOrLoad(
-                path,
-                response,
-                () -> {
-                    TableInfo tableInfo = parseTableInfo(path, response);
-                    TableDescriptor descriptor = tableInfo.toTableDescriptor();
-                    if (!schemaResolver.isEnabled(descriptor)) {
-                        throw new TableNotExistException(
-                                "Table " + path + " is not enabled for Kafka.");
-                    }
-                    schemaResolver.resolve(descriptor);
-                    return tableInfo;
-                });
-    }
-
-    private static TableInfo parseTableInfo(TablePath path, GetTableInfoResponse response) {
-        return TableInfo.of(
-                path,
-                response.getTableId(),
-                response.getSchemaId(),
-                TableDescriptor.fromJsonBytes(response.getTableJson()),
-                response.hasRemoteDataDir() ? response.getRemoteDataDir() : null,
-                response.getCreatedTime(),
-                response.getModifiedTime(),
-                response.hasBucketCountEpoch() ? response.getBucketCountEpoch() : 0L);
-    }
-
-    private static PartitionResult toPartitionResult(int partitionId, ProduceLogResponse response) {
-        for (PbProduceLogRespForBucket bucket : response.getBucketsRespsList()) {
-            if (bucket.getBucketId() != partitionId) {
-                continue;
-            }
-            if (bucket.hasErrorCode() && bucket.getErrorCode() != 0) {
-                return new PartitionResult(
-                        partitionId,
-                        toKafkaError(
-                                org.apache.fluss.rpc.protocol.Errors.forCode(
-                                        bucket.getErrorCode())),
-                        -1L,
-                        bucket.hasErrorMessage() ? bucket.getErrorMessage() : null);
-            }
-            return new PartitionResult(
-                    partitionId,
-                    Errors.NONE,
-                    bucket.hasBaseOffset() ? bucket.getBaseOffset() : -1L,
-                    null);
-        }
-        return new PartitionResult(
-                partitionId,
-                Errors.UNKNOWN_SERVER_ERROR,
-                -1L,
-                "Fluss Produce response omitted this bucket.");
-    }
-
-    private static TopicResult failedTopic(TopicWrite topic, Throwable failure) {
-        List<PartitionResult> partitions = new ArrayList<>();
-        for (PartitionWrite partition : topic.partitions()) {
-            partitions.add(failedPartition(partition.partitionId(), failure));
-        }
-        return new TopicResult(topic.topicName(), partitions);
-    }
-
-    private static PartitionResult failedPartition(int partitionId, Throwable failure) {
-        Throwable cause = unwrap(failure);
-        Errors kafkaError =
-                cause instanceof RejectedExecutionException
-                                || cause instanceof TimeoutException
-                                || cause instanceof InterruptedException
-                                || cause instanceof CancellationException
-                        ? Errors.REQUEST_TIMED_OUT
-                        : cause instanceof KafkaTopicSchemaException
-                                        || cause instanceof InvalidTopicException
-                                ? Errors.INVALID_TOPIC_EXCEPTION
-                                : cause instanceof KafkaRecordEncodingException
-                                        ? Errors.INVALID_RECORD
-                                        : cause instanceof IllegalArgumentException
-                                                ? Errors.INVALID_REQUEST
-                                                : toKafkaError(
-                                                        org.apache.fluss.rpc.protocol.Errors
-                                                                .forException(cause));
-        return new PartitionResult(partitionId, kafkaError, -1L, cause.getMessage());
-    }
-
-    private static Errors toKafkaError(org.apache.fluss.rpc.protocol.Errors error) {
-        switch (error) {
-            case NONE:
-                return Errors.NONE;
-            case TABLE_NOT_EXIST:
-            case DATABASE_NOT_EXIST:
-            case UNKNOWN_TABLE_OR_BUCKET_EXCEPTION:
-                return Errors.UNKNOWN_TOPIC_OR_PARTITION;
-            case NOT_LEADER_OR_FOLLOWER:
-                return Errors.NOT_LEADER_OR_FOLLOWER;
-            case LEADER_NOT_AVAILABLE_EXCEPTION:
-                return Errors.LEADER_NOT_AVAILABLE;
-            case RECORD_TOO_LARGE_EXCEPTION:
-                return Errors.MESSAGE_TOO_LARGE;
-            case CORRUPT_MESSAGE:
-            case CORRUPT_RECORD_EXCEPTION:
-                return Errors.CORRUPT_MESSAGE;
-            case INVALID_REQUIRED_ACKS:
-                return Errors.INVALID_REQUIRED_ACKS;
-            case REQUEST_TIME_OUT:
-                return Errors.REQUEST_TIMED_OUT;
-            case NOT_ENOUGH_REPLICAS_EXCEPTION:
-                return Errors.NOT_ENOUGH_REPLICAS;
-            case NOT_ENOUGH_REPLICAS_AFTER_APPEND_EXCEPTION:
-                return Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND;
-            case AUTHORIZATION_EXCEPTION:
-                return Errors.TOPIC_AUTHORIZATION_FAILED;
-            case LOG_STORAGE_EXCEPTION:
-            case STORAGE_EXCEPTION:
-            case DISK_WRITE_LOCKED:
-                return Errors.KAFKA_STORAGE_ERROR;
-            default:
-                return Errors.UNKNOWN_SERVER_ERROR;
-        }
     }
 
     private void setCurrentSession(KafkaProduceCommand command) {
@@ -307,12 +155,100 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         FlussPrincipal.ANONYMOUS));
     }
 
-    private static Throwable unwrap(Throwable failure) {
-        Throwable current = failure;
-        while ((current instanceof CompletionException || current instanceof ExecutionException)
-                && current.getCause() != null) {
-            current = current.getCause();
+    /** Closes cached writers; shared memory remains owned by the TabletServer. */
+    @Override
+    public void close() throws Exception {
+        transcoder.close();
+    }
+
+    private final class AppendBatch implements AutoCloseable {
+        private final int timeoutMs;
+        private final short acks;
+        private final Map<TableBucket, MemoryLogRecords> entriesPerBucket = new HashMap<>();
+        private final Map<TableBucket, CompletableFuture<PartitionResult>> results =
+                new HashMap<>();
+        private final List<EncodedRecords> convertedRecords = new ArrayList<>();
+
+        private AppendBatch(int timeoutMs, short acks) {
+            this.timeoutMs = timeoutMs;
+            this.acks = acks;
         }
-        return current;
+
+        private void appendLogs() {
+            if (entriesPerBucket.isEmpty()) {
+                return;
+            }
+            // The callback retains only bucket identities and result futures, never the input
+            // payloads or converted records. Local append consumes all records synchronously.
+            Map<TableBucket, CompletableFuture<PartitionResult>> pending = new HashMap<>(results);
+            try {
+                replicaManager.appendRecordsToLog(
+                        timeoutMs,
+                        acks,
+                        entriesPerBucket,
+                        new UserContext(FlussPrincipal.ANONYMOUS),
+                        responses -> completeResults(pending, responses));
+            } catch (Exception failure) {
+                pending.forEach(
+                        (bucket, result) ->
+                                result.complete(failedPartition(bucket.getBucket(), failure)));
+            } finally {
+                close();
+            }
+        }
+
+        @Override
+        public void close() {
+            convertedRecords.forEach(EncodedRecords::close);
+            convertedRecords.clear();
+            entriesPerBucket.clear();
+        }
+    }
+
+    private static void completeResults(
+            Map<TableBucket, CompletableFuture<PartitionResult>> pending,
+            List<ProduceLogResultForBucket> responses) {
+        for (ProduceLogResultForBucket response : responses) {
+            CompletableFuture<PartitionResult> result = pending.remove(response.getTableBucket());
+            if (result != null) {
+                result.complete(
+                        new PartitionResult(
+                                response.getTableBucket().getBucket(),
+                                KafkaErrorMapper.toKafkaError(response.getError().error()),
+                                response.failed() ? -1L : response.getBaseOffset(),
+                                response.getError().message()));
+            }
+        }
+        pending.forEach(
+                (bucket, result) ->
+                        result.complete(
+                                new PartitionResult(
+                                        bucket.getBucket(),
+                                        Errors.UNKNOWN_SERVER_ERROR,
+                                        -1L,
+                                        "Fluss Produce response omitted this bucket.")));
+    }
+
+    private static PartitionResult failedPartition(int partitionId, Throwable failure) {
+        Throwable cause = unwrap(failure);
+        Errors kafkaError;
+        if (cause instanceof RejectedExecutionException
+                || cause instanceof TimeoutException
+                || cause instanceof InterruptedException
+                || cause instanceof CancellationException) {
+            kafkaError = Errors.REQUEST_TIMED_OUT;
+        } else if (cause instanceof KafkaTopicSchemaException
+                || cause instanceof InvalidTopicException) {
+            kafkaError = Errors.INVALID_TOPIC_EXCEPTION;
+        } else if (cause instanceof KafkaRecordEncodingException) {
+            kafkaError = Errors.INVALID_RECORD;
+        } else if (cause instanceof IllegalArgumentException) {
+            kafkaError = Errors.INVALID_REQUEST;
+        } else {
+            kafkaError =
+                    KafkaErrorMapper.toKafkaError(
+                            org.apache.fluss.rpc.protocol.Errors.forException(cause));
+        }
+        return new PartitionResult(partitionId, kafkaError, -1L, cause.getMessage());
     }
 }
