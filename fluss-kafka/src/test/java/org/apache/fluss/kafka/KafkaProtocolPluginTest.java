@@ -17,6 +17,9 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.cluster.Endpoint;
+import org.apache.fluss.cluster.ServerNode;
+import org.apache.fluss.cluster.ServerType;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
@@ -29,13 +32,20 @@ import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metrics.groups.MetricGroup;
+import org.apache.fluss.metrics.util.NOPMetricsGroup;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
+import org.apache.fluss.rpc.messages.ApiVersionsRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.rpc.metrics.TestingClientMetricGroup;
+import org.apache.fluss.rpc.netty.client.NettyClient;
+import org.apache.fluss.rpc.netty.server.NettyServer;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
+import org.apache.fluss.rpc.netty.server.RequestsMetrics;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
@@ -57,15 +67,21 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.DataOutputStream;
 import java.io.IOException;
+import java.net.Socket;
+import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -230,6 +246,156 @@ class KafkaProtocolPluginTest {
         }
     }
 
+    @Test
+    void testCloseTimeoutKeepsNativeAppendResourcesUntilCompletion() throws Exception {
+        TrackingTranscoder transcoder =
+                new TrackingTranscoder() {
+                    @Override
+                    public EncodedRecords transcode(
+                            int partitionId, List<Record> records, TableInfo table)
+                            throws Exception {
+                        return arrow.transcode(partitionId, records, table);
+                    }
+                };
+        CompletableFuture<ProduceLogResponse> appended = new CompletableFuture<>();
+        CountDownLatch submitted = new CountDownLatch(1);
+        ProduceMetadataService service =
+                new ProduceMetadataService() {
+                    @Override
+                    public CompletableFuture<ProduceLogResponse> produceLog(
+                            ProduceLogRequest request) {
+                        submitted.countDown();
+                        return appended;
+                    }
+                };
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin(() -> transcoder, 0L);
+        plugin.setup(new Configuration());
+        KafkaRequestHandler handler = (KafkaRequestHandler) plugin.createRequestHandler(service);
+        KafkaRequest request = produceRequest();
+        try {
+            handler.processRequest(request);
+            assertThat(submitted.await(10, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture<Void> closed = plugin.closeAsync();
+            Throwable closeFailure =
+                    closed.handle((ignored, failure) -> failure).get(10, TimeUnit.SECONDS);
+            assertThat(closeFailure).isInstanceOf(TimeoutException.class);
+            assertThat(appended).isNotDone();
+            assertThat(transcoder.closeCalls).isZero();
+            assertThat(transcoder.memorySegmentPool.usedPages()).isPositive();
+
+            appended.completeExceptionally(new IOException("native append failed"));
+            transcoder.closed.get(10, TimeUnit.SECONDS);
+            assertThat(transcoder.memorySegmentPool.usedPages()).isZero();
+            assertThat(transcoder.closeCalls).isEqualTo(1);
+            assertThat(plugin.closeAsync()).isSameAs(closed);
+            handler.close();
+            assertThat(transcoder.closeCalls).isEqualTo(1);
+        } finally {
+            appended.completeExceptionally(new IOException("test cleanup"));
+            plugin.closeAsync().handle((ignored, failure) -> null).get(10, TimeUnit.SECONDS);
+            transcoder.closed.get(10, TimeUnit.SECONDS);
+            request.releaseBuffer();
+        }
+    }
+
+    @Test
+    void testNettyStopsProtocolWorkersBeforeClosingTransport() throws Exception {
+        CountDownLatch metadataStarted = new CountDownLatch(1);
+        CountDownLatch releaseMetadata = new CountDownLatch(1);
+        AtomicReference<ScheduledExecutorService> transport = new AtomicReference<>();
+        CompletableFuture<Boolean> interruptedWithTransportActive = new CompletableFuture<>();
+        ProduceMetadataService service =
+                new ProduceMetadataService() {
+                    @Override
+                    public CompletableFuture<GetTableInfoResponse> getTableInfo(
+                            GetTableInfoRequest request) {
+                        metadataStarted.countDown();
+                        try {
+                            releaseMetadata.await();
+                            return super.getTableInfo(request);
+                        } catch (InterruptedException interrupted) {
+                            interruptedWithTransportActive.complete(!transport.get().isShutdown());
+                            try {
+                                releaseMetadata.await();
+                            } catch (InterruptedException ignored) {
+                                Thread.currentThread().interrupt();
+                            }
+                            Thread.currentThread().interrupt();
+                            CompletableFuture<GetTableInfoResponse> failed =
+                                    new CompletableFuture<>();
+                            failed.completeExceptionally(interrupted);
+                            return failed;
+                        }
+                    }
+                };
+        Configuration conf = new Configuration();
+        conf.set(ConfigOptions.KAFKA_ENABLED, true);
+        conf.set(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS, 1);
+        conf.set(ConfigOptions.NETTY_SERVER_NUM_NETWORK_THREADS, 1);
+        MetricGroup metricGroup = NOPMetricsGroup.newInstance();
+        KafkaRequest request = produceRequest();
+        try (NettyServer server =
+                        new NettyServer(
+                                conf,
+                                Arrays.asList(
+                                        new Endpoint("localhost", 0, "KAFKA"),
+                                        new Endpoint("localhost", 0, "INTERNAL")),
+                                service,
+                                metricGroup,
+                                RequestsMetrics.createCoordinatorServerRequestMetrics(
+                                        metricGroup));
+                NettyClient nativeClient =
+                        new NettyClient(conf, TestingClientMetricGroup.newInstance())) {
+            server.start();
+            transport.set(server.getScheduledExecutor());
+            Endpoint endpoint = server.getBindEndpoints().get(0);
+            Endpoint nativeEndpoint = server.getBindEndpoints().get(1);
+            ServerNode nativeNode =
+                    new ServerNode(
+                            1,
+                            nativeEndpoint.getHost(),
+                            nativeEndpoint.getPort(),
+                            ServerType.TABLET_SERVER);
+            assertNativeRequestSucceeds(nativeClient, nativeNode);
+            try (Socket socket = new Socket(endpoint.getHost(), endpoint.getPort())) {
+                ProduceRequest produce = request.request();
+                ByteBuffer serialized = produce.serializeWithHeader(request.header());
+                byte[] bytes = new byte[serialized.remaining()];
+                serialized.get(bytes);
+                DataOutputStream output = new DataOutputStream(socket.getOutputStream());
+                output.writeInt(bytes.length);
+                output.write(bytes);
+                output.flush();
+                assertThat(metadataStarted.await(10, TimeUnit.SECONDS)).isTrue();
+
+                CompletableFuture<Void> closed = server.closeAsync();
+                assertThat(interruptedWithTransportActive.get(10, TimeUnit.SECONDS)).isTrue();
+                assertNativeRequestSucceeds(nativeClient, nativeNode);
+                releaseMetadata.countDown();
+                closed.get(10, TimeUnit.SECONDS);
+            } finally {
+                releaseMetadata.countDown();
+            }
+        } finally {
+            request.releaseBuffer();
+        }
+    }
+
+    private static void assertNativeRequestSucceeds(NettyClient client, ServerNode node)
+            throws Exception {
+        ApiVersionsRequest request =
+                new ApiVersionsRequest()
+                        .setClientSoftwareName("shutdown-test")
+                        .setClientSoftwareVersion("1.0");
+        assertThat(
+                        client.sendRequest(
+                                        node,
+                                        org.apache.fluss.rpc.protocol.ApiKeys.API_VERSIONS,
+                                        request)
+                                .get(10, TimeUnit.SECONDS))
+                .isNotNull();
+    }
+
     private static KafkaRequest produceRequest() {
         ProduceRequestData data = new ProduceRequestData().setAcks((short) 1).setTimeoutMs(10000);
         data.topicData()
@@ -270,6 +436,7 @@ class KafkaProtocolPluginTest {
         protected final ArrowKafkaRecordTranscoder arrow =
                 new ArrowKafkaRecordTranscoder(allocator, memorySegmentPool);
         protected volatile int closeCalls;
+        private final CompletableFuture<Void> closed = new CompletableFuture<>();
         private boolean failClose;
 
         @Override
@@ -283,6 +450,7 @@ class KafkaProtocolPluginTest {
             closeCalls++;
             assertThat(memorySegmentPool.usedPages()).isZero();
             IOUtils.closeAll(arrow, allocator, memorySegmentPool);
+            closed.complete(null);
             if (failClose) {
                 throw new IOException("test close failure");
             }

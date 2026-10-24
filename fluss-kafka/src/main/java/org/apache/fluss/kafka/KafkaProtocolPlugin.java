@@ -33,14 +33,17 @@ import org.apache.fluss.utils.concurrent.FutureUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
+import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkState;
 
 /** The Kafka protocol plugin. */
 public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
 
     private final Supplier<KafkaRecordTranscoder> transcoderFactory;
+    private final long shutdownTimeoutMillis;
     private final List<KafkaRequestHandler> requestHandlers = new ArrayList<>();
     private Configuration conf;
     private KafkaProduceResources resources;
@@ -54,7 +57,15 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
 
     @VisibleForTesting
     KafkaProtocolPlugin(Supplier<KafkaRecordTranscoder> transcoderFactory) {
+        this(transcoderFactory, 10_000L);
+    }
+
+    @VisibleForTesting
+    KafkaProtocolPlugin(
+            Supplier<KafkaRecordTranscoder> transcoderFactory, long shutdownTimeoutMillis) {
+        checkArgument(shutdownTimeoutMillis >= 0, "Shutdown timeout must be non-negative.");
         this.transcoderFactory = transcoderFactory;
+        this.shutdownTimeoutMillis = shutdownTimeoutMillis;
     }
 
     @Override
@@ -118,6 +129,11 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
         }
     }
 
+    /**
+     * Stops conversion and bounds the shutdown wait without cancelling native append ownership.
+     * Resources held by an unfinished append are released only when its actual completion arrives,
+     * even if this shutdown future has already timed out.
+     */
     @Override
     public synchronized CompletableFuture<Void> closeAsync() {
         if (closeFuture == null) {
@@ -125,12 +141,25 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
                     conversionExecutor == null
                             ? CompletableFuture.completedFuture(null)
                             : conversionExecutor.closeAsync();
-            // Handlers drain native acknowledgements before releasing writers and shared memory.
-            List<AutoCloseable> resourcesToClose = new ArrayList<>(requestHandlers);
-            resourcesToClose.add(resources);
+            CompletableFuture<Void> handlersClosed =
+                    FutureUtils.composeAfterwards(
+                            workersClosed,
+                            () -> {
+                                List<CompletableFuture<Void>> futures = new ArrayList<>();
+                                for (KafkaRequestHandler handler : requestHandlers) {
+                                    futures.add(handler.closeAsync());
+                                }
+                                return FutureUtils.completeAll(futures);
+                            });
+            CompletableFuture<Void> resourcesClosed =
+                    FutureUtils.runAfterwards(handlersClosed, () -> IOUtils.closeAll(resources));
+            // Timeout only the caller's wait. Native completions still own the cleanup chain.
             closeFuture =
-                    FutureUtils.runAfterwardsAsync(
-                            workersClosed, () -> IOUtils.closeAll(resourcesToClose));
+                    FutureUtils.orTimeout(
+                            resourcesClosed.thenApply(ignored -> null),
+                            shutdownTimeoutMillis,
+                            TimeUnit.MILLISECONDS,
+                            "Timed out draining Kafka Produce requests during shutdown.");
         }
         return closeFuture;
     }

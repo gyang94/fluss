@@ -22,13 +22,13 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+
 import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.Arrays;
-import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -43,7 +43,7 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
  *
  * <p>An entry is reused only when all response identity fields and the complete descriptor bytes
  * match. Comparing the complete descriptor is intentional: a {@code kafka.*} property change may
- * alter decoding semantics without changing the schema ID. Cache slots serialize parsing for one
+ * alter decoding semantics without changing the schema ID. Atomic updates serialize parsing for one
  * table, while independent topics remain concurrent.
  */
 @Internal
@@ -52,9 +52,7 @@ final class KafkaTableInfoCache {
 
     static final long DEFAULT_MAXIMUM_SIZE = 1_000L;
 
-    private final long maximumSize;
-    private final ConcurrentMap<TablePath, CacheSlot> slots;
-    private final Object slotCreationLock = new Object();
+    private final Cache<TablePath, CacheEntry> entries;
 
     KafkaTableInfoCache() {
         this(DEFAULT_MAXIMUM_SIZE);
@@ -62,8 +60,7 @@ final class KafkaTableInfoCache {
 
     KafkaTableInfoCache(long maximumSize) {
         checkArgument(maximumSize > 0, "Kafka TableInfo cache size must be greater than zero.");
-        this.maximumSize = maximumSize;
-        this.slots = new ConcurrentHashMap<>();
+        this.entries = Caffeine.newBuilder().maximumSize(maximumSize).build();
     }
 
     TableInfo getOrLoad(
@@ -74,69 +71,24 @@ final class KafkaTableInfoCache {
         checkNotNull(response);
         checkNotNull(tableInfoLoader);
 
-        while (true) {
-            CacheSlot slot = getOrCreateSlot(tablePath);
-            synchronized (slot) {
-                if (slots.get(tablePath) != slot) {
-                    continue;
-                }
-                if (slot.entry != null && slot.entry.matches(response)) {
-                    return slot.entry.tableInfo;
-                }
-                TableInfo tableInfo = checkNotNull(tableInfoLoader.get());
-                slot.entry = new CacheEntry(response, tableInfo);
-                return tableInfo;
-            }
-        }
+        return entries.asMap()
+                .compute(
+                        tablePath,
+                        (path, entry) ->
+                                entry != null && entry.matches(response)
+                                        ? entry
+                                        : new CacheEntry(
+                                                response, checkNotNull(tableInfoLoader.get())))
+                .tableInfo;
     }
 
     void invalidate(TablePath tablePath) {
-        CacheSlot slot = slots.get(checkNotNull(tablePath));
-        if (slot == null) {
-            return;
-        }
-        synchronized (slot) {
-            slot.entry = null;
-            slots.remove(tablePath, slot);
-        }
+        entries.invalidate(checkNotNull(tablePath));
     }
 
     long estimatedSize() {
-        return slots.size();
-    }
-
-    private CacheSlot getOrCreateSlot(TablePath tablePath) {
-        CacheSlot slot = slots.get(tablePath);
-        if (slot != null) {
-            return slot;
-        }
-        synchronized (slotCreationLock) {
-            slot = slots.get(tablePath);
-            if (slot != null) {
-                return slot;
-            }
-            if (slots.size() >= maximumSize) {
-                evictOneSlot();
-            }
-            slot = new CacheSlot();
-            slots.put(tablePath, slot);
-            return slot;
-        }
-    }
-
-    private void evictOneSlot() {
-        for (Map.Entry<TablePath, CacheSlot> entry : slots.entrySet()) {
-            CacheSlot slot = entry.getValue();
-            synchronized (slot) {
-                if (slots.remove(entry.getKey(), slot)) {
-                    return;
-                }
-            }
-        }
-    }
-
-    private static final class CacheSlot {
-        private CacheEntry entry;
+        entries.cleanUp();
+        return entries.estimatedSize();
     }
 
     private static final class CacheEntry {

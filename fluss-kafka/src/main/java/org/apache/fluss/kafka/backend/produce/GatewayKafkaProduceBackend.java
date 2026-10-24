@@ -54,7 +54,6 @@ import javax.annotation.Nullable;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -64,6 +63,7 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -82,9 +82,10 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
     private final KafkaRecordTranscoder transcoder;
     private final KafkaTableInfoCache tableInfoCache = new KafkaTableInfoCache();
-    private final @Nullable KafkaProduceConversionExecutor conversionExecutor;
+    private final KafkaProduceConversionExecutor conversionExecutor;
+    private final boolean ownsConversionExecutor;
 
-    /** Creates a Produce backend backed by the local TabletServer gateway. */
+    /** Creates a Produce backend with its own bounded conversion executor. */
     public GatewayKafkaProduceBackend(
             RpcGatewayService service,
             TabletServerGateway gateway,
@@ -104,7 +105,11 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
         this.gateway = checkNotNull(gateway);
         this.topicMapper = checkNotNull(topicMapper);
         this.transcoder = checkNotNull(transcoder);
-        this.conversionExecutor = conversionExecutor;
+        this.ownsConversionExecutor = conversionExecutor == null;
+        this.conversionExecutor =
+                ownsConversionExecutor
+                        ? new KafkaProduceConversionExecutor(1, 1024)
+                        : conversionExecutor;
     }
 
     @Override
@@ -117,13 +122,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             pendingWrites.add(finished);
         }
         try {
-            // The request owns the payloads only until write returns. Metadata lookup can also
-            // complete asynchronously when no conversion executor is configured.
+            // The request owns the payloads only until write returns.
             KafkaProduceCommand ownedCommand = copyCommand(command);
-            CompletableFuture<KafkaProduceResult> result =
-                    conversionExecutor != null
-                            ? writePartitions(ownedCommand)
-                            : writeTopics(ownedCommand);
+            CompletableFuture<KafkaProduceResult> result = writePartitions(ownedCommand);
             // Caller cancellation must not release resources still held by native append.
             return result.whenComplete((ignored, failure) -> finishWrite(finished))
                     .thenApply(value -> value);
@@ -137,8 +138,12 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public CompletableFuture<Void> closeAsync() {
         synchronized (pendingWrites) {
             if (closeFuture == null) {
-                closeFuture =
+                CompletableFuture<Void> drained =
                         CompletableFuture.allOf(pendingWrites.toArray(new CompletableFuture[0]));
+                closeFuture = drained;
+                if (ownsConversionExecutor) {
+                    closeFuture = CompletableFuture.allOf(drained, conversionExecutor.closeAsync());
+                }
             }
             return closeFuture;
         }
@@ -195,6 +200,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     }
 
     private CompletableFuture<KafkaProduceResult> writePartitions(KafkaProduceCommand command) {
+        Map<TablePath, FutureTask<TableInfo>> metadataByTable = new HashMap<>();
         List<CompletableFuture<TopicResult>> topicFutures = new ArrayList<>();
         for (TopicWrite topic : command.topics()) {
             TablePath path;
@@ -204,27 +210,30 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 topicFutures.add(CompletableFuture.completedFuture(failedTopic(topic, failure)));
                 continue;
             }
-            List<CompletableFuture<TopicResult>> partitionFutures = new ArrayList<>();
+            // The first accepted partition loads this snapshot on a conversion worker. Aliases
+            // and other partitions share it, while the next request always performs a fresh lookup.
+            FutureTask<TableInfo> metadata =
+                    metadataByTable.computeIfAbsent(
+                            path, ignored -> new FutureTask<>(() -> loadTableInfo(command, path)));
+            List<CompletableFuture<PartitionResult>> partitionFutures = new ArrayList<>();
             for (PartitionWrite partition : topic.partitions()) {
-                TopicWrite singlePartition =
-                        new TopicWrite(topic.topicName(), Collections.singletonList(partition));
-                // Register before asynchronous metadata lookup. Aliases of the same table
-                // share append order, while unrelated tables and partitions remain independent.
                 partitionFutures.add(
                         conversionExecutor
                                 .submit(
                                         Tuple2.of(path, partition.partitionId()),
-                                        () -> writeTopic(command, singlePartition))
-                                .exceptionally(failure -> failedTopic(singlePartition, failure)));
+                                        () -> writePartition(command, partition, metadata))
+                                .exceptionally(
+                                        failure ->
+                                                failedPartition(partition.partitionId(), failure)));
             }
             topicFutures.add(
                     CompletableFuture.allOf(partitionFutures.toArray(new CompletableFuture<?>[0]))
                             .thenApply(
                                     ignored -> {
                                         List<PartitionResult> results = new ArrayList<>();
-                                        for (CompletableFuture<TopicResult> future :
+                                        for (CompletableFuture<PartitionResult> future :
                                                 partitionFutures) {
-                                            results.addAll(future.join().partitions());
+                                            results.add(future.join());
                                         }
                                         return new TopicResult(topic.topicName(), results);
                                     }));
@@ -240,134 +249,102 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         });
     }
 
-    private CompletableFuture<KafkaProduceResult> writeTopics(KafkaProduceCommand command) {
-        List<CompletableFuture<TopicResult>> futures = new ArrayList<>();
-        for (TopicWrite topic : command.topics()) {
-            futures.add(writeTopic(command, topic));
-        }
-        CompletableFuture<Void> all =
-                CompletableFuture.allOf(futures.toArray(new CompletableFuture<?>[0]));
-        return all.thenApply(
-                ignored -> {
-                    List<TopicResult> results = new ArrayList<>();
-                    for (CompletableFuture<TopicResult> future : futures) {
-                        results.add(future.join());
-                    }
-                    return new KafkaProduceResult(results);
-                });
+    private TableInfo loadTableInfo(KafkaProduceCommand command, TablePath path) throws Exception {
+        checkInterrupted();
+        setCurrentSession(command);
+        GetTableInfoRequest request = new GetTableInfoRequest();
+        request.setTablePath()
+                .setDatabaseName(path.getDatabaseName())
+                .setTableName(path.getTableName());
+        GetTableInfoResponse response =
+                gateway.getTableInfo(request)
+                        .get(Math.max(0, command.timeoutMs()), TimeUnit.MILLISECONDS);
+        return toTableInfo(path, response);
     }
 
-    private CompletableFuture<TopicResult> writeTopic(
-            KafkaProduceCommand command, TopicWrite topic) {
+    private CompletableFuture<PartitionResult> writePartition(
+            KafkaProduceCommand command, PartitionWrite partition, FutureTask<TableInfo> metadata) {
         try {
             checkInterrupted();
-            TablePath path = topicMapper.toTablePath(topic.topicName());
-            setCurrentSession(command);
-            GetTableInfoRequest request = new GetTableInfoRequest();
-            request.setTablePath()
-                    .setDatabaseName(path.getDatabaseName())
-                    .setTableName(path.getTableName());
-            CompletableFuture<GetTableInfoResponse> metadata = gateway.getTableInfo(request);
-            if (conversionExecutor != null) {
-                // Keep conversion and native submission on this worker even when metadata
-                // completes asynchronously. The submission gate is scoped to the worker task.
-                GetTableInfoResponse response =
-                        metadata.get(Math.max(0, command.timeoutMs()), TimeUnit.MILLISECONDS);
-                return produceTopic(command, topic, toTableInfo(path, response));
-            }
-            return metadata.thenCompose(
-                            response -> produceTopic(command, topic, toTableInfo(path, response)))
-                    .exceptionally(failure -> failedTopic(topic, failure));
+            metadata.run();
+            TableInfo tableInfo =
+                    metadata.get(Math.max(0, command.timeoutMs()), TimeUnit.MILLISECONDS);
+            return producePartition(command, partition, tableInfo);
         } catch (InterruptedException failure) {
             Thread.currentThread().interrupt();
-            return CompletableFuture.completedFuture(failedTopic(topic, failure));
+            return CompletableFuture.completedFuture(
+                    failedPartition(partition.partitionId(), failure));
         } catch (Exception failure) {
-            return CompletableFuture.completedFuture(failedTopic(topic, failure));
+            return CompletableFuture.completedFuture(
+                    failedPartition(partition.partitionId(), failure));
         }
     }
 
-    private CompletableFuture<TopicResult> produceTopic(
-            KafkaProduceCommand command, TopicWrite topic, TableInfo tableInfo) {
-        // Admission must match Metadata, including when the schema changes between requests.
-        // Even a cached snapshot is selected only after fetching the authoritative descriptor.
-        if (!schemaResolver.isEnabled(tableInfo.toTableDescriptor())) {
-            throw new TableNotExistException(
-                    "Table " + tableInfo.getTablePath() + " is not enabled for Kafka.");
-        }
-        schemaResolver.resolve(tableInfo.toTableDescriptor());
-        ProduceLogRequest request =
-                new ProduceLogRequest()
-                        .setTableId(tableInfo.getTableId())
-                        .setAcks(command.acks())
-                        .setTimeoutMs(command.timeoutMs());
-        Map<Integer, PartitionResult> failures = new HashMap<>();
-        List<EncodedRecords> encoded = new ArrayList<>();
-        for (PartitionWrite partition : topic.partitions()) {
-            if (partition.partitionId() < 0
-                    || partition.partitionId() >= tableInfo.getNumBuckets()) {
-                failures.put(
-                        partition.partitionId(),
-                        new PartitionResult(
-                                partition.partitionId(),
-                                Errors.UNKNOWN_TOPIC_OR_PARTITION,
-                                -1L,
-                                "Partition is outside the table bucket range."));
-                continue;
-            }
-            try {
-                EncodedRecords converted =
-                        transcoder.transcode(
-                                partition.partitionId(), partition.records(), tableInfo);
-                encoded.add(converted);
-                MemoryLogRecords records = converted.records();
-                request.addBucketsReq()
-                        .setBucketId(partition.partitionId())
-                        .setRecordsBytesView(
-                                new MemorySegmentBytesView(
-                                        records.getMemorySegment(),
-                                        records.getPosition(),
-                                        records.sizeInBytes()));
-            } catch (Exception failure) {
-                failures.put(
-                        partition.partitionId(), failedPartition(partition.partitionId(), failure));
-            }
-        }
-        if (request.getBucketsReqsCount() == 0) {
+    private CompletableFuture<PartitionResult> producePartition(
+            KafkaProduceCommand command, PartitionWrite partition, TableInfo tableInfo) {
+        int partitionId = partition.partitionId();
+        if (partitionId < 0 || partitionId >= tableInfo.getNumBuckets()) {
             return CompletableFuture.completedFuture(
-                    toTopicResult(topic, new ProduceLogResponse(), failures));
+                    new PartitionResult(
+                            partitionId,
+                            Errors.UNKNOWN_TOPIC_OR_PARTITION,
+                            -1L,
+                            "Partition is outside the table bucket range."));
         }
+        EncodedRecords converted = null;
+        boolean submitted = false;
         try {
+            converted = transcoder.transcode(partitionId, partition.records(), tableInfo);
+            MemoryLogRecords records = converted.records();
+            ProduceLogRequest request =
+                    new ProduceLogRequest()
+                            .setTableId(tableInfo.getTableId())
+                            .setAcks(command.acks())
+                            .setTimeoutMs(command.timeoutMs());
+            request.addBucketsReq()
+                    .setBucketId(partitionId)
+                    .setRecordsBytesView(
+                            new MemorySegmentBytesView(
+                                    records.getMemorySegment(),
+                                    records.getPosition(),
+                                    records.sizeInBytes()));
             checkInterrupted();
-            if (conversionExecutor != null) {
-                conversionExecutor.awaitAppendTurn();
-            }
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended = gateway.produceLog(request);
-            return appended.whenComplete(
-                            (ignored, failure) -> encoded.forEach(EncodedRecords::deallocate))
-                    .handle(
-                            (response, failure) ->
-                                    failure == null
-                                            ? toTopicResult(topic, response, failures)
-                                            : failedAppend(topic, failures, failure));
+            EncodedRecords retained = converted;
+            CompletableFuture<PartitionResult> result =
+                    appended.whenComplete((ignored, failure) -> retained.deallocate())
+                            .handle(
+                                    (response, failure) ->
+                                            failure == null
+                                                    ? toPartitionResult(partitionId, response)
+                                                    : failedPartition(partitionId, failure));
+            submitted = true;
+            return result;
         } catch (Exception failure) {
-            encoded.forEach(EncodedRecords::deallocate);
-            return CompletableFuture.completedFuture(failedAppend(topic, failures, failure));
+            checkInterrupted();
+            return CompletableFuture.completedFuture(failedPartition(partitionId, failure));
+        } finally {
+            if (!submitted && converted != null) {
+                converted.deallocate();
+            }
         }
-    }
-
-    private static TopicResult failedAppend(
-            TopicWrite topic, Map<Integer, PartitionResult> failures, Throwable failure) {
-        List<PartitionResult> results = new ArrayList<>();
-        for (PartitionWrite partition : topic.partitions()) {
-            PartitionResult local = failures.get(partition.partitionId());
-            results.add(local == null ? failedPartition(partition.partitionId(), failure) : local);
-        }
-        return new TopicResult(topic.topicName(), results);
     }
 
     private TableInfo toTableInfo(TablePath path, GetTableInfoResponse response) {
-        return tableInfoCache.getOrLoad(path, response, () -> parseTableInfo(path, response));
+        return tableInfoCache.getOrLoad(
+                path,
+                response,
+                () -> {
+                    TableInfo tableInfo = parseTableInfo(path, response);
+                    TableDescriptor descriptor = tableInfo.toTableDescriptor();
+                    if (!schemaResolver.isEnabled(descriptor)) {
+                        throw new TableNotExistException(
+                                "Table " + path + " is not enabled for Kafka.");
+                    }
+                    schemaResolver.resolve(descriptor);
+                    return tableInfo;
+                });
     }
 
     private static TableInfo parseTableInfo(TablePath path, GetTableInfoResponse response) {
@@ -382,46 +359,31 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 response.hasBucketCountEpoch() ? response.getBucketCountEpoch() : 0L);
     }
 
-    private static TopicResult toTopicResult(
-            TopicWrite topic, ProduceLogResponse response, Map<Integer, PartitionResult> failures) {
-        Map<Integer, PbProduceLogRespForBucket> responses = new HashMap<>();
+    private static PartitionResult toPartitionResult(int partitionId, ProduceLogResponse response) {
         for (PbProduceLogRespForBucket bucket : response.getBucketsRespsList()) {
-            responses.put(bucket.getBucketId(), bucket);
-        }
-        List<PartitionResult> partitions = new ArrayList<>();
-        for (PartitionWrite partition : topic.partitions()) {
-            PartitionResult localFailure = failures.get(partition.partitionId());
-            if (localFailure != null) {
-                partitions.add(localFailure);
+            if (bucket.getBucketId() != partitionId) {
                 continue;
             }
-            PbProduceLogRespForBucket bucket = responses.get(partition.partitionId());
-            if (bucket == null) {
-                partitions.add(
-                        new PartitionResult(
-                                partition.partitionId(),
-                                Errors.UNKNOWN_SERVER_ERROR,
-                                -1L,
-                                "Fluss Produce response omitted this bucket."));
-            } else if (bucket.hasErrorCode() && bucket.getErrorCode() != 0) {
-                partitions.add(
-                        new PartitionResult(
-                                partition.partitionId(),
-                                toKafkaError(
-                                        org.apache.fluss.rpc.protocol.Errors.forCode(
-                                                bucket.getErrorCode())),
-                                -1L,
-                                bucket.hasErrorMessage() ? bucket.getErrorMessage() : null));
-            } else {
-                partitions.add(
-                        new PartitionResult(
-                                partition.partitionId(),
-                                Errors.NONE,
-                                bucket.hasBaseOffset() ? bucket.getBaseOffset() : -1L,
-                                null));
+            if (bucket.hasErrorCode() && bucket.getErrorCode() != 0) {
+                return new PartitionResult(
+                        partitionId,
+                        toKafkaError(
+                                org.apache.fluss.rpc.protocol.Errors.forCode(
+                                        bucket.getErrorCode())),
+                        -1L,
+                        bucket.hasErrorMessage() ? bucket.getErrorMessage() : null);
             }
+            return new PartitionResult(
+                    partitionId,
+                    Errors.NONE,
+                    bucket.hasBaseOffset() ? bucket.getBaseOffset() : -1L,
+                    null);
         }
-        return new TopicResult(topic.topicName(), partitions);
+        return new PartitionResult(
+                partitionId,
+                Errors.UNKNOWN_SERVER_ERROR,
+                -1L,
+                "Fluss Produce response omitted this bucket.");
     }
 
     private static TopicResult failedTopic(TopicWrite topic, Throwable failure) {
@@ -509,7 +471,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     }
 
     private void checkInterrupted() {
-        if (conversionExecutor != null && Thread.currentThread().isInterrupted()) {
+        if (Thread.currentThread().isInterrupted()) {
             throw new CancellationException("Kafka conversion worker was interrupted.");
         }
     }

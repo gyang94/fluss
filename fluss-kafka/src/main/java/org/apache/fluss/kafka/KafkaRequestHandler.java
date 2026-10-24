@@ -34,10 +34,12 @@ import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
 import org.apache.fluss.utils.IOUtils;
+import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import javax.annotation.Nullable;
 
 import java.util.Arrays;
+import java.util.concurrent.CompletableFuture;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -49,6 +51,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
     private final KafkaRecordTranscoder transcoder;
     private final GatewayKafkaProduceBackend produceBackend;
     private final @Nullable KafkaProduceResources resources;
+    private CompletableFuture<Void> closeFuture;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
     public KafkaRequestHandler(Configuration conf, RpcGatewayService service) {
@@ -125,11 +128,21 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
                         });
     }
 
+    /** Stops new writes and releases conversion resources after native appends complete. */
+    public synchronized CompletableFuture<Void> closeAsync() {
+        if (closeFuture == null) {
+            closeFuture =
+                    FutureUtils.runAfterwards(
+                            produceBackend.closeAsync(),
+                            () -> IOUtils.closeAll(transcoder, resources));
+        }
+        return closeFuture;
+    }
+
     /** Waits for native appends before releasing conversion resources. */
     @Override
     public void close() throws Exception {
-        produceBackend.closeAsync().get();
-        IOUtils.closeAll(transcoder, resources);
+        closeAsync().get();
     }
 
     private KafkaApiRegistry apiRegistry() {

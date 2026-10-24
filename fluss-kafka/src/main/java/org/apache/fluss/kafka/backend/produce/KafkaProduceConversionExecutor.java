@@ -19,130 +19,131 @@ package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.utils.concurrent.ExecutorThreadFactory;
+import org.apache.fluss.utils.concurrent.FutureUtils;
 
-import javax.annotation.Nullable;
+import javax.annotation.concurrent.GuardedBy;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
- * Shared, bounded workers for Kafka conversion, with ordered native append submission.
+ * Bounded workers that serialize conversion and append submission for each ordering key.
  *
- * <p>Tasks with the same ordering key may convert concurrently, but must call {@link
- * #awaitAppendTurn()} before invoking native append. An operation must submit its append before
- * returning, but need not wait for acknowledgements. Ordering keys must have stable equality and
- * hash codes for the lifetime of their tasks.
+ * <p>An operation must submit its native append before returning its acknowledgement future. The
+ * next operation for that key can then start without waiting for the acknowledgement. Ordering keys
+ * must have stable equality and hash codes for the lifetime of their tasks.
  */
 @Internal
 public final class KafkaProduceConversionExecutor {
     private final ThreadPoolExecutor workers;
+    private final long maximumPendingTasks;
     private final Object submissionLock = new Object();
-    private final Map<Object, CompletableFuture<Void>> lastSubmitted = new HashMap<>();
-    private final ThreadLocal<ConversionTask<?>> currentTask = new ThreadLocal<>();
-    private volatile boolean closed;
+
+    @GuardedBy("submissionLock")
+    private final Map<Object, Deque<ConversionTask<?>>> tasksByKey = new HashMap<>();
+
+    @GuardedBy("submissionLock")
+    private int pendingTasks;
+
+    @GuardedBy("submissionLock")
+    private boolean closed;
+
+    @GuardedBy("submissionLock")
     private CompletableFuture<Void> closeFuture;
 
-    /** Creates a fixed shared worker pool with a bounded conversion queue. */
+    /** Creates shared workers with a bound covering both runnable and per-key queued tasks. */
     public KafkaProduceConversionExecutor(int threads, int queueCapacity) {
         checkArgument(threads > 0, "Conversion thread count must be positive.");
         checkArgument(
                 queueCapacity >= threads, "Queue capacity must be at least the thread count.");
+        maximumPendingTasks = (long) threads + queueCapacity;
         workers =
                 new ThreadPoolExecutor(
                         threads,
                         threads,
                         0L,
                         TimeUnit.MILLISECONDS,
-                        new ArrayBlockingQueue<>(queueCapacity),
+                        // Admission bounds all accepted tasks, including those waiting on a key.
+                        new LinkedBlockingQueue<>(),
                         new ExecutorThreadFactory("kafka-produce-conversion"),
                         new ThreadPoolExecutor.AbortPolicy());
     }
 
-    /** Submits conversion without ever running rejected work on the caller's thread. */
+    /** Submits conversion without running rejected work on the caller's thread. */
     public <T> CompletableFuture<T> submit(
             Object orderingKey, Supplier<CompletableFuture<T>> operation) {
         checkNotNull(orderingKey);
         checkNotNull(operation);
-        // Register and enqueue atomically: a task must never occupy a worker while its
-        // predecessor is still waiting to enter the FIFO work queue.
         synchronized (submissionLock) {
-            ConversionTask<T> task =
-                    new ConversionTask<>(operation, lastSubmitted.get(orderingKey));
-            try {
-                if (closed) {
-                    throw new RejectedExecutionException("Kafka conversion executor is closed.");
-                }
+            if (closed || pendingTasks >= maximumPendingTasks) {
+                return FutureUtils.completedExceptionally(
+                        new RejectedExecutionException(
+                                closed
+                                        ? "Kafka conversion executor is closed."
+                                        : "Kafka conversion queue is full."));
+            }
+            ConversionTask<T> task = new ConversionTask<>(orderingKey, operation);
+            Deque<ConversionTask<?>> tasks =
+                    tasksByKey.computeIfAbsent(orderingKey, ignored -> new ArrayDeque<>());
+            tasks.addLast(task);
+            pendingTasks++;
+            if (tasks.size() == 1) {
                 workers.execute(task);
-                // Rejected tasks must not replace the last accepted task's submission gate.
-                // Only accepted work attaches a dependent stage to the predecessor, keeping
-                // repeated rejections from retaining an unbounded chain behind a slow task.
-                // A failed conversion must still preserve all earlier pending submissions.
-                CompletableFuture<Void> submitted =
-                        task.predecessor == null
-                                ? task.finished
-                                : CompletableFuture.allOf(task.predecessor, task.finished);
-                lastSubmitted.put(orderingKey, submitted);
-                submitted.whenComplete(
-                        (ignored, failure) -> {
-                            synchronized (submissionLock) {
-                                lastSubmitted.remove(orderingKey, submitted);
-                            }
-                        });
-            } catch (RejectedExecutionException failure) {
-                task.cancel(failure);
             }
             return task.result;
         }
     }
 
-    /** Waits for earlier tasks with this key to submit append, without waiting for their ACKs. */
-    public void awaitAppendTurn() {
-        ConversionTask<?> task = checkNotNull(currentTask.get(), "current conversion task");
-        try {
-            if (task.predecessor != null) {
-                task.predecessor.get();
+    /** Stops admission, rejects queued tasks, interrupts running tasks and awaits worker exit. */
+    public CompletableFuture<Void> closeAsync() {
+        List<ConversionTask<?>> queued = new ArrayList<>();
+        CompletableFuture<Void> completion;
+        synchronized (submissionLock) {
+            if (closeFuture != null) {
+                return closeFuture;
             }
-            if (closed) {
-                throw new CancellationException("Kafka conversion executor is closed.");
+            closeFuture = new CompletableFuture<>();
+            completion = closeFuture;
+            closed = true;
+            Iterator<Deque<ConversionTask<?>>> queues = tasksByKey.values().iterator();
+            while (queues.hasNext()) {
+                Deque<ConversionTask<?>> tasks = queues.next();
+                Iterator<ConversionTask<?>> iterator = tasks.iterator();
+                while (iterator.hasNext()) {
+                    ConversionTask<?> task = iterator.next();
+                    if (!task.started) {
+                        task.operation = null;
+                        queued.add(task);
+                        iterator.remove();
+                        pendingTasks--;
+                    }
+                }
+                if (tasks.isEmpty()) {
+                    queues.remove();
+                }
             }
-        } catch (InterruptedException failure) {
-            Thread.currentThread().interrupt();
-            throw new CancellationException("Kafka conversion worker was interrupted.");
-        } catch (ExecutionException failure) {
-            throw new IllegalStateException("Kafka append submission gate failed.", failure);
+            workers.shutdownNow();
         }
-    }
-
-    /**
-     * Stops new work, rejects queued requests, interrupts workers, and awaits their termination.
-     */
-    public synchronized CompletableFuture<Void> closeAsync() {
-        if (closeFuture != null) {
-            return closeFuture;
-        }
-        closed = true;
         RejectedExecutionException failure =
                 new RejectedExecutionException("Kafka conversion executor is shutting down.");
-        List<Runnable> queued = workers.shutdownNow();
-        for (Runnable task : queued) {
-            ((ConversionTask<?>) task).cancel(failure);
+        for (ConversionTask<?> task : queued) {
+            task.result.completeExceptionally(failure);
         }
-        closeFuture =
-                CompletableFuture.runAsync(
+        CompletableFuture.runAsync(
                         () -> {
                             try {
                                 if (!workers.awaitTermination(10, TimeUnit.SECONDS)) {
@@ -155,58 +156,75 @@ public final class KafkaProduceConversionExecutor {
                                         "Interrupted closing Kafka conversion workers.",
                                         interrupted);
                             }
+                        })
+                .whenComplete(
+                        (ignored, error) -> {
+                            if (error == null) {
+                                completion.complete(null);
+                            } else {
+                                completion.completeExceptionally(error);
+                            }
                         });
-        return closeFuture;
+        return completion;
+    }
+
+    private void finishTask(Object orderingKey) {
+        synchronized (submissionLock) {
+            Deque<ConversionTask<?>> tasks = tasksByKey.get(orderingKey);
+            tasks.removeFirst();
+            pendingTasks--;
+            if (tasks.isEmpty()) {
+                tasksByKey.remove(orderingKey);
+            } else {
+                workers.execute(tasks.peekFirst());
+            }
+        }
     }
 
     private final class ConversionTask<T> implements Runnable {
-        private final AtomicReference<Supplier<CompletableFuture<T>>> operation;
+        private final Object orderingKey;
         private final CompletableFuture<T> result = new CompletableFuture<>();
-        private final AtomicBoolean claimed = new AtomicBoolean();
-        private final @Nullable CompletableFuture<Void> predecessor;
-        private final CompletableFuture<Void> finished = new CompletableFuture<>();
 
-        private ConversionTask(
-                Supplier<CompletableFuture<T>> operation,
-                @Nullable CompletableFuture<Void> predecessor) {
-            this.operation = new AtomicReference<>(operation);
-            this.predecessor = predecessor;
+        @GuardedBy("submissionLock")
+        private Supplier<CompletableFuture<T>> operation;
+
+        @GuardedBy("submissionLock")
+        private boolean started;
+
+        private ConversionTask(Object orderingKey, Supplier<CompletableFuture<T>> operation) {
+            this.orderingKey = orderingKey;
+            this.operation = operation;
         }
 
         @Override
         public void run() {
-            if (!claimed.compareAndSet(false, true)) {
-                return;
+            Supplier<CompletableFuture<T>> action;
+            synchronized (submissionLock) {
+                if (closed) {
+                    return;
+                }
+                started = true;
+                action = operation;
+                operation = null;
             }
-            Supplier<CompletableFuture<T>> action = operation.getAndSet(null);
-            if (result.isDone()) {
-                finished.complete(null);
-                return;
-            }
-            currentTask.set(this);
+            CompletableFuture<T> acknowledgement;
             try {
-                checkNotNull(action.get(), "conversion result")
-                        .whenComplete(
-                                (value, failure) -> {
-                                    if (failure == null) {
-                                        result.complete(value);
-                                    } else {
-                                        result.completeExceptionally(failure);
-                                    }
-                                });
+                acknowledgement =
+                        result.isDone() ? null : checkNotNull(action.get(), "conversion result");
             } catch (Throwable failure) {
-                result.completeExceptionally(failure);
+                acknowledgement = FutureUtils.completedExceptionally(failure);
             } finally {
-                currentTask.remove();
-                finished.complete(null);
+                finishTask(orderingKey);
             }
-        }
-
-        private void cancel(Throwable failure) {
-            if (claimed.compareAndSet(false, true)) {
-                operation.set(null);
-                result.completeExceptionally(failure);
-                finished.complete(null);
+            if (acknowledgement != null) {
+                acknowledgement.whenComplete(
+                        (value, failure) -> {
+                            if (failure == null) {
+                                result.complete(value);
+                            } else {
+                                result.completeExceptionally(failure);
+                            }
+                        });
             }
         }
     }

@@ -54,7 +54,10 @@ public interface NetworkProtocolPlugin extends Plugin {
      */
     RequestHandler<?> createRequestHandler(RpcGatewayService service);
 
-    /** Closes protocol-owned resources after transport and request processors have stopped. */
+    /**
+     * Stops new protocol work and drains accepted work before request processors and transport
+     * stop. Implementations must reject new work that requires resources being closed.
+     */
     default CompletableFuture<Void> closeAsync() {
         return CompletableFuture.completedFuture(null);
     }
