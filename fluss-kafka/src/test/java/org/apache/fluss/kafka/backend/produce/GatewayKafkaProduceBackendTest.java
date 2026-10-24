@@ -49,8 +49,10 @@ import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.types.DataTypes;
+import org.apache.fluss.utils.IOUtils;
 
 import org.apache.kafka.common.protocol.Errors;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -72,6 +74,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class GatewayKafkaProduceBackendTest {
 
+    private final List<ArrowKafkaRecordTranscoder> transcoders = new ArrayList<>();
+
+    private ArrowKafkaRecordTranscoder createTranscoder() {
+        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        transcoders.add(transcoder);
+        return transcoder;
+    }
+
+    @AfterEach
+    void closeTranscoders() throws Exception {
+        IOUtils.closeAll(transcoders);
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testAsyncConversionOwnsPayloadsAfterWriteReturns(boolean useExecutor) throws Exception {
@@ -80,7 +95,7 @@ class GatewayKafkaProduceBackendTest {
         KafkaProduceConversionExecutor executor =
                 useExecutor ? new KafkaProduceConversionExecutor(1, 2) : null;
         List<Record> seen = new ArrayList<>();
-        ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder arrow = createTranscoder();
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
                         service,
@@ -201,7 +216,7 @@ class GatewayKafkaProduceBackendTest {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 2);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), createTranscoder(), executor);
         PartitionWrite partition =
                 recordsKind.equals("non-null")
                         ? good(0)
@@ -249,7 +264,7 @@ class GatewayKafkaProduceBackendTest {
     void testMixedNullValuesPreserveRecordOrderAndNativeOffsets() throws Exception {
         TestingProduceService service = new TestingProduceService();
         List<Record> seen = new ArrayList<>();
-        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder transcoder = createTranscoder();
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
                         service,
@@ -428,7 +443,7 @@ class GatewayKafkaProduceBackendTest {
     void testQualifiedTopicsPreserveDatabaseAndTranscoderTablePath() throws Exception {
         TestingProduceService service = new TestingProduceService();
         List<TablePath> transcodedPaths = new ArrayList<>();
-        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder transcoder = createTranscoder();
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
                         service,
@@ -491,7 +506,7 @@ class GatewayKafkaProduceBackendTest {
     @Test
     void testReusesPlansButAlwaysRefreshesMetadataAndValidatesChangedContract() throws Exception {
         TestingProduceService service = new TestingProduceService();
-        ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder arrow = createTranscoder();
         List<KafkaTopicWritePlan> prepared = new ArrayList<>();
         List<KafkaTopicWritePlan> converted = new ArrayList<>();
         List<Integer> convertedPartitions = new ArrayList<>();
@@ -605,7 +620,7 @@ class GatewayKafkaProduceBackendTest {
         service.appended = new CountDownLatch(1);
         CountDownLatch firstConverting = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
-        ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder arrow = createTranscoder();
         KafkaRecordTranscoder transcoder =
                 (partitionId, records, table) -> {
                     if (table.getTableId() == 42L && partitionId == 0) {
@@ -646,7 +661,7 @@ class GatewayKafkaProduceBackendTest {
     void testOffloadedMetadataRefreshUsesNewTableIdentityAndSchema() throws Exception {
         TestingProduceService service = new TestingProduceService();
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 2);
-        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder transcoder = createTranscoder();
         List<TableInfo> snapshots = new ArrayList<>();
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
@@ -713,7 +728,7 @@ class GatewayKafkaProduceBackendTest {
         KafkaProduceConversionExecutor executor = new KafkaProduceConversionExecutor(1, 1);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), createTranscoder(), executor);
         try {
             CompletableFuture<KafkaProduceResult> result =
                     backend.write(command((short) -1, topic("kafka.topic", good(0))));
@@ -739,7 +754,7 @@ class GatewayKafkaProduceBackendTest {
         service.metadataEntered = new CountDownLatch(1);
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service, service, mapper(), new ArrowKafkaRecordTranscoder(), executor);
+                        service, service, mapper(), createTranscoder(), executor);
         KafkaProduceCommand command = command((short) 1, topic("kafka.topic", good(0)));
         try {
             CompletableFuture<KafkaProduceResult> running = backend.write(command);
@@ -908,10 +923,7 @@ class GatewayKafkaProduceBackendTest {
         config.set(ConfigOptions.KAFKA_DEFAULT_DATABASE, "missing_db");
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(
-                        service,
-                        service,
-                        new KafkaTopicMapper(config),
-                        new ArrowKafkaRecordTranscoder());
+                        service, service, new KafkaTopicMapper(config), createTranscoder());
         KafkaProduceResult result =
                 backend.write(
                                 command(
@@ -1065,8 +1077,8 @@ class GatewayKafkaProduceBackendTest {
         assertThat(service.writeChecks).isZero();
     }
 
-    private static final class RecordingTranscoder implements KafkaRecordTranscoder {
-        private final ArrowKafkaRecordTranscoder arrow = new ArrowKafkaRecordTranscoder();
+    private final class RecordingTranscoder implements KafkaRecordTranscoder {
+        private final ArrowKafkaRecordTranscoder arrow = createTranscoder();
         private final List<KafkaTopicWritePlan> prepared = new ArrayList<>();
 
         @Override
@@ -1089,9 +1101,8 @@ class GatewayKafkaProduceBackendTest {
         return new KafkaTopicMapper(config);
     }
 
-    private static GatewayKafkaProduceBackend backend(TestingProduceService service) {
-        return new GatewayKafkaProduceBackend(
-                service, service, mapper(), new ArrowKafkaRecordTranscoder());
+    private GatewayKafkaProduceBackend backend(TestingProduceService service) {
+        return new GatewayKafkaProduceBackend(service, service, mapper(), createTranscoder());
     }
 
     private static KafkaProduceCommand command(short acks, TopicWrite... topics) throws Exception {

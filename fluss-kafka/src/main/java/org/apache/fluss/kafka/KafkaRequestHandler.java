@@ -29,6 +29,7 @@ import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
+import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
@@ -41,10 +42,11 @@ import java.util.Arrays;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Entry point that dispatches Kafka protocol requests to registered API handlers. */
-public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
+public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCloseable {
 
     private final KafkaApiRegistry registry;
     private final KafkaRequestDispatcher dispatcher;
+    private final KafkaRecordTranscoder transcoder;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
     public KafkaRequestHandler(Configuration conf, RpcGatewayService service) {
@@ -56,6 +58,15 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
             Configuration conf,
             RpcGatewayService service,
             @Nullable KafkaProduceConversionExecutor conversionExecutor) {
+        this(conf, service, conversionExecutor, new ArrowKafkaRecordTranscoder());
+    }
+
+    KafkaRequestHandler(
+            Configuration conf,
+            RpcGatewayService service,
+            @Nullable KafkaProduceConversionExecutor conversionExecutor,
+            KafkaRecordTranscoder transcoder) {
+        this.transcoder = checkNotNull(transcoder);
         KafkaTopicMapper topicMapper = new KafkaTopicMapper(checkNotNull(conf));
         this.registry =
                 new KafkaApiRegistry(
@@ -69,7 +80,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                                 service,
                                                 (TabletServerGateway) service,
                                                 topicMapper,
-                                                new ArrowKafkaRecordTranscoder(),
+                                                transcoder,
                                                 conversionExecutor))));
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
@@ -91,6 +102,12 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest> {
                                 request.fail(failure);
                             }
                         });
+    }
+
+    /** Releases conversion resources after request processing and conversion workers stop. */
+    @Override
+    public void close() throws Exception {
+        transcoder.close();
     }
 
     private KafkaApiRegistry apiRegistry() {

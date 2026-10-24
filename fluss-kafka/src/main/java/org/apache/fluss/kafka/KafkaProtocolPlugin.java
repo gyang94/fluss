@@ -17,26 +17,45 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceConversionExecutor;
+import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
+import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.NetworkProtocolPlugin;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandler;
+import org.apache.fluss.utils.IOUtils;
+import org.apache.fluss.utils.concurrent.FutureUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkState;
 
 /** The Kafka protocol plugin. */
 public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
 
+    private final Supplier<KafkaRecordTranscoder> transcoderFactory;
+    private final List<KafkaRequestHandler> requestHandlers = new ArrayList<>();
     private Configuration conf;
     private KafkaProduceConversionExecutor conversionExecutor;
     private CompletableFuture<Void> closeFuture;
+
+    /** Creates a plugin that owns the conversion resources of its request handlers. */
+    public KafkaProtocolPlugin() {
+        this(ArrowKafkaRecordTranscoder::new);
+    }
+
+    @VisibleForTesting
+    KafkaProtocolPlugin(Supplier<KafkaRecordTranscoder> transcoderFactory) {
+        this.transcoderFactory = transcoderFactory;
+    }
 
     @Override
     public String name() {
@@ -83,16 +102,29 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
                                     conf.get(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS)));
             conversionExecutor = new KafkaProduceConversionExecutor(threads, queueCapacity);
         }
-        return new KafkaRequestHandler(conf, service, conversionExecutor);
+        KafkaRecordTranscoder transcoder = transcoderFactory.get();
+        try {
+            KafkaRequestHandler handler =
+                    new KafkaRequestHandler(conf, service, conversionExecutor, transcoder);
+            requestHandlers.add(handler);
+            return handler;
+        } catch (RuntimeException | Error failure) {
+            IOUtils.closeQuietly(transcoder);
+            throw failure;
+        }
     }
 
     @Override
     public synchronized CompletableFuture<Void> closeAsync() {
         if (closeFuture == null) {
-            closeFuture =
+            CompletableFuture<Void> workersClosed =
                     conversionExecutor == null
                             ? CompletableFuture.completedFuture(null)
                             : conversionExecutor.closeAsync();
+            // Writers may still be borrowed by a conversion until its worker terminates.
+            closeFuture =
+                    FutureUtils.runAfterwardsAsync(
+                            workersClosed, () -> IOUtils.closeAll(requestHandlers));
         }
         return closeFuture;
     }
