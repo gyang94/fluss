@@ -18,102 +18,161 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.KafkaValueConversionType;
+import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
+import org.apache.fluss.memory.LazyMemorySegmentPool;
+import org.apache.fluss.memory.MemorySegment;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.TableInfo;
-import org.apache.fluss.record.bytesview.BytesView;
+import org.apache.fluss.record.ChangeType;
 import org.apache.fluss.row.BinaryString;
+import org.apache.fluss.row.arrow.ArrowWriter;
+import org.apache.fluss.row.arrow.ArrowWriterPool;
+import org.apache.fluss.server.kv.wal.ArrowWalBuilder;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
 
 import javax.annotation.Nullable;
+import javax.annotation.concurrent.ThreadSafe;
 
 import java.nio.ByteBuffer;
-import java.nio.charset.CharacterCodingException;
-import java.nio.charset.CodingErrorAction;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
-/** Converts binary/string Kafka values and fixed system columns into owned Arrow log bytes. */
+/**
+ * Shared, thread-safe converter of Kafka records into pooled Arrow log records.
+ *
+ * <p>Each conversion borrows a writer for the table ID, schema ID and compression settings.
+ * Concurrent batches use separate writers, sharing the Arrow allocator and memory segment pool.
+ * Callers must deallocate each result after the log append completes, including exceptional
+ * completion.
+ *
+ * <p>The caller owns both shared memory resources and is responsible for closing them. The Arrow
+ * allocator must remain open until all conversions finish, and the memory segment pool until all
+ * results have been deallocated. Closing this transcoder only closes its writer pool and allows
+ * in-flight conversions to finish.
+ */
 @Internal
+@ThreadSafe
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
-    private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
-    private final FlussArrowRecordEncoder arrowRecordEncoder;
     private final KafkaCompiledWritePlanCache writePlanCache = new KafkaCompiledWritePlanCache();
 
-    /** Creates a transcoder with the default encoder. */
-    public ArrowKafkaRecordTranscoder() {
-        this(new FlussArrowRecordEncoder());
-    }
+    // Shared across server components; the caller closes it after all conversions finish.
+    private final BufferAllocator arrowBufferAllocator;
 
-    /** Creates a transcoder that owns and closes the supplied encoder. */
-    public ArrowKafkaRecordTranscoder(FlussArrowRecordEncoder arrowRecordEncoder) {
-        this.arrowRecordEncoder = checkNotNull(arrowRecordEncoder);
-    }
+    // Shared across server components; the caller closes it after all results are deallocated.
+    private final LazyMemorySegmentPool memorySegmentPool;
 
-    @Override
-    public KafkaTopicWritePlan prepare(TableInfo tableInfo) {
-        return writePlanCache.getOrCompile(
-                tableInfo,
-                () ->
-                        new KafkaTopicWritePlan(
-                                tableInfo, schemaResolver.resolve(tableInfo.toTableDescriptor())));
+    private final ArrowWriterPool writerPool;
+
+    /** Creates a transcoder using shared memory resources owned and closed by the caller. */
+    public ArrowKafkaRecordTranscoder(
+            BufferAllocator arrowBufferAllocator, LazyMemorySegmentPool memorySegmentPool) {
+        this.arrowBufferAllocator = checkNotNull(arrowBufferAllocator);
+        this.memorySegmentPool = checkNotNull(memorySegmentPool);
+        this.writerPool = new ArrowWriterPool(arrowBufferAllocator);
     }
 
     @Override
-    public BytesView transcode(int partitionId, List<Record> records, TableInfo tableInfo)
-            throws Exception {
-        return transcode(partitionId, records, prepare(tableInfo));
-    }
-
-    @Override
-    public BytesView transcode(int partitionId, List<Record> records, KafkaTopicWritePlan plan)
+    public EncodedRecords transcode(int partitionId, List<Record> records, TableInfo tableInfo)
             throws Exception {
         checkArgument(partitionId >= 0, "Kafka partition ID must be non-negative.");
         checkArgument(!records.isEmpty(), "Cannot transcode an empty Kafka partition.");
+        checkArgument(
+                tableInfo.getSchemaId() <= Short.MAX_VALUE,
+                "schemaId shouldn't be greater than the max value of short: %s",
+                Short.MAX_VALUE);
+        KafkaTopicWritePlan plan =
+                writePlanCache.getOrCompile(
+                        tableInfo,
+                        () ->
+                                new KafkaTopicWritePlan(
+                                        KafkaTableSchema.resolve(tableInfo.toTableDescriptor())));
         KafkaTableSchema schema = plan.topicSchema();
         KafkaRowAssembler assembler = plan.rowAssembler();
-        return arrowRecordEncoder.encodeStreaming(
-                consumer -> {
-                    for (Record record : records) {
-                        consumer.append(
-                                assembler.assemble(
-                                        new Object[] {
-                                            decode(schema.valueConversionType(), record.value())
-                                        },
-                                        record,
-                                        partitionId));
-                    }
-                },
-                plan.tableInfo());
-    }
-
-    @Override
-    public void close() throws Exception {
-        arrowRecordEncoder.close();
-    }
-
-    private static @Nullable Object decode(
-            KafkaValueConversionType format, @Nullable ByteBuffer bytes) {
-        if (bytes == null) {
-            return null;
-        }
-        if (format == KafkaValueConversionType.BINARY) {
-            return KafkaRowAssembler.copyBytes(bytes);
-        }
+        ArrowWriter writer = null;
+        long epoch = 0;
+        ArrowWalBuilder builder = null;
+        boolean ownershipTransferred = false;
         try {
-            return BinaryString.fromString(
-                    StandardCharsets.UTF_8
-                            .newDecoder()
-                            .onMalformedInput(CodingErrorAction.REPORT)
-                            .onUnmappableCharacter(CodingErrorAction.REPORT)
-                            .decode(bytes)
-                            .toString());
-        } catch (CharacterCodingException e) {
-            throw new KafkaRecordEncodingException("Kafka string field is not valid UTF-8.", e);
+            writer =
+                    writerPool.getOrCreateWriter(
+                            tableInfo.getTableId(),
+                            tableInfo.getSchemaId(),
+                            // Keep the whole conversion in one batch.
+                            Integer.MAX_VALUE,
+                            tableInfo.getRowType(),
+                            tableInfo.getTableConfig().getArrowCompressionInfo());
+            epoch = writer.getEpoch();
+            builder = new ArrowWalBuilder(tableInfo.getSchemaId(), writer, memorySegmentPool, true);
+            for (Record record : records) {
+                builder.append(
+                        ChangeType.APPEND_ONLY,
+                        assembler.assemble(
+                                new Object[] {decode(schema.valueConversionType(), record.value())},
+                                record,
+                                partitionId));
+            }
+            EncodedRecords result = new EncodedRecords(builder.build(), builder);
+            ownershipTransferred = true;
+            return result;
+        } catch (Exception e) {
+            throw new FlussRuntimeException(
+                    "Kafka transcode Arrow memory limit exceeded (allocator limit "
+                            + arrowBufferAllocator.getLimit()
+                            + " bytes).",
+                    e);
+        } finally {
+            if (!ownershipTransferred) {
+                if (builder != null) {
+                    builder.deallocate();
+                } else if (writer != null) {
+                    writer.recycle(epoch);
+                }
+            }
+        }
+    }
+
+    /** Closes the writer pool; shared memory resources remain owned by the caller. */
+    @Override
+    public void close() {
+        writerPool.close();
+    }
+
+    @VisibleForTesting
+    ArrowWriterPool writerPool() {
+        return writerPool;
+    }
+
+    @VisibleForTesting
+    static @Nullable Object decode(KafkaValueConversionType format, @Nullable ByteBuffer bytes) {
+        switch (format) {
+            case BINARY:
+                return KafkaRowAssembler.copyBytes(bytes);
+            case STRING:
+                if (bytes == null) {
+                    return null;
+                }
+                // Borrow the raw UTF-8 bytes until the synchronous Arrow append consumes them.
+                if (bytes.isDirect()) {
+                    return BinaryString.fromAddress(
+                            new MemorySegment[] {MemorySegment.wrapOffHeapMemory(bytes)},
+                            bytes.position(),
+                            bytes.remaining());
+                } else if (bytes.hasArray()) {
+                    return BinaryString.fromBytes(
+                            bytes.array(),
+                            bytes.arrayOffset() + bytes.position(),
+                            bytes.remaining());
+                } else {
+                    return BinaryString.fromBytes(KafkaRowAssembler.copyBytes(bytes));
+                }
+            default:
+                throw new KafkaRecordEncodingException(
+                        "Unsupported Kafka value conversion type: " + format);
         }
     }
 }

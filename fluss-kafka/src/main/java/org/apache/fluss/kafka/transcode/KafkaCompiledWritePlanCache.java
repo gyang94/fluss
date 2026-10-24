@@ -18,143 +18,89 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.metadata.TableInfo;
-import org.apache.fluss.metadata.TablePath;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Ticker;
+
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
+import java.time.Duration;
 import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
- * Bounded, single-flight cache for immutable Kafka topic write plans.
+ * Bounded cache of Kafka write plans keyed by table ID and schema ID, with idle expiration.
  *
- * <p>The bounded map is keyed by {@link TablePath}, while each slot fences its plan with the exact
- * {@link TableInfo} snapshot supplied by the caller. This avoids the recursive and allocation-heavy
- * {@link TableInfo#hashCode()} on every Produce request. Callers must treat snapshots as immutable
- * and reuse an instance only while the authoritative table metadata is unchanged. An equivalent but
- * separately constructed {@code TableInfo} is deliberately treated as a cache miss.
- *
- * <p>Consequently a delete/recreate, schema change, or property-only Kafka contract change receives
- * a different instance and cannot reuse an older plan. Slots are synchronized individually so a
- * concurrent cold start compiles once per table version.
+ * <p>Table and schema IDs identify an immutable schema. Compilation is atomic for each key.
  */
 @Internal
 @ThreadSafe
 final class KafkaCompiledWritePlanCache {
 
     static final long DEFAULT_MAXIMUM_SIZE = 1_000L;
+    private static final Duration EXPIRE_AFTER_ACCESS = Duration.ofMinutes(5);
 
-    private final long maximumSize;
-    private final ConcurrentMap<TablePath, CacheSlot> slots;
-    private final Object slotCreationLock = new Object();
+    private final Cache<String, KafkaTopicWritePlan> plans;
 
-    KafkaCompiledWritePlanCache() {
+    public KafkaCompiledWritePlanCache() {
         this(DEFAULT_MAXIMUM_SIZE);
     }
 
+    @VisibleForTesting
     KafkaCompiledWritePlanCache(long maximumSize) {
+        this(maximumSize, Ticker.systemTicker());
+    }
+
+    @VisibleForTesting
+    KafkaCompiledWritePlanCache(long maximumSize, Ticker ticker) {
         checkArgument(
                 maximumSize > 0, "Kafka compiled write plan cache size must be greater than zero.");
-        this.maximumSize = maximumSize;
-        this.slots = new ConcurrentHashMap<>();
+        this.plans =
+                Caffeine.newBuilder()
+                        .maximumSize(maximumSize)
+                        .expireAfterAccess(EXPIRE_AFTER_ACCESS)
+                        .ticker(ticker)
+                        .build();
     }
 
-    KafkaTopicWritePlan getIfPresent(TableInfo tableInfo) {
-        checkNotNull(tableInfo);
-        CacheSlot slot = slots.get(tableInfo.getTablePath());
-        if (slot == null) {
-            return null;
-        }
-        synchronized (slot) {
-            if (slots.get(tableInfo.getTablePath()) != slot) {
-                return null;
-            }
-            return slot.tableInfo == tableInfo ? slot.plan : null;
-        }
-    }
-
-    KafkaTopicWritePlan getOrCompile(
+    /**
+     * Returns the cached write plan for the given table and schema IDs, or compiles a new one if
+     * none is cached.
+     */
+    public KafkaTopicWritePlan getOrCompile(
             TableInfo tableInfo, Supplier<KafkaTopicWritePlan> planCompiler) {
-        checkNotNull(tableInfo);
         checkNotNull(planCompiler);
-
-        TablePath tablePath = tableInfo.getTablePath();
-        while (true) {
-            CacheSlot slot = getOrCreateSlot(tablePath);
-            synchronized (slot) {
-                if (slots.get(tablePath) != slot) {
-                    continue;
-                }
-                if (slot.tableInfo == tableInfo && slot.plan != null) {
-                    return slot.plan;
-                }
-                KafkaTopicWritePlan plan = checkNotNull(planCompiler.get());
-                slot.tableInfo = tableInfo;
-                slot.plan = plan;
-                return plan;
-            }
-        }
+        return plans.get(key(tableInfo), ignored -> checkNotNull(planCompiler.get()));
     }
 
-    void invalidate(TableInfo tableInfo) {
-        checkNotNull(tableInfo);
-        TablePath tablePath = tableInfo.getTablePath();
-        CacheSlot slot = slots.get(tablePath);
-        if (slot == null) {
-            return;
-        }
-        synchronized (slot) {
-            if (slot.tableInfo != tableInfo) {
-                return;
-            }
-            slot.tableInfo = null;
-            slot.plan = null;
-            slots.remove(tablePath, slot);
-        }
+    /** Invalidates the cached write plan for the given table and schema IDs, if any. */
+    public void invalidate(TableInfo tableInfo) {
+        plans.invalidate(key(tableInfo));
     }
 
+    /**
+     * Returns the cached write plan for the given table and schema IDs, or {@code null} if none is
+     * cached.
+     */
+    @Nullable
+    KafkaTopicWritePlan getIfPresent(TableInfo tableInfo) {
+        return plans.getIfPresent(key(tableInfo));
+    }
+
+    @VisibleForTesting
     long estimatedSize() {
-        return slots.size();
+        plans.cleanUp();
+        return plans.estimatedSize();
     }
 
-    private CacheSlot getOrCreateSlot(TablePath tablePath) {
-        CacheSlot slot = slots.get(tablePath);
-        if (slot != null) {
-            return slot;
-        }
-        synchronized (slotCreationLock) {
-            slot = slots.get(tablePath);
-            if (slot != null) {
-                return slot;
-            }
-            if (slots.size() >= maximumSize) {
-                evictOneSlot();
-            }
-            slot = new CacheSlot();
-            slots.put(tablePath, slot);
-            return slot;
-        }
-    }
-
-    private void evictOneSlot() {
-        for (Map.Entry<TablePath, CacheSlot> entry : slots.entrySet()) {
-            CacheSlot slot = entry.getValue();
-            synchronized (slot) {
-                if (slots.remove(entry.getKey(), slot)) {
-                    return;
-                }
-            }
-        }
-    }
-
-    private static final class CacheSlot {
-        private TableInfo tableInfo;
-        private KafkaTopicWritePlan plan;
+    private static String key(TableInfo tableInfo) {
+        checkNotNull(tableInfo);
+        return tableInfo.getTableId() + "-" + tableInfo.getSchemaId();
     }
 }

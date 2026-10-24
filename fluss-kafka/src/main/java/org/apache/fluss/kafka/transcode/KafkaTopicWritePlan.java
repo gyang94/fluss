@@ -20,28 +20,21 @@ package org.apache.fluss.kafka.transcode;
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.metadata.KafkaTableSchema;
-import org.apache.fluss.metadata.TableInfo;
 
 import javax.annotation.concurrent.ThreadSafe;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /**
- * Immutable binary/string conversion plan, independent of the encoder's reusable Arrow resources.
- *
- * <p>The table metadata must be treated as an immutable snapshot. This plan retains no record
- * payloads or request buffers and may be shared across partitions and concurrent requests using
- * that snapshot.
+ * Immutable conversion plan shared across requests without retaining records or Arrow resources.
  */
 @Internal
 @ThreadSafe
-public final class KafkaTopicWritePlan {
-    private final TableInfo tableInfo;
+final class KafkaTopicWritePlan {
     private final KafkaTableSchema topicSchema;
     private final KafkaRowAssembler rowAssembler;
 
-    KafkaTopicWritePlan(TableInfo tableInfo, KafkaTableSchema topicSchema) {
-        this.tableInfo = checkNotNull(tableInfo);
+    KafkaTopicWritePlan(KafkaTableSchema topicSchema) {
         this.topicSchema = checkNotNull(topicSchema);
         // Validate supported value formats when compiling the plan.
         if (topicSchema.valueConversionType() != KafkaValueConversionType.BINARY
@@ -51,11 +44,6 @@ public final class KafkaTopicWritePlan {
                             + topicSchema.valueConversionType());
         }
         this.rowAssembler = new KafkaRowAssembler(topicSchema);
-    }
-
-    /** Returns the authoritative table snapshot used to compile this plan. */
-    public TableInfo tableInfo() {
-        return tableInfo;
     }
 
     KafkaTableSchema topicSchema() {

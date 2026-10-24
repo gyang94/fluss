@@ -19,9 +19,6 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.KafkaValueConversionType;
-import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
-import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -32,14 +29,16 @@ import org.apache.fluss.types.DataTypes;
 
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -47,7 +46,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class KafkaCompiledWritePlanCacheTest {
 
     @Test
-    void testReusesSameIdentityAndSeparatesEquivalentAndChangedInstances() {
+    void testReusesTableAndSchemaKeyAndSeparatesChangedVersions() {
         KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
         AtomicInteger compileCount = new AtomicInteger();
         TableInfo original = tableInfo("orders", 1L, 1, "v1");
@@ -59,15 +58,14 @@ class KafkaCompiledWritePlanCacheTest {
         assertThat(reused).isSameAs(first);
         assertThat(cache.getIfPresent(original)).isSameAs(first);
 
-        // The metadata provider owns canonical instances. A separately constructed,
-        // structurally equivalent object is conservatively treated as a new metadata snapshot.
         TableInfo equivalent = tableInfo("orders", 1L, 1, "v1");
-        assertThat(cache.getIfPresent(equivalent)).isNull();
+        assertThat(cache.getIfPresent(equivalent)).isSameAs(first);
         KafkaTopicWritePlan equivalentPlan =
                 cache.getOrCompile(equivalent, () -> compile(equivalent, compileCount));
-        assertThat(equivalentPlan).isNotSameAs(first);
+        assertThat(equivalentPlan).isSameAs(first);
 
         TableInfo propertyChange = tableInfo("orders", 1L, 1, "v2");
+        assertThat(cache.getIfPresent(propertyChange)).isSameAs(first);
         KafkaTopicWritePlan propertyPlan =
                 cache.getOrCompile(propertyChange, () -> compile(propertyChange, compileCount));
         TableInfo schemaChange = tableInfo("orders", 1L, 2, "v2");
@@ -77,53 +75,39 @@ class KafkaCompiledWritePlanCacheTest {
         KafkaTopicWritePlan recreatedPlan =
                 cache.getOrCompile(recreated, () -> compile(recreated, compileCount));
 
-        assertThat(propertyPlan).isNotSameAs(first);
+        assertThat(propertyPlan).isSameAs(first);
         assertThat(schemaPlan).isNotSameAs(propertyPlan);
         assertThat(recreatedPlan).isNotSameAs(schemaPlan);
-        assertThat(compileCount).hasValue(5);
+        assertThat(cache.getIfPresent(propertyChange)).isSameAs(propertyPlan);
+        assertThat(cache.getIfPresent(schemaChange)).isSameAs(schemaPlan);
+        assertThat(cache.getIfPresent(recreated)).isSameAs(recreatedPlan);
+        assertThat(compileCount).hasValue(3);
     }
 
     @Test
-    void testEquivalentInstanceCannotInvalidateCurrentIdentity() {
+    void testInvalidationOnlyRemovesMatchingTableAndSchema() {
         KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
-        AtomicInteger compileCount = new AtomicInteger();
-        TableInfo current = tableInfo("orders", 1L, 1, "v1");
-        KafkaTopicWritePlan currentPlan =
-                cache.getOrCompile(current, () -> compile(current, compileCount));
-
-        cache.invalidate(tableInfo("orders", 1L, 1, "v1"));
-
-        assertThat(cache.getOrCompile(current, () -> compile(current, compileCount)))
-                .isSameAs(currentPlan);
-        assertThat(compileCount).hasValue(1);
-    }
-
-    @Test
-    void testOldSnapshotCannotInvalidateRecreatedTable() {
-        KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
-        AtomicInteger compileCount = new AtomicInteger();
         TableInfo original = tableInfo("orders", 1L, 1, "v1");
-        cache.getOrCompile(original, () -> compile(original, compileCount));
+        TableInfo newSchema = tableInfo("orders", 1L, 2, "v1");
         TableInfo recreated = tableInfo("orders", 2L, 1, "v1");
-        KafkaTopicWritePlan currentPlan =
-                cache.getOrCompile(recreated, () -> compile(recreated, compileCount));
-
-        cache.invalidate(original);
-
+        KafkaTopicWritePlan first = cache.getOrCompile(original, () -> compile(original));
+        KafkaTopicWritePlan newer = cache.getOrCompile(newSchema, () -> compile(newSchema));
+        KafkaTopicWritePlan replacement = cache.getOrCompile(recreated, () -> compile(recreated));
+        cache.invalidate(tableInfo("orders", 1L, 1, "v2"));
         assertThat(cache.getIfPresent(original)).isNull();
-        assertThat(cache.getOrCompile(recreated, () -> compile(recreated, compileCount)))
-                .isSameAs(currentPlan);
-        assertThat(compileCount).hasValue(2);
+        assertThat(cache.getIfPresent(newSchema)).isSameAs(newer);
+        assertThat(cache.getIfPresent(recreated)).isSameAs(replacement);
+        assertThat(cache.getOrCompile(original, () -> compile(original))).isNotSameAs(first);
     }
 
     @Test
-    void testFailedReplacementNeverReturnsOldPlan() {
+    void testFailedCompilationOfNewSchemaKeepsExistingPlan() {
         KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
         AtomicInteger compileCount = new AtomicInteger();
         TableInfo original = tableInfo("orders", 1L, 1, "v1");
         KafkaTopicWritePlan originalPlan =
                 cache.getOrCompile(original, () -> compile(original, compileCount));
-        TableInfo changed = tableInfo("orders", 1L, 1, "v2");
+        TableInfo changed = tableInfo("orders", 1L, 2, "v2");
         for (int i = 0; i < 2; i++) {
             assertThatThrownBy(
                             () ->
@@ -136,39 +120,11 @@ class KafkaCompiledWritePlanCacheTest {
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessage("compile failed");
             assertThat(cache.getIfPresent(changed)).isNull();
+            assertThat(cache.getIfPresent(original)).isSameAs(originalPlan);
         }
 
         assertThat(cache.getOrCompile(changed, () -> compile(changed, compileCount)))
                 .isNotSameAs(originalPlan);
-        assertThat(compileCount).hasValue(4);
-    }
-
-    @Test
-    void testInvalidationAndCompileFailureRecovery() {
-        KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
-        AtomicInteger compileCount = new AtomicInteger();
-        TableInfo tableInfo = tableInfo("orders", 1L, 1, "v1");
-        KafkaTopicWritePlan first =
-                cache.getOrCompile(tableInfo, () -> compile(tableInfo, compileCount));
-
-        cache.invalidate(tableInfo);
-        KafkaTopicWritePlan second =
-                cache.getOrCompile(tableInfo, () -> compile(tableInfo, compileCount));
-        assertThat(second).isNotSameAs(first);
-
-        TableInfo failingTable = tableInfo("payments", 2L, 1, "v1");
-        assertThatThrownBy(
-                        () ->
-                                cache.getOrCompile(
-                                        failingTable,
-                                        () -> {
-                                            compileCount.incrementAndGet();
-                                            throw new IllegalStateException("compile failed");
-                                        }))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessage("compile failed");
-        assertThat(cache.getOrCompile(failingTable, () -> compile(failingTable, compileCount)))
-                .isNotNull();
         assertThat(compileCount).hasValue(4);
     }
 
@@ -195,90 +151,18 @@ class KafkaCompiledWritePlanCacheTest {
                                                     return compile(tableInfo);
                                                 })));
             }
-            compilerStarted.await();
+            assertThat(compilerStarted.await(10, TimeUnit.SECONDS)).isTrue();
             releaseCompiler.countDown();
 
-            KafkaTopicWritePlan first = futures.get(0).get();
+            KafkaTopicWritePlan first = futures.get(0).get(10, TimeUnit.SECONDS);
             for (Future<KafkaTopicWritePlan> future : futures) {
-                assertThat(future.get()).isSameAs(first);
+                assertThat(future.get(10, TimeUnit.SECONDS)).isSameAs(first);
             }
             assertThat(compileCount).hasValue(1);
         } finally {
-            executor.shutdownNow();
-        }
-    }
-
-    @Test
-    void testInvalidationDoesNotAllowInFlightCompileToResurrect() throws Exception {
-        KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
-        TableInfo tableInfo = tableInfo("orders", 1L, 1, "v1");
-        AtomicInteger compileCount = new AtomicInteger();
-        CountDownLatch compilerStarted = new CountDownLatch(1);
-        CountDownLatch releaseCompiler = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            Future<KafkaTopicWritePlan> compiling =
-                    executor.submit(
-                            () ->
-                                    cache.getOrCompile(
-                                            tableInfo,
-                                            () -> {
-                                                compileCount.incrementAndGet();
-                                                compilerStarted.countDown();
-                                                await(releaseCompiler);
-                                                return compile(tableInfo);
-                                            }));
-            compilerStarted.await();
-            Future<?> invalidating = executor.submit(() -> cache.invalidate(tableInfo));
             releaseCompiler.countDown();
-
-            KafkaTopicWritePlan planBeforeInvalidation = compiling.get();
-            invalidating.get();
-            KafkaTopicWritePlan planAfterInvalidation =
-                    cache.getOrCompile(tableInfo, () -> compile(tableInfo, compileCount));
-
-            assertThat(planAfterInvalidation).isNotSameAs(planBeforeInvalidation);
-            assertThat(compileCount).hasValue(2);
-        } finally {
             executor.shutdownNow();
-        }
-    }
-
-    @Test
-    void testCompiledAssemblerIsSafeToShare() throws Exception {
-        KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
-        TableInfo tableInfo = tableInfo("orders", 1L, 1, "v1");
-        KafkaTopicWritePlan plan = cache.getOrCompile(tableInfo, () -> compile(tableInfo));
-        ExecutorService executor = Executors.newFixedThreadPool(8);
-        try {
-            List<Future<Object>> futures = new ArrayList<>();
-            for (int i = 0; i < 100; i++) {
-                final int id = i;
-                futures.add(
-                        executor.submit(
-                                () ->
-                                        plan.rowAssembler()
-                                                .assemble(
-                                                        new Object[] {
-                                                            Integer.toString(id)
-                                                                    .getBytes(
-                                                                            StandardCharsets.UTF_8)
-                                                        },
-                                                        new Record(
-                                                                id,
-                                                                TimestampType.UNKNOWN,
-                                                                null,
-                                                                null,
-                                                                new ArrayList<>()),
-                                                        0)
-                                                .getField(0)));
-            }
-            for (int i = 0; i < futures.size(); i++) {
-                assertThat((byte[]) futures.get(i).get())
-                        .isEqualTo(Integer.toString(i).getBytes(StandardCharsets.UTF_8));
-            }
-        } finally {
-            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
         }
     }
 
@@ -293,15 +177,33 @@ class KafkaCompiledWritePlanCacheTest {
         assertThat(cache.estimatedSize()).isLessThanOrEqualTo(2);
     }
 
+    @Test
+    void testIdleExpirationIsRefreshedByAccess() {
+        AtomicLong nanos = new AtomicLong();
+        KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10, nanos::get);
+        AtomicInteger compileCount = new AtomicInteger();
+        TableInfo table = tableInfo("orders", 1L, 1, "v1");
+        KafkaTopicWritePlan first = cache.getOrCompile(table, () -> compile(table, compileCount));
+
+        nanos.addAndGet(Duration.ofMinutes(4).toNanos());
+        assertThat(cache.getOrCompile(table, () -> compile(table, compileCount))).isSameAs(first);
+        nanos.addAndGet(Duration.ofMinutes(4).toNanos());
+        assertThat(cache.getIfPresent(table)).isSameAs(first);
+        nanos.addAndGet(Duration.ofMinutes(5).toNanos());
+        assertThat(cache.getIfPresent(table)).isNull();
+        assertThat(cache.getOrCompile(table, () -> compile(table, compileCount)))
+                .isNotSameAs(first);
+        assertThat(compileCount).hasValue(2);
+    }
+
     private static KafkaTopicWritePlan compile(TableInfo tableInfo, AtomicInteger compileCount) {
         compileCount.incrementAndGet();
         return compile(tableInfo);
     }
 
     private static KafkaTopicWritePlan compile(TableInfo tableInfo) {
-        KafkaTableSchema schema =
-                new KafkaTopicSchemaResolver().resolve(tableInfo.toTableDescriptor());
-        return new KafkaTopicWritePlan(tableInfo, schema);
+        KafkaTableSchema schema = KafkaTableSchema.resolve(tableInfo.toTableDescriptor());
+        return new KafkaTopicWritePlan(schema);
     }
 
     private static TableInfo tableInfo(
@@ -329,7 +231,7 @@ class KafkaCompiledWritePlanCacheTest {
 
     private static void await(CountDownLatch latch) {
         try {
-            latch.await();
+            assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while waiting for test compiler.", e);

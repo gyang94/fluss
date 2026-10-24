@@ -27,10 +27,9 @@ import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
-import org.apache.fluss.types.MapType;
-import org.apache.fluss.types.RowType;
 
 import javax.annotation.Nullable;
+import javax.annotation.concurrent.ThreadSafe;
 
 import java.nio.ByteBuffer;
 import java.util.LinkedHashMap;
@@ -41,6 +40,7 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Assembles decoded values and system columns using the shared fixed-column contract. */
 @Internal
+@ThreadSafe
 public final class KafkaRowAssembler {
 
     private final KafkaTableSchema topicSchema;
@@ -64,26 +64,14 @@ public final class KafkaRowAssembler {
         if (topicSchema.keyPosition() >= 0) {
             int position = topicSchema.keyPosition();
             ByteBuffer key = record.key();
-            if (key == null && !topicSchema.rowType().getTypeAt(position).isNullable()) {
-                throw new KafkaRecordEncodingException(
-                        "Null Kafka key cannot populate NOT NULL _kafka_key.");
-            }
             row.setField(position, copyBytes(key));
         }
         if (topicSchema.headersPosition() >= 0) {
             int position = topicSchema.headersPosition();
-            row.setField(
-                    position,
-                    toHeaders(
-                            record.headers(), (MapType) topicSchema.rowType().getTypeAt(position)));
+            row.setField(position, toHeaders(record.headers()));
         }
         if (topicSchema.metadataPosition() >= 0) {
             int position = topicSchema.metadataPosition();
-            RowType type = (RowType) topicSchema.rowType().getTypeAt(position);
-            if (!record.hasTimestamp() && !type.getTypeAt(0).isNullable()) {
-                throw new KafkaRecordEncodingException(
-                        "Missing Kafka timestamp cannot populate NOT NULL _kafka_metadata.timestamp.");
-            }
             row.setField(
                     position,
                     GenericRow.of(
@@ -133,17 +121,11 @@ public final class KafkaRowAssembler {
         }
         for (int i = 0; i < values.length; i++) {
             Object value = values[i];
-            if (value == null && !projection.dataTypeAt(i).isNullable()) {
-                throw new KafkaRecordEncodingException(
-                        "Kafka record cannot populate NOT NULL field '"
-                                + projection.nameAt(i)
-                                + "' with null.");
-            }
             row.setField(projection.positionAt(i), value);
         }
     }
 
-    private static GenericMap toHeaders(List<RecordHeader> headers, MapType type) {
+    private static GenericMap toHeaders(List<RecordHeader> headers) {
         Map<BinaryString, byte[]> values = new LinkedHashMap<>();
         // Walk backwards to retain only the last value for each header name.
         for (int i = headers.size() - 1; i >= 0; i--) {
@@ -151,17 +133,6 @@ public final class KafkaRowAssembler {
             BinaryString name = BinaryString.fromString(header.name());
             if (!values.containsKey(name)) {
                 values.put(name, header.value());
-            }
-        }
-        // Validate the final map: an overwritten null must not reject a non-null last value.
-        for (Map.Entry<BinaryString, byte[]> entry : values.entrySet()) {
-            if (entry.getKey() == null && !type.getKeyType().isNullable()) {
-                throw new KafkaRecordEncodingException(
-                        "Null Kafka header name cannot populate NOT NULL _kafka_headers map keys.");
-            }
-            if (entry.getValue() == null && !type.getValueType().isNullable()) {
-                throw new KafkaRecordEncodingException(
-                        "Null Kafka header value cannot populate NOT NULL _kafka_headers map values.");
             }
         }
         return new GenericMap(values);

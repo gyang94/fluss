@@ -17,12 +17,18 @@
 
 package org.apache.fluss.kafka.transcode;
 
+import org.apache.fluss.compression.ArrowCompressionType;
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
+import org.apache.fluss.config.MemorySize;
+import org.apache.fluss.exception.FlussRuntimeException;
+import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
+import org.apache.fluss.memory.LazyMemorySegmentPool;
+import org.apache.fluss.memory.MemorySegment;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -35,56 +41,101 @@ import org.apache.fluss.record.LogRecordBatch;
 import org.apache.fluss.record.LogRecordReadContext;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.record.TestingSchemaGetter;
-import org.apache.fluss.record.bytesview.BytesView;
 import org.apache.fluss.row.BinaryString;
-import org.apache.fluss.row.GenericMap;
-import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
+import org.apache.fluss.row.arrow.ArrowWriter;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.PooledByteBufAllocator;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.CloseableIterator;
+import org.apache.fluss.utils.IOUtils;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static org.apache.fluss.record.DefaultLogRecordBatch.APPEND_ONLY_FLAG_MASK;
+import static org.apache.fluss.record.LogRecordBatchFormat.attributeOffset;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 
-/** Verifies fixed-column Arrow records and the lifetime of borrowed input and owned output. */
+/** Verifies fixed-column Arrow records and the lifetime of borrowed input and pooled output. */
 class ArrowKafkaRecordTranscoderTest {
-    private final ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+    private static final int MIB = 1024 * 1024;
+
+    private final BufferAllocator allocator = BufferAllocatorUtil.createBufferAllocator(null);
+    private final LazyMemorySegmentPool memorySegmentPool =
+            LazyMemorySegmentPool.createServerBufferPool(new Configuration());
+    private final ArrowKafkaRecordTranscoder transcoder =
+            new ArrowKafkaRecordTranscoder(allocator, memorySegmentPool);
 
     @AfterEach
     void closeTranscoder() throws Exception {
-        transcoder.close();
+        IOUtils.closeAll(transcoder, allocator, memorySegmentPool);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"heap", "direct", "read-only"})
+    void testStringDecodeWrapsBufferRangeWithoutChangingCursor(String kind) {
+        byte[] expected = bytes("消息-😀");
+        ByteBuffer storage =
+                kind.equals("direct")
+                        ? ByteBuffer.allocateDirect(expected.length + 4)
+                        : ByteBuffer.allocate(expected.length + 4);
+        storage.position(2);
+        storage.put(expected);
+        storage.position(1);
+        ByteBuffer slice = storage.slice();
+        slice.position(1);
+        slice.limit(1 + expected.length);
+        ByteBuffer input = kind.equals("read-only") ? slice.asReadOnlyBuffer() : slice;
+        BinaryString decoded =
+                (BinaryString)
+                        ArrowKafkaRecordTranscoder.decode(KafkaValueConversionType.STRING, input);
+        assertThat(decoded.toBytes()).isEqualTo(expected);
+        assertThat(input.position()).isEqualTo(1);
+        assertThat(input.remaining()).isEqualTo(expected.length);
+        // Direct and array-backed buffers are borrowed; read-only heap buffers need a copy.
+        storage.put(2, (byte) 'x');
+        if (!kind.equals("read-only")) {
+            expected[0] = 'x';
+        }
+        assertThat(decoded.toBytes()).isEqualTo(expected);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testFixedColumnsAndAllOptionalSystemColumnCombinations(boolean string) throws Exception {
+    void testFixedColumnsWithAndWithoutSystemFields(boolean string) throws Exception {
         // The value looks like JSON but binary/string must not interpret or rescue its members.
         byte[] value = bytes("{\"_kafka_rescue\":\"消息\",\"_kafka_key\":123}");
         byte[] key = {(byte) 0xff, 0, (byte) 0xc3};
@@ -95,15 +146,19 @@ class ArrowKafkaRecordTranscoderTest {
                         key,
                         value,
                         Arrays.asList(
-                                new RecordHeader("duplicate", bytes("first")),
+                                new RecordHeader("duplicate", null),
                                 new RecordHeader("nullable", bytes("discarded")),
                                 new RecordHeader("duplicate", bytes("last")),
-                                new RecordHeader("nullable", null)));
-        for (int mask = 0; mask < 16; mask++) {
+                                new RecordHeader("nullable", null),
+                                new RecordHeader("", new byte[0])));
+        for (boolean systemFields : new boolean[] {false, true}) {
             // Each distinct schema has its own schema ID, as required by native Fluss writes.
-            TableInfo table = table(42L, mask, envelope(string, mask).toTableDescriptor());
-            TableDescriptor before = table.toTableDescriptor();
-            KafkaTableSchema contract = KafkaTableSchema.resolve(before);
+            TableInfo table =
+                    table(
+                            42L,
+                            systemFields ? 1 : 0,
+                            envelope(string, systemFields).toTableDescriptor());
+            KafkaTableSchema contract = KafkaTableSchema.resolve(table.toTableDescriptor());
             read(
                     transcoder.transcode(7, Collections.singletonList(record), table),
                     table,
@@ -118,7 +173,8 @@ class ArrowKafkaRecordTranscoderTest {
                         if (contract.headersPosition() >= 0) {
                             Map<String, byte[]> headers =
                                     headers(row.getMap(contract.headersPosition()));
-                            assertThat(headers).hasSize(2).containsKey("nullable");
+                            assertThat(headers).hasSize(3).containsKey("nullable");
+                            assertThat(headers.get("")).isEmpty();
                             assertThat(headers.get("duplicate")).isEqualTo(bytes("last"));
                             assertThat(headers.get("nullable")).isNull();
                         }
@@ -129,98 +185,48 @@ class ArrowKafkaRecordTranscoderTest {
                             assertThat(row.isNullAt(contract.rescuePosition())).isTrue();
                         }
                     });
-            assertThat(table.toTableDescriptor()).isEqualTo(before);
-            assertThat(before.getProperties()).doesNotContainKey("table.kafka.convert.key.type");
-            assertThat(before.getCustomProperties()).isEmpty();
         }
-        assertThat(record.timestampType()).isEqualTo(TimestampType.LOG_APPEND_TIME);
-        assertThat(record.timestamp()).isEqualTo(123L);
-        assertThat(record.key()).isEqualTo(ByteBuffer.wrap(key));
-        assertThat(record.value()).isEqualTo(ByteBuffer.wrap(value));
     }
 
     @ParameterizedTest
-    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
-    void testTranscodedRowsOutliveBorrowedBuffers(boolean string, boolean direct) throws Exception {
-        byte[] expectedValue = bytes("消息-value");
+    @ValueSource(booleans = {false, true})
+    void testStringBytesOutliveBorrowedBuffer(boolean direct) throws Exception {
+        byte[] text = bytes("消息-😀");
+        byte[] expected = Arrays.copyOf(text, text.length + 2);
+        // STRING preserves raw bytes, including malformed UTF-8.
+        expected[text.length] = (byte) 0xc3;
+        expected[text.length + 1] = 0x28;
         ByteBuf storage =
                 direct
-                        ? PooledByteBufAllocator.DEFAULT.directBuffer(expectedValue.length + 2)
-                        : PooledByteBufAllocator.DEFAULT.heapBuffer(expectedValue.length + 2);
-        byte[] key = bytes("key");
-        byte[] header = bytes("header");
-        TableInfo table = envelope(string, 15);
-        KafkaTopicWritePlan plan = transcoder.prepare(table);
-        int[] partitions = {7, 3};
-        List<BytesView> encoded = new ArrayList<>();
+                        ? PooledByteBufAllocator.DEFAULT.directBuffer(expected.length + 2)
+                        : PooledByteBufAllocator.DEFAULT.heapBuffer(expected.length + 2);
+        TableInfo table = valueTable();
+        EncodedRecords output;
         try {
-            storage.writeByte(0xff).writeBytes(expectedValue).writeByte(0xff);
+            storage.writeByte(0xff).writeBytes(expected).writeByte(0xff);
             ByteBuffer source = storage.nioBuffer();
             source.position(1);
-            source.limit(1 + expectedValue.length);
+            source.limit(1 + expected.length);
             Record input =
                     new Record(
                             123L,
                             TimestampType.CREATE_TIME,
-                            ByteBuffer.wrap(key),
+                            null,
                             source.asReadOnlyBuffer(),
-                            Collections.singletonList(new RecordHeader("h", header)));
-            ByteBuffer keyView = input.key();
-            ByteBuffer valueView = input.value();
-            assertThat(valueView.isDirect()).isEqualTo(direct);
-            for (ByteBuffer view : Arrays.asList(keyView, valueView)) {
-                assertThat(view.isReadOnly()).isTrue();
-                view.get();
-                view.limit(1);
-            }
-            // Changing caller/view cursors must not change the record's borrowed range.
-            source.clear();
-            // Exercise both entry points while reusing one immutable conversion plan.
-            for (int i = 0; i < partitions.length; i++) {
-                encoded.add(
-                        i == 0
-                                ? transcoder.transcode(
-                                        partitions[i], Collections.singletonList(input), table)
-                                : transcoder.transcode(
-                                        partitions[i], Collections.singletonList(input), plan));
-                assertThat(transcoder.prepare(table)).isSameAs(plan);
-            }
-            for (ByteBuffer view : Arrays.asList(keyView, valueView)) {
-                assertThat(view.position()).isEqualTo(1);
-                assertThat(view.limit()).isEqualTo(1);
-            }
-            assertThat(input.key()).isEqualTo(ByteBuffer.wrap(bytes("key")));
-            assertThat(input.value()).isEqualTo(ByteBuffer.wrap(expectedValue));
-            assertThat(input.headers().get(0).value()).isSameAs(header).isEqualTo(bytes("header"));
-
-            // Destroy borrowed payloads only after synchronous transcoding has finished.
-            Arrays.fill(key, (byte) 0);
-            Arrays.fill(header, (byte) 0);
+                            Collections.emptyList());
+            output = transcoder.transcode(0, Collections.singletonList(input), table);
+            assertThat(source.position()).isEqualTo(1);
+            assertThat(source.remaining()).isEqualTo(expected.length);
             storage.setZero(0, storage.readableBytes());
         } finally {
             storage.release();
         }
-        assertThat(storage.refCnt()).isZero();
-        for (int i = 0; i < partitions.length; i++) {
-            int partition = partitions[i];
-            read(
-                    encoded.get(i),
-                    table,
-                    1,
-                    row -> {
-                        assertValue(row, 2, string, expectedValue);
-                        assertThat(row.getBytes(3)).isEqualTo(bytes("key"));
-                        assertThat(headers(row.getMap(0)).get("h")).isEqualTo(bytes("header"));
-                        assertMetadata(row, 4, 123L, 0, partition);
-                    });
-        }
+        read(output, table, 1, row -> assertThat(row.getString(0).toBytes()).isEqualTo(expected));
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {4, 5})
-    void testSchemaChangeRebuildsFieldMapping(int schemaId) throws Exception {
-        TableInfo original = envelope(false, 15);
-        KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
+    @Test
+    void testSchemaChangeRebuildsFieldMapping() throws Exception {
+        TableInfo original = envelope(false, true);
         List<Record> records =
                 Collections.singletonList(
                         record(
@@ -229,15 +235,15 @@ class ArrowKafkaRecordTranscoderTest {
                                 bytes("key"),
                                 bytes("value"),
                                 Collections.singletonList(new RecordHeader("h", bytes("header")))));
-        BytesView originalOutput = transcoder.transcode(7, records, originalPlan);
+        EncodedRecords originalOutput = transcoder.transcode(7, records, original);
         TableInfo changed =
                 table(
                         original.getTableId(),
-                        schemaId,
+                        original.getSchemaId() + 1,
                         descriptor(
                                         Schema.newBuilder()
                                                 .column("_kafka_value", DataTypes.BYTES())
-                                                .column("_kafka_metadata", metadataType(true))
+                                                .column("_kafka_metadata", metadataType())
                                                 .column("_kafka_key", DataTypes.BYTES())
                                                 .column(
                                                         "_kafka_headers",
@@ -248,9 +254,6 @@ class ArrowKafkaRecordTranscoderTest {
                                         false)
                                 .build());
 
-        KafkaTopicWritePlan changedPlan = transcoder.prepare(changed);
-        assertThat(changedPlan).isNotSameAs(originalPlan);
-        assertThat(changedPlan.rowAssembler()).isNotSameAs(originalPlan.rowAssembler());
         read(
                 transcoder.transcode(3, records, changed),
                 changed,
@@ -262,7 +265,6 @@ class ArrowKafkaRecordTranscoderTest {
                     assertThat(row.getBytes(2)).isEqualTo(bytes("key"));
                     assertThat(headers(row.getMap(3)).get("h")).isEqualTo(bytes("header"));
                 });
-        assertThat(transcoder.prepare(changed)).isSameAs(changedPlan);
         // An output produced with the earlier plan still carries its original schema and layout.
         read(
                 originalOutput,
@@ -279,81 +281,9 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @ParameterizedTest
-    @CsvSource({
-        "table.kafka.enabled, false, disabled",
-        "table.kafka.convert.value.type, binary, _kafka_value must be BYTES",
-        "table.kafka.convert.key.type, binary, requires _kafka_key BYTES"
-    })
-    void testKafkaPropertyChangesRevalidateWithoutSchemaIdChange(
-            String property, String value, String expectedMessage) throws Exception {
-        TableInfo original = valueTable(false);
-        KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
-        TableInfo changed =
-                table(descriptor(original.getSchema(), true).property(property, value).build());
-        assertThat(changed.getTableId()).isEqualTo(original.getTableId());
-        assertThat(changed.getSchemaId()).isEqualTo(original.getSchemaId());
-        assertThat(changed.getModifiedTime()).isEqualTo(original.getModifiedTime());
-        List<Record> records =
-                Collections.singletonList(
-                        record(1L, null, bytes("value"), Collections.emptyList()));
-
-        // A warm plan must never bypass a changed Kafka contract, including after a failed compile.
-        for (int i = 0; i < 2; i++) {
-            assertThatThrownBy(() -> transcoder.transcode(0, records, changed))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining(expectedMessage);
-        }
-        TableInfo restored = table(original.toTableDescriptor());
-        KafkaTopicWritePlan restoredPlan = transcoder.prepare(restored);
-        assertThat(restoredPlan).isNotSameAs(originalPlan);
-        read(
-                transcoder.transcode(0, records, restoredPlan),
-                restored,
-                1,
-                row -> assertThat(row.getString(0).toString()).isEqualTo("value"));
-        assertThat(transcoder.prepare(restored)).isSameAs(restoredPlan);
-    }
-
-    @ParameterizedTest
-    @ValueSource(ints = {0, 3})
-    void testTableRecreationReplacesPlanEvenWithTheSameSchema(int schemaId) throws Exception {
-        TableInfo original = envelope(false, 15);
-        KafkaTopicWritePlan originalPlan = transcoder.prepare(original);
-        TableInfo recreated =
-                table(original.getTableId() + 1, schemaId, original.toTableDescriptor());
-        assertThat(recreated.getTablePath()).isEqualTo(original.getTablePath());
-        assertThat(recreated.getRowType()).isEqualTo(original.getRowType());
-
-        KafkaTopicWritePlan recreatedPlan = transcoder.prepare(recreated);
-        assertThat(recreatedPlan).isNotSameAs(originalPlan);
-        assertThat(recreatedPlan.tableInfo()).isSameAs(recreated);
-        assertThat(recreatedPlan.tableInfo().getTableId()).isEqualTo(43L);
-        byte[] value = {(byte) 0xff, 1};
-        read(
-                transcoder.transcode(
-                        3,
-                        Collections.singletonList(
-                                record(
-                                        123L,
-                                        TimestampType.LOG_APPEND_TIME,
-                                        null,
-                                        value,
-                                        Collections.emptyList())),
-                        recreated),
-                recreated,
-                1,
-                row -> {
-                    assertThat(row.getBytes(2)).isEqualTo(value);
-                    assertMetadata(row, 4, 123L, 1, 3);
-                });
-        assertThat(transcoder.prepare(recreated)).isSameAs(recreatedPlan);
-    }
-
-    @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testNullAndEmptyPayloadsRemainDistinct(boolean string) throws Exception {
-        TableInfo table = envelope(string, 7);
-        // This converter retains its existing nullability checks; ingress filtering is separate.
+        TableInfo table = envelope(string, true);
         List<Record> records =
                 Arrays.asList(
                         record(Record.NO_TIMESTAMP, null, null, Collections.emptyList()),
@@ -382,238 +312,20 @@ class ArrowKafkaRecordTranscoderTest {
                 });
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testKeyNullabilityAndRawKeyBytes(boolean string) throws Exception {
-        TableInfo nonNullableKeyTable =
-                table(
-                        descriptor(
-                                        Schema.newBuilder()
-                                                .column("_kafka_key", DataTypes.BYTES().copy(false))
-                                                .column("_kafka_value", valueType(string))
-                                                .build(),
-                                        string)
-                                .build());
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        0,
-                                        Collections.singletonList(
-                                                record(
-                                                        1L,
-                                                        null,
-                                                        bytes("valid"),
-                                                        Collections.emptyList())),
-                                        nonNullableKeyTable))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessage("_kafka_key must be BYTES, but was BYTES NOT NULL.");
-        TableInfo table =
-                table(
-                        descriptor(
-                                        Schema.newBuilder()
-                                                .column("_kafka_key", DataTypes.BYTES())
-                                                .column("_kafka_value", valueType(string))
-                                                .build(),
-                                        string)
-                                .build());
-        read(
-                transcoder.transcode(
-                        0,
-                        Collections.singletonList(
-                                record(1L, null, bytes("valid"), Collections.emptyList())),
-                        table),
-                table,
-                1,
-                row -> assertThat(row.isNullAt(0)).isTrue());
-        byte[] invalidUtf8Key = {(byte) 0xff};
-        read(
-                transcoder.transcode(
-                        0,
-                        Collections.singletonList(
-                                record(
-                                        1L,
-                                        invalidUtf8Key,
-                                        bytes("valid"),
-                                        Collections.emptyList())),
-                        table),
-                table,
-                1,
-                row -> assertThat(row.getBytes(0)).isEqualTo(invalidUtf8Key));
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testHeaderNullabilityIsCheckedAfterLastValueWins(boolean nullableValue) throws Exception {
-        TableInfo table =
-                table(
-                        descriptor(
-                                        Schema.newBuilder()
-                                                .column(
-                                                        "_kafka_headers",
-                                                        DataTypes.MAP(
-                                                                        DataTypes.STRING()
-                                                                                .copy(false),
-                                                                        DataTypes.BYTES()
-                                                                                .copy(
-                                                                                        nullableValue))
-                                                                .copy(true))
-                                                .column("_kafka_value", DataTypes.STRING())
-                                                .build(),
-                                        true)
-                                .build());
-        List<RecordHeader> overwrittenNull =
-                Arrays.asList(
-                        new RecordHeader("same", null),
-                        new RecordHeader("", new byte[0]),
-                        new RecordHeader("same", bytes("last")));
-        if (!nullableValue) {
-            assertThatThrownBy(
-                            () ->
-                                    transcoder.transcode(
-                                            0,
-                                            Collections.singletonList(
-                                                    record(1L, null, bytes("v"), overwrittenNull)),
-                                            table))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessage(
-                            "_kafka_headers must be MAP<STRING NOT NULL, BYTES>, "
-                                    + "but was MAP<STRING NOT NULL, BYTES NOT NULL>.");
-            return;
-        }
-        read(
-                transcoder.transcode(
-                        0,
-                        Collections.singletonList(record(1L, null, bytes("v"), overwrittenNull)),
-                        table),
-                table,
-                1,
-                row -> {
-                    Map<String, byte[]> map = headers(row.getMap(0));
-                    assertThat(map).hasSize(2);
-                    assertThat(map.get("same")).isEqualTo(bytes("last"));
-                    assertThat(map.get("")).isEmpty();
-                });
-        Record finalNull =
-                record(
-                        1L,
-                        null,
-                        bytes("v"),
-                        Arrays.asList(
-                                new RecordHeader("same", bytes("first")),
-                                new RecordHeader("same", null)));
-        read(
-                transcoder.transcode(0, Collections.singletonList(finalNull), table),
-                table,
-                1,
-                row ->
-                        assertThat(headers(row.getMap(0)))
-                                .containsOnlyKeys("same")
-                                .containsEntry("same", null));
-        read(
-                transcoder.transcode(
-                        0,
-                        Collections.singletonList(
-                                record(1L, null, bytes("v"), Collections.emptyList())),
-                        table),
-                table,
-                1,
-                row -> assertThat(row.getMap(0).size()).isZero());
-    }
-
     @Test
-    void testOmittedSystemColumnsIgnoreTimestampKeyAndHeaders() throws Exception {
-        TableInfo table = valueTable(false);
-        List<Record> records = new ArrayList<>();
-        for (TimestampType type : TimestampType.values()) {
-            for (long timestamp : new long[] {Record.NO_TIMESTAMP, 0L, Long.MAX_VALUE}) {
-                records.add(
-                        record(
-                                timestamp,
-                                type,
-                                new byte[] {(byte) 0xff},
-                                bytes("v"),
-                                Collections.singletonList(new RecordHeader("ignored", null))));
-            }
-        }
-        read(
-                transcoder.transcode(0, records, table),
-                table,
-                records.size(),
-                row -> {
-                    assertThat(row.getFieldCount()).isEqualTo(1);
-                    assertThat(row.getString(0).toString()).isEqualTo("v");
-                });
-    }
-
-    @Test
-    void testBinaryValuePreservesArbitraryBytesAcrossOutputPages() throws Exception {
-        byte[] value = new byte[32768];
-        new Random(42L).nextBytes(value);
-        value[0] = (byte) 0xff;
-        TableInfo table = envelope(false, 4);
-        BytesView encoded =
-                transcoder.transcode(
-                        0,
-                        Collections.singletonList(record(1L, null, value, Collections.emptyList())),
-                        table);
-        assertThat(encoded.getBytesLength()).isGreaterThan(4096);
-        read(
-                encoded,
-                table,
-                1,
-                row -> {
-                    assertThat(row.isNullAt(0)).isTrue();
-                    assertThat(row.getBytes(1)).isEqualTo(value);
-                });
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testValueNotNullConstraint(boolean string) {
-        TableInfo table =
-                table(
-                        descriptor(
-                                        Schema.newBuilder()
-                                                .column(
-                                                        "_kafka_value",
-                                                        valueType(string).copy(false))
-                                                .build(),
-                                        string)
-                                .build());
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        0,
-                                        Collections.singletonList(
-                                                record(1L, null, null, Collections.emptyList())),
-                                        table))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessage(
-                        "_kafka_value must be %s for %s, but was %s NOT NULL.",
-                        string ? "STRING" : "BYTES",
-                        string ? "STRING" : "BINARY",
-                        string ? "STRING" : "BYTES");
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testMetadataPreservesInputTimestampBatchTypeAndRequestedPartition(boolean string)
-            throws Exception {
-        long[] timestamps = {Record.NO_TIMESTAMP, 0L, 123L, 1728912345678L, Long.MAX_VALUE};
+    void testMetadataPreservesTimestampTypeAndRequestedPartition() throws Exception {
+        long[] timestamps = {Record.NO_TIMESTAMP, 0L, Long.MAX_VALUE};
         TimestampType[] types = {
             TimestampType.UNKNOWN, TimestampType.CREATE_TIME, TimestampType.LOG_APPEND_TIME
         };
-        int[] typeIds = {-1, 0, 1};
         List<Record> records = new ArrayList<>();
         for (TimestampType type : types) {
             for (long timestamp : timestamps) {
                 records.add(record(timestamp, type, null, bytes("v"), Collections.emptyList()));
             }
         }
-        TableInfo table = metadataTable(string, true, true);
-        TableDescriptor before = table.toTableDescriptor();
-        // Reuse the same converter and records across requests without retaining partition state.
-        for (int partition : new int[] {7, 0, 3}) {
+        TableInfo table = envelope(false, true);
+        for (int partition : new int[] {7, 3}) {
             AtomicInteger next = new AtomicInteger();
             read(
                     transcoder.transcode(partition, records, table),
@@ -623,164 +335,53 @@ class ArrowKafkaRecordTranscoderTest {
                         int i = next.getAndIncrement();
                         assertMetadata(
                                 row,
-                                0,
+                                4,
                                 timestamps[i % timestamps.length],
-                                typeIds[i / timestamps.length],
+                                i / timestamps.length - 1,
                                 partition);
-                        assertValue(row, 1, string, bytes("v"));
                     });
         }
-        assertThat(table.toTableDescriptor()).isEqualTo(before);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testMetadataTimestampNotNullIsRejectedAtSchemaResolution(boolean string) {
-        TableInfo table = metadataTable(string, true, false);
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        7,
-                                        Collections.singletonList(
-                                                record(
-                                                        Record.NO_TIMESTAMP,
-                                                        TimestampType.UNKNOWN,
-                                                        null,
-                                                        bytes("v"),
-                                                        Collections.emptyList())),
-                                        table))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining(
-                        "_kafka_metadata must be ROW<`timestamp` TIMESTAMP_LTZ(3), "
-                                + "`timestamp_type` INT, `partition` INT>")
-                .hasMessageContaining("but was ROW<`timestamp` TIMESTAMP_LTZ(3) NOT NULL,");
     }
 
     @Test
-    void testUnknownBatchTimestampTypeIsNotInferredFromTimestamp() throws Exception {
-        TableInfo table = metadataTable(true, true, true);
-        read(
-                transcoder.transcode(
-                        7,
-                        Collections.singletonList(
-                                record(123L, null, bytes("v"), Collections.emptyList())),
-                        table),
-                table,
-                1,
-                row -> assertMetadata(row, 0, 123L, -1, 7));
-    }
-
-    @Test
-    void testRejectsNegativePartitionId() {
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        -1,
-                                        Collections.singletonList(
-                                                record(
-                                                        Record.NO_TIMESTAMP,
-                                                        null,
-                                                        bytes("v"),
-                                                        Collections.emptyList())),
-                                        envelope(false, 8)))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("Kafka partition ID must be non-negative");
-    }
-
-    @Test
-    void testRejectsLegacyMetadataOffsetField() {
-        Schema schema =
-                Schema.newBuilder()
-                        .column("_kafka_value", DataTypes.STRING())
-                        .column(
-                                "_kafka_metadata",
-                                DataTypes.ROW(
-                                        DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
-                                        DataTypes.FIELD("timestamp_type", DataTypes.INT()),
-                                        DataTypes.FIELD("partition", DataTypes.INT()),
-                                        DataTypes.FIELD("offset", DataTypes.BIGINT())))
-                        .build();
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        0,
-                                        Collections.singletonList(
-                                                record(
-                                                        123L,
-                                                        TimestampType.CREATE_TIME,
-                                                        null,
-                                                        bytes("v"),
-                                                        Collections.emptyList())),
-                                        table(descriptor(schema, true).build())))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining(
-                        "_kafka_metadata must be ROW<`timestamp` TIMESTAMP_LTZ(3), "
-                                + "`timestamp_type` INT, `partition` INT>")
-                .hasMessageContaining("`offset` BIGINT");
-    }
-
-    @Test
-    void testRejectsDisabledAndLegacyContractsAndEmptyPartitions() throws Exception {
+    void testRejectsInvalidRequestBeforeAllocatingResources() {
         List<Record> records =
                 Collections.singletonList(record(1L, null, bytes("v"), Collections.emptyList()));
-        Schema fixed = Schema.newBuilder().column("_kafka_value", DataTypes.STRING()).build();
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        0,
-                                        records,
-                                        table(
-                                                descriptor(fixed, true)
-                                                        .property(
-                                                                ConfigOptions.TABLE_KAFKA_ENABLED,
-                                                                false)
-                                                        .build())))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("disabled");
-        assertThatThrownBy(
-                        () ->
-                                transcoder.transcode(
-                                        0,
-                                        records,
-                                        table(
-                                                descriptor(
-                                                                Schema.newBuilder()
-                                                                        .column(
-                                                                                "body",
-                                                                                DataTypes.STRING())
-                                                                        .build(),
-                                                                true)
-                                                        .build())))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("_kafka_value");
-        TableInfo unrelatedCustomProperty =
-                table(
-                        descriptor(fixed, true)
-                                .customProperty("kafka.value.format", "string")
-                                .build());
-        read(
-                transcoder.transcode(0, records, unrelatedCustomProperty),
-                unrelatedCustomProperty,
-                records.size(),
-                row -> assertThat(row.getString(0).toString()).isEqualTo("v"));
-        assertThatThrownBy(
-                        () -> transcoder.transcode(0, Collections.emptyList(), valueTable(false)))
+        assertThatThrownBy(() -> transcoder.transcode(-1, records, valueTable()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("partition");
+        assertThatThrownBy(() -> transcoder.transcode(0, Collections.emptyList(), valueTable()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("empty");
+        TableInfo invalid =
+                table(
+                        descriptor(
+                                        Schema.newBuilder()
+                                                .column("body", DataTypes.STRING())
+                                                .build(),
+                                        true)
+                                .build());
+        assertThatThrownBy(() -> transcoder.transcode(0, records, invalid))
+                .isInstanceOf(InvalidTableException.class)
+                .hasMessageContaining("_kafka_value");
+        TableInfo invalidId = table(42L, Short.MAX_VALUE + 1, valueTable().toTableDescriptor());
+        assertThatThrownBy(() -> transcoder.transcode(0, records, invalidId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("schemaId");
+        assertThat(transcoder.writerPool().freeWriters()).isEmpty();
+        assertThat(allocator.getAllocatedMemory()).isZero();
+        assertThat(memorySegmentPool.usedPages()).isZero();
     }
 
     @Test
-    void testJsonIsNotActivatedEvenForNullValues() {
+    void testRejectsUnsupportedFormatEvenForNull() {
         TableInfo table =
                 table(
-                        TableDescriptor.builder()
-                                .schema(
+                        descriptor(
                                         Schema.newBuilder()
                                                 .column("body", DataTypes.STRING())
-                                                .build())
-                                .distributedBy(1)
-                                .logFormat(LogFormat.ARROW)
-                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                                .build(),
+                                        true)
                                 .property(
                                         ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
                                         KafkaValueConversionType.PARSE_JSON)
@@ -788,344 +389,305 @@ class ArrowKafkaRecordTranscoderTest {
         for (byte[] value : new byte[][] {null, bytes("{}")}) {
             assertThatThrownBy(
                             () ->
-                                    transcoder.transcode(
-                                            0,
-                                            Collections.singletonList(
-                                                    record(
-                                                            1L,
-                                                            null,
-                                                            value,
-                                                            Collections.emptyList())),
-                                            table))
+                                    ArrowKafkaRecordTranscoder.decode(
+                                            KafkaValueConversionType.PARSE_JSON, buffer(value)))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasMessageContaining("PARSE_JSON");
+            assertThatThrownBy(() -> transcode(table, value))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasMessageContaining("PARSE_JSON");
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testStreamingBatchPreservesDistinctRecordsBeyondInitialCapacity(boolean string)
-            throws Exception {
-        TableInfo table = envelope(string, 15);
-        List<Record> records = new ArrayList<>();
-        for (int i = 0; i < 2050; i++) {
-            records.add(
-                    record(
-                            i % 3 == 0 ? Record.NO_TIMESTAMP : i,
-                            i % 3 == 0
-                                    ? TimestampType.UNKNOWN
-                                    : (i % 3 == 1
-                                            ? TimestampType.CREATE_TIME
-                                            : TimestampType.LOG_APPEND_TIME),
-                            bytes("key-" + i),
-                            bytes("消息-" + i),
-                            Arrays.asList(
-                                    new RecordHeader("duplicate", null),
-                                    new RecordHeader("duplicate", bytes("header-" + i)))));
-        }
-        AtomicInteger next = new AtomicInteger();
-        read(
-                transcoder.transcode(7, records, table),
-                table,
-                records.size(),
-                row -> {
-                    int i = next.getAndIncrement();
-                    assertValue(row, 2, string, bytes("消息-" + i));
-                    assertThat(row.getBytes(3)).isEqualTo(bytes("key-" + i));
-                    Map<String, byte[]> map = headers(row.getMap(0));
-                    assertThat(map).hasSize(1);
-                    assertThat(map.get("duplicate")).isEqualTo(bytes("header-" + i));
-                    assertThat(row.isNullAt(1)).isTrue();
-                    assertMetadata(row, 4, i % 3 == 0 ? Record.NO_TIMESTAMP : i, i % 3 - 1, 7);
-                });
-    }
-
     @Test
-    void testOneRecordWithManyDistinctHeadersGrowsArrowMapVectors() throws Exception {
-        TableInfo table = envelope(false, 2);
-        List<RecordHeader> input = new ArrayList<>();
-        for (int i = 0; i < 2050; i++) {
-            input.add(new RecordHeader("header-" + i, bytes("value-" + i)));
-        }
-        read(
-                transcoder.transcode(
-                        0, Collections.singletonList(record(1L, null, bytes("v"), input)), table),
-                table,
-                1,
-                row -> {
-                    Map<String, byte[]> map = headers(row.getMap(0));
-                    assertThat(map).hasSize(2050);
-                    for (int i = 0; i < 2050; i++) {
-                        assertThat(map.get("header-" + i)).isEqualTo(bytes("value-" + i));
-                    }
-                });
-    }
-
-    @Test
-    void testStreamingEncoderCopiesRowAndPayloadBeforeSourceReusesThem() throws Exception {
-        TableInfo table = envelope(false, 7);
-        byte[] key = new byte[1];
-        byte[] value = new byte[1];
-        byte[] headerValue = new byte[1];
-        GenericRow row =
-                GenericRow.of(
-                        GenericMap.of(BinaryString.fromString("header"), headerValue),
-                        null,
-                        value,
-                        key);
-        BytesView encoded;
-        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
-            encoded =
-                    encoder.encodeStreaming(
-                            consumer -> {
-                                for (int i = 0; i < 3; i++) {
-                                    key[0] = (byte) i;
-                                    value[0] = (byte) (i + 10);
-                                    headerValue[0] = (byte) (i + 20);
-                                    consumer.append(row);
-                                }
-                                Arrays.fill(key, (byte) -1);
-                                Arrays.fill(value, (byte) -1);
-                                Arrays.fill(headerValue, (byte) -1);
-                                row.setField(2, null);
-                            },
-                            table);
-        }
-        AtomicInteger next = new AtomicInteger();
-        read(
-                encoded,
-                table,
-                3,
-                actual -> {
-                    int i = next.getAndIncrement();
-                    assertThat(actual.getBytes(3)).containsExactly((byte) i);
-                    assertThat(actual.getBytes(2)).containsExactly((byte) (i + 10));
-                    assertThat(headers(actual.getMap(0)).get("header"))
-                            .containsExactly((byte) (i + 20));
-                });
-    }
-
-    @Test
-    void testDecodeFailureAfterValidRecordHasNoPartialOutputAndRemainsUsable() throws Exception {
-        TableInfo table = valueTable(false);
-        Record valid = record(1L, null, bytes("valid"), Collections.emptyList());
-        for (byte[] invalid : new byte[][] {{(byte) 0xc3, 0x28}, {(byte) 0xff}}) {
-            AtomicReference<BytesView> output = new AtomicReference<>();
-            Throwable failure =
-                    catchThrowable(
-                            () ->
-                                    output.set(
-                                            transcoder.transcode(
-                                                    0,
-                                                    Arrays.asList(
-                                                            valid,
-                                                            record(
-                                                                    2L,
-                                                                    null,
-                                                                    invalid,
-                                                                    Collections.emptyList())),
-                                                    table)));
-            assertThat(failure).isInstanceOf(KafkaRecordEncodingException.class);
-            assertThat(failure.getSuppressed()).isEmpty();
-            assertThat(output).hasNullValue();
-        }
-        read(
-                transcoder.transcode(0, Collections.singletonList(valid), table),
-                table,
-                1,
-                row -> assertThat(row.getString(0).toString()).isEqualTo("valid"));
-        read(
-                transcoder.transcode(
-                        0,
-                        Collections.singletonList(record(2L, null, null, Collections.emptyList())),
-                        table),
-                table,
-                1,
-                row -> assertThat(row.isNullAt(0)).isTrue());
-    }
-
-    @Test
-    void testInvalidHeaderSchemaHasNoOutputAndTranscoderRemainsUsable() throws Exception {
-        TableInfo invalidTable =
-                table(
-                        descriptor(
-                                        Schema.newBuilder()
-                                                .column("_kafka_value", DataTypes.STRING())
-                                                .column(
-                                                        "_kafka_headers",
-                                                        DataTypes.MAP(
-                                                                DataTypes.STRING(),
-                                                                DataTypes.BYTES().copy(false)))
-                                                .build(),
-                                        true)
-                                .build());
-        Record valid =
-                record(
-                        1L,
-                        null,
-                        bytes("v"),
-                        Collections.singletonList(new RecordHeader("h", bytes("v"))));
-        Record invalid =
-                record(
-                        1L,
-                        null,
-                        bytes("v"),
-                        Collections.singletonList(new RecordHeader("h", null)));
-        AtomicReference<BytesView> output = new AtomicReference<>();
-        Throwable failure =
-                catchThrowable(
-                        () ->
-                                output.set(
-                                        transcoder.transcode(
-                                                0, Arrays.asList(valid, invalid), invalidTable)));
-        assertThat(failure)
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessage(
-                        "_kafka_headers must be MAP<STRING NOT NULL, BYTES>, "
-                                + "but was MAP<STRING NOT NULL, BYTES NOT NULL>.");
-        assertThat(failure.getSuppressed()).isEmpty();
-        assertThat(output).hasNullValue();
-        TableInfo table =
-                table(
-                        descriptor(
-                                        Schema.newBuilder()
-                                                .column("_kafka_value", DataTypes.STRING())
-                                                .column(
-                                                        "_kafka_headers",
-                                                        DataTypes.MAP(
-                                                                DataTypes.STRING(),
-                                                                DataTypes.BYTES()))
-                                                .build(),
-                                        true)
-                                .build());
-        read(
-                transcoder.transcode(0, Collections.singletonList(valid), table),
-                table,
-                1,
-                row -> assertThat(headers(row.getMap(1)).get("h")).isEqualTo(bytes("v")));
-    }
-
-    @Test
-    void testArrowWriterFailureRecyclesWriter() throws Exception {
-        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
-            TableInfo table = valueTable(false);
-            Throwable failure =
-                    catchThrowable(
-                            () ->
-                                    encoder.encode(
-                                            Collections.singletonList(GenericRow.of(123)), table));
-            assertThat(failure).isInstanceOf(ClassCastException.class);
-            assertThat(failure.getSuppressed()).isEmpty();
-            assertEncoderRemainsUsable(encoder, table);
-        }
-    }
-
-    @Test
-    void testStreamingSourceFailureRecyclesWriter() throws Exception {
-        IOException expected = new IOException("source failed after the first row");
-        try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
-            TableInfo table = valueTable(false);
-            Throwable failure =
-                    catchThrowable(
-                            () ->
-                                    encoder.encodeStreaming(
-                                            consumer -> {
-                                                consumer.append(
-                                                        GenericRow.of(
-                                                                BinaryString.fromString("valid")));
-                                                throw expected;
-                                            },
-                                            table));
-            assertThat(failure).isSameAs(expected);
-            assertThat(failure.getSuppressed()).isEmpty();
-            assertEncoderRemainsUsable(encoder, table);
-        }
-    }
-
-    @Test
-    void testCloseReleasesOwnedEncoderAndOutputRemainsValid() throws Exception {
-        TableInfo table = valueTable(false);
-        FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder();
-        BytesView output;
+    void testInputIterationFailureRecyclesWriter() throws Exception {
+        IllegalStateException expected =
+                new IllegalStateException("input failed after the first record");
+        TableInfo table = binaryTable(1, 1, ArrowCompressionType.NONE);
         List<Record> records =
-                Collections.singletonList(
-                        record(1L, null, bytes("value"), Collections.emptyList()));
-        KafkaRecordTranscoder owned = new ArrowKafkaRecordTranscoder(encoder);
-        try (KafkaRecordTranscoder resource = owned) {
-            output = resource.transcode(0, records, table);
-            assertThat(encoder.writerPool().freeWriters()).isNotEmpty();
+                new AbstractList<Record>() {
+                    @Override
+                    public Record get(int index) {
+                        if (index == 0) {
+                            return record(1L, null, bytes("valid"), Collections.emptyList());
+                        }
+                        throw expected;
+                    }
+
+                    @Override
+                    public int size() {
+                        return 2;
+                    }
+                };
+        Throwable failure = catchThrowable(() -> transcoder.transcode(0, records, table));
+        assertThat(failure).isInstanceOf(FlussRuntimeException.class).hasCause(expected);
+        assertThat(failure.getSuppressed()).isEmpty();
+        assertTranscoderRemainsUsable(table);
+    }
+
+    @ParameterizedTest
+    @EnumSource(
+            value = ArrowCompressionType.class,
+            names = {"NONE", "ZSTD"})
+    void testLargeRecordsStayInOneBatch(ArrowCompressionType compression) throws Exception {
+        byte[] value = new byte[17 * MIB];
+        new Random(42).nextBytes(value);
+        TableInfo table = binaryTable(1, 1, compression);
+        byte[] lastValue = {7};
+        try (EncodedRecords output = transcode(table, value, lastValue)) {
+            assertThat(output.records().sizeInBytes()).isGreaterThan(16 * MIB);
+            assertRecords(output.records(), table, value, lastValue);
         }
-        owned.close();
-        assertThat(encoder.writerPool().freeWriters()).isEmpty();
-        assertThatThrownBy(encoder.allocator()::assertOpen)
-                .isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(() -> owned.transcode(0, records, table))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("closed");
-        read(output, table, 1, row -> assertThat(row.getString(0).toString()).isEqualTo("value"));
     }
 
-    private static void assertEncoderRemainsUsable(FlussArrowRecordEncoder encoder, TableInfo table)
+    @Test
+    void testAllocationFailureRecyclesWriter() throws Exception {
+        allocator.setLimit(128 * 1024);
+        TableInfo table = binaryTable(1, 1, ArrowCompressionType.NONE);
+        Throwable failure = catchThrowable(() -> transcode(table, new byte[MIB]));
+        assertThat(failure)
+                .isInstanceOf(FlussRuntimeException.class)
+                .hasMessageContaining("memory limit exceeded")
+                .hasCauseInstanceOf(OutOfMemoryException.class);
+        assertThat(failure.getSuppressed()).isEmpty();
+        assertTranscoderRemainsUsable(table);
+    }
+
+    @Test
+    void testWritersAreSeparatedByTableSchemaAndCompression() throws Exception {
+        TableInfo original = binaryTable(1, 1, ArrowCompressionType.NONE);
+        try (EncodedRecords output = transcode(original, new byte[] {1})) {
+            assertRecords(output.records(), original, new byte[] {1});
+        }
+        ArrowWriter originalWriter = idleWriter(transcoder);
+        for (TableInfo changed :
+                Arrays.asList(
+                        binaryTable(2, 1, ArrowCompressionType.NONE),
+                        binaryTable(1, 2, ArrowCompressionType.NONE),
+                        binaryTable(1, 1, ArrowCompressionType.LZ4_FRAME))) {
+            try (EncodedRecords output = transcode(changed, new byte[] {2})) {
+                assertRecords(output.records(), changed, new byte[] {2});
+            }
+        }
+        assertThat(transcoder.writerPool().freeWriters()).hasSize(4);
+        long epoch = originalWriter.getEpoch();
+        try (EncodedRecords output = transcode(original, new byte[] {3})) {
+            assertRecords(output.records(), original, new byte[] {3});
+        }
+        assertThat(originalWriter.getEpoch()).isEqualTo(epoch + 1);
+    }
+
+    @Test
+    void testConcurrentBatchesContinueAfterTranscoderCloses() throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        CountDownLatch entered = new CountDownLatch(2);
+        CountDownLatch finish = new CountDownLatch(1);
+        TableInfo table = binaryTable(1, 1, ArrowCompressionType.NONE);
+        List<Future<EncodedRecords>> encodes = new ArrayList<>();
+        try {
+            for (byte value = 1; value <= 2; value++) {
+                byte[] payload = {value};
+                encodes.add(
+                        executor.submit(() -> transcodeBlocked(table, payload, entered, finish)));
+            }
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(allocator.getAllocatedMemory()).isPositive();
+            executor.submit(transcoder::close).get(10, TimeUnit.SECONDS);
+            allocator.assertOpen();
+            assertThatThrownBy(() -> transcode(table, new byte[] {3}))
+                    .isInstanceOf(FlussRuntimeException.class)
+                    .cause()
+                    .isInstanceOf(FlussRuntimeException.class)
+                    .hasMessageContaining("pool closed");
+            finish.countDown();
+            for (int i = 0; i < encodes.size(); i++) {
+                try (EncodedRecords output = encodes.get(i).get(10, TimeUnit.SECONDS)) {
+                    assertRecords(
+                            output.records(), table, new byte[] {(byte) (i + 1)}, new byte[0]);
+                }
+            }
+            assertThat(transcoder.writerPool().freeWriters()).isEmpty();
+            assertThat(allocator.getAllocatedMemory()).isZero();
+            assertThat(memorySegmentPool.usedPages()).isZero();
+        } finally {
+            finish.countDown();
+            try {
+                for (Future<EncodedRecords> encode : encodes) {
+                    try {
+                        encode.get(10, TimeUnit.SECONDS).deallocate();
+                    } catch (ExecutionException ignored) {
+                        // Failed conversions release their resources before completing the future.
+                    }
+                }
+            } finally {
+                executor.shutdownNow();
+                assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1024, 1024 * 1024})
+    void testPooledOutputRemainsValidUntilDeallocated(int pageSize) throws Exception {
+        Configuration conf = new Configuration();
+        conf.set(ConfigOptions.SERVER_BUFFER_PAGE_SIZE, new MemorySize(pageSize));
+        conf.set(ConfigOptions.SERVER_BUFFER_MEMORY_SIZE, new MemorySize(4 * MIB));
+        conf.set(ConfigOptions.SERVER_BUFFER_PER_REQUEST_MEMORY_SIZE, new MemorySize(pageSize));
+        try (LazyMemorySegmentPool pool = LazyMemorySegmentPool.createServerBufferPool(conf)) {
+            TableInfo table = binaryTable(1, 1, ArrowCompressionType.NONE);
+            byte[] value = new byte[32 * 1024];
+            new Random(42).nextBytes(value);
+            try (ArrowKafkaRecordTranscoder encoder =
+                            new ArrowKafkaRecordTranscoder(allocator, pool);
+                    EncodedRecords output = encoder.transcode(0, records(value), table)) {
+                MemoryLogRecords records = output.records();
+                int pagesInUse = pool.usedPages();
+                assertThat(pagesInUse).isPositive();
+                ArrowWriter writer = idleWriter(encoder);
+                long epoch = writer.getEpoch();
+                try (EncodedRecords next = encoder.transcode(0, records(new byte[] {7}), table)) {
+                    assertRecords(next.records(), table, new byte[] {7});
+                }
+                assertThat(pool.usedPages()).isEqualTo(pagesInUse);
+                assertThat(idleWriter(encoder)).isSameAs(writer);
+                assertThat(writer.getEpoch()).isEqualTo(epoch + 1);
+                assertThat(allocator.getAllocatedMemory()).isZero();
+                for (MemorySegment segment : pool.getAllCachePages()) {
+                    Arrays.fill(segment.getArray(), (byte) -1);
+                }
+                encoder.close();
+                assertRecords(records, table, value);
+                output.deallocate();
+                output.deallocate();
+                assertThat(pool.availableMemory()).isEqualTo(pool.totalSize());
+                assertThatThrownBy(output::records).isInstanceOf(IllegalStateException.class);
+                if (records.sizeInBytes() <= pageSize) {
+                    // Single-page results point directly into the pool, without a copy.
+                    assertThat(pool.getAllCachePages())
+                            .anySatisfy(
+                                    segment ->
+                                            assertThat(segment.getArray())
+                                                    .isSameAs(
+                                                            records.getMemorySegment().getArray()));
+                }
+            }
+            allocator.assertOpen();
+            MemorySegment segment = pool.nextSegment();
+            pool.returnPage(segment);
+        }
+    }
+
+    @Test
+    void testMemoryPoolFailureReturnsWriter() {
+        memorySegmentPool.close();
+        assertThatThrownBy(
+                        () ->
+                                transcode(
+                                        binaryTable(1, 1, ArrowCompressionType.NONE),
+                                        new byte[] {1}))
+                .isInstanceOf(FlussRuntimeException.class)
+                .cause()
+                .isInstanceOf(FlussRuntimeException.class)
+                .hasMessageContaining("Memory segment pool closed");
+        assertThat(idleWriter(transcoder)).isNotNull();
+        assertThat(allocator.getAllocatedMemory()).isZero();
+    }
+
+    private void assertTranscoderRemainsUsable(TableInfo table) throws Exception {
+        assertThat(allocator.getAllocatedMemory()).isZero();
+        assertThat(memorySegmentPool.usedPages()).isZero();
+        ArrowWriter writer = idleWriter(transcoder);
+        try (EncodedRecords output = transcode(table, bytes("next"))) {
+            assertRecords(output.records(), table, bytes("next"));
+        }
+        assertThat(idleWriter(transcoder)).isSameAs(writer);
+    }
+
+    private EncodedRecords transcode(TableInfo table, byte[]... values) throws Exception {
+        return transcoder.transcode(0, records(values), table);
+    }
+
+    private static List<Record> records(byte[]... values) {
+        List<Record> records = new ArrayList<>();
+        for (byte[] value : values) {
+            records.add(record(Record.NO_TIMESTAMP, null, value, Collections.emptyList()));
+        }
+        return records;
+    }
+
+    private EncodedRecords transcodeBlocked(
+            TableInfo table, byte[] value, CountDownLatch entered, CountDownLatch finish)
             throws Exception {
-        assertThat(encoder.allocator().getAllocatedMemory()).isZero();
-        assertThat(encoder.writerPool().freeWriters()).hasSize(1);
-        assertThat(encoder.writerPool().freeWriters().values().iterator().next()).hasSize(1);
-        read(
-                encoder.encode(
-                        Collections.singletonList(GenericRow.of(BinaryString.fromString("next"))),
-                        table),
-                table,
-                1,
-                row -> assertThat(row.getString(0).toString()).isEqualTo("next"));
+        List<Record> records =
+                new AbstractList<Record>() {
+                    @Override
+                    public Record get(int index) {
+                        if (index == 0) {
+                            return record(1L, null, value, Collections.emptyList());
+                        }
+                        entered.countDown();
+                        try {
+                            assertThat(finish.await(10, TimeUnit.SECONDS)).isTrue();
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            throw new FlussRuntimeException(e);
+                        }
+                        return record(1L, null, new byte[0], Collections.emptyList());
+                    }
+
+                    @Override
+                    public int size() {
+                        return 2;
+                    }
+                };
+        return transcoder.transcode(0, records, table);
     }
 
-    private static TableInfo valueTable(boolean notNull) {
+    private static ArrowWriter idleWriter(ArrowKafkaRecordTranscoder transcoder) {
+        assertThat(transcoder.writerPool().freeWriters()).hasSize(1);
+        Deque<ArrowWriter> writers =
+                transcoder.writerPool().freeWriters().values().iterator().next();
+        assertThat(writers).hasSize(1);
+        return writers.getFirst();
+    }
+
+    private static TableInfo binaryTable(
+            long tableId, int schemaId, ArrowCompressionType compression) {
         return table(
+                tableId,
+                schemaId,
                 descriptor(
                                 Schema.newBuilder()
-                                        .column("_kafka_value", DataTypes.STRING().copy(!notNull))
+                                        .column("_kafka_value", DataTypes.BYTES())
                                         .build(),
-                                true)
+                                false)
+                        .property(ConfigOptions.TABLE_LOG_ARROW_COMPRESSION_TYPE, compression)
                         .build());
     }
 
-    private static TableInfo envelope(boolean string, int mask) {
+    private static TableInfo valueTable() {
+        return envelope(true, false);
+    }
+
+    private static TableInfo envelope(boolean string, boolean systemFields) {
         Schema.Builder schema = Schema.newBuilder();
-        if ((mask & 2) != 0) {
+        if (systemFields) {
             schema.column("_kafka_headers", DataTypes.MAP(DataTypes.STRING(), DataTypes.BYTES()));
-        }
-        if ((mask & 4) != 0) {
             schema.column("_kafka_rescue", DataTypes.STRING());
         }
         schema.column("_kafka_value", valueType(string));
-        if ((mask & 1) != 0) {
+        if (systemFields) {
             schema.column("_kafka_key", DataTypes.BYTES());
-        }
-        if ((mask & 8) != 0) {
-            schema.column("_kafka_metadata", metadataType(true));
+            schema.column("_kafka_metadata", metadataType());
         }
         return table(descriptor(schema.build(), string).build());
     }
 
-    private static DataType metadataType(boolean nullableTimestamp) {
+    private static DataType metadataType() {
         return DataTypes.ROW(
-                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3).copy(nullableTimestamp)),
+                DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3)),
                 DataTypes.FIELD("timestamp_type", DataTypes.INT()),
                 DataTypes.FIELD("partition", DataTypes.INT()));
-    }
-
-    private static TableInfo metadataTable(
-            boolean string, boolean nullableRow, boolean nullableTimestamp) {
-        return table(
-                descriptor(
-                                Schema.newBuilder()
-                                        .column(
-                                                "_kafka_metadata",
-                                                metadataType(nullableTimestamp).copy(nullableRow))
-                                        .column("_kafka_value", valueType(string))
-                                        .build(),
-                                string)
-                        .build());
     }
 
     private static DataType valueType(boolean string) {
@@ -1165,8 +727,7 @@ class ArrowKafkaRecordTranscoderTest {
 
     private static void assertValue(InternalRow row, int position, boolean string, byte[] value) {
         if (string) {
-            assertThat(row.getString(position).toString())
-                    .isEqualTo(new String(value, StandardCharsets.UTF_8));
+            assertThat(row.getString(position).toBytes()).isEqualTo(value);
         } else {
             assertThat(row.getBytes(position)).isEqualTo(value);
         }
@@ -1190,34 +751,47 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     private static void read(
-            BytesView encoded, TableInfo table, int count, Consumer<InternalRow> verify)
+            EncodedRecords encoded, TableInfo table, int count, Consumer<InternalRow> verify)
             throws Exception {
-        ByteBuf buffer = encoded.getByteBuf();
-        try {
-            LogRecordBatch batch =
-                    MemoryLogRecords.pointToByteBuffer(buffer.nioBuffer())
-                            .batches()
-                            .iterator()
-                            .next();
-            batch.ensureValid();
-            assertThat(batch.schemaId()).isEqualTo((short) table.getSchemaId());
-            assertThat(batch.getRecordCount()).isEqualTo(count);
-            try (LogRecordReadContext context =
-                            LogRecordReadContext.createArrowReadContext(
-                                    table.getRowType(),
-                                    table.getSchemaId(),
-                                    new TestingSchemaGetter(
-                                            new SchemaInfo(
-                                                    table.getSchema(), table.getSchemaId())));
-                    CloseableIterator<LogRecord> records = batch.records(context)) {
-                for (int i = 0; i < count; i++) {
-                    assertThat(records.hasNext()).isTrue();
-                    verify.accept(records.next().getRow());
-                }
-                assertThat(records.hasNext()).isFalse();
+        try (EncodedRecords result = encoded) {
+            readRecords(result.records(), table, count, verify);
+        }
+    }
+
+    private static void assertRecords(MemoryLogRecords output, TableInfo table, byte[]... expected)
+            throws Exception {
+        AtomicInteger next = new AtomicInteger();
+        readRecords(
+                output,
+                table,
+                expected.length,
+                row -> assertThat(row.getBytes(0)).isEqualTo(expected[next.getAndIncrement()]));
+    }
+
+    private static void readRecords(
+            MemoryLogRecords output, TableInfo table, int count, Consumer<InternalRow> verify)
+            throws Exception {
+        assertThat(output.batches()).hasSize(1);
+        LogRecordBatch batch = output.batches().iterator().next();
+        batch.ensureValid();
+        assertThat(batch.schemaId()).isEqualTo((short) table.getSchemaId());
+        assertThat(batch.getRecordCount()).isEqualTo(count);
+        byte attributes =
+                output.getMemorySegment()
+                        .get(output.getPosition() + attributeOffset(batch.magic()));
+        assertThat(attributes & APPEND_ONLY_FLAG_MASK).isEqualTo(APPEND_ONLY_FLAG_MASK);
+        try (LogRecordReadContext context =
+                        LogRecordReadContext.createArrowReadContext(
+                                table.getRowType(),
+                                table.getSchemaId(),
+                                new TestingSchemaGetter(
+                                        new SchemaInfo(table.getSchema(), table.getSchemaId())));
+                CloseableIterator<LogRecord> records = batch.records(context)) {
+            for (int i = 0; i < count; i++) {
+                assertThat(records.hasNext()).isTrue();
+                verify.accept(records.next().getRow());
             }
-        } finally {
-            buffer.release();
+            assertThat(records.hasNext()).isFalse();
         }
     }
 
