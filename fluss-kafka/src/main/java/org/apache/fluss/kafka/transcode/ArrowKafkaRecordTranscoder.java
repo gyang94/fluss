@@ -44,7 +44,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final FlussArrowRecordEncoder arrowRecordEncoder;
     private final KafkaCompiledWritePlanCache writePlanCache = new KafkaCompiledWritePlanCache();
 
-    /** Creates a transcoder with the default bounded encoder. */
+    /** Creates a transcoder with the default encoder. */
     public ArrowKafkaRecordTranscoder() {
         this(new FlussArrowRecordEncoder());
     }

@@ -99,7 +99,7 @@ class FlussArrowRecordEncoderTest {
         try (FlussArrowRecordEncoder encoder = new FlussArrowRecordEncoder()) {
             allocator = encoder.allocator();
             pool = encoder.writerPool();
-            assertThat(allocator.getLimit()).isEqualTo(Integer.MAX_VALUE);
+            assertThat(allocator.getLimit()).isEqualTo(Long.MAX_VALUE);
             first = encode(encoder, table, value);
             ArrowWriter writer = idleWriter(encoder);
             long epoch = writer.getEpoch();

@@ -59,7 +59,7 @@ import static org.apache.fluss.utils.Preconditions.checkState;
 public final class FlussArrowRecordEncoder implements AutoCloseable {
 
     private static final int PAGE_SIZE = 4096;
-    private static final long DEFAULT_ARROW_MEMORY_LIMIT = Integer.MAX_VALUE;
+    private static final long DEFAULT_ARROW_MEMORY_LIMIT = Long.MAX_VALUE;
 
     private final long arrowMemoryLimit;
     private final BufferAllocator allocator;
@@ -69,7 +69,7 @@ public final class FlussArrowRecordEncoder implements AutoCloseable {
     @GuardedBy("lifecycleLock")
     private boolean closed;
 
-    /** Creates an encoder with an {@link Integer#MAX_VALUE} byte limit on Arrow allocations. */
+    /** Creates an encoder with a {@link Long#MAX_VALUE} byte limit, as in the Put KV path. */
     public FlussArrowRecordEncoder() {
         this(DEFAULT_ARROW_MEMORY_LIMIT);
     }
