@@ -21,24 +21,30 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
+import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
+import org.apache.fluss.kafka.transcode.EncodedRecords;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
-import org.apache.fluss.memory.MemorySegment;
+import org.apache.fluss.memory.LazyMemorySegmentPool;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
-import org.apache.fluss.record.bytesview.BytesView;
-import org.apache.fluss.record.bytesview.MemorySegmentBytesView;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
+import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
+import org.apache.fluss.rpc.messages.ProduceLogRequest;
+import org.apache.fluss.rpc.messages.ProduceLogResponse;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
 import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
 import org.apache.fluss.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateHandler;
 import org.apache.fluss.types.DataTypes;
+import org.apache.fluss.utils.IOUtils;
 
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.message.ProduceRequestData;
@@ -59,6 +65,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -130,8 +137,9 @@ class KafkaProtocolPluginTest {
         TrackingTranscoder transcoder =
                 new TrackingTranscoder() {
                     @Override
-                    public BytesView transcode(
-                            int partitionId, List<Record> records, TableInfo table) {
+                    public EncodedRecords transcode(
+                            int partitionId, List<Record> records, TableInfo table)
+                            throws Exception {
                         converting.countDown();
                         boolean done = false;
                         while (!done) {
@@ -143,7 +151,7 @@ class KafkaProtocolPluginTest {
                             }
                         }
                         assertThat(closeCalls).isZero();
-                        return new MemorySegmentBytesView(MemorySegment.wrap(new byte[] {1}), 0, 1);
+                        return arrow.transcode(partitionId, records, table);
                     }
                 };
         KafkaProtocolPlugin plugin = new KafkaProtocolPlugin(() -> transcoder);
@@ -164,6 +172,59 @@ class KafkaProtocolPluginTest {
             assertThat(transcoder.closeCalls).isEqualTo(1);
         } finally {
             releaseConversion.countDown();
+            plugin.closeAsync().get(10, TimeUnit.SECONDS);
+            request.releaseBuffer();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testCloseWaitsForNativeAppend(boolean failAppend) throws Exception {
+        TrackingTranscoder transcoder =
+                new TrackingTranscoder() {
+                    @Override
+                    public EncodedRecords transcode(
+                            int partitionId, List<Record> records, TableInfo table)
+                            throws Exception {
+                        return arrow.transcode(partitionId, records, table);
+                    }
+                };
+        CompletableFuture<ProduceLogResponse> appended = new CompletableFuture<>();
+        CountDownLatch submitted = new CountDownLatch(1);
+        ProduceMetadataService service =
+                new ProduceMetadataService() {
+                    @Override
+                    public CompletableFuture<ProduceLogResponse> produceLog(
+                            ProduceLogRequest request) {
+                        submitted.countDown();
+                        return appended;
+                    }
+                };
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin(() -> transcoder);
+        plugin.setup(new Configuration());
+        KafkaRequestHandler handler = (KafkaRequestHandler) plugin.createRequestHandler(service);
+        KafkaRequest request = produceRequest();
+        try {
+            handler.processRequest(request);
+            assertThat(submitted.await(10, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture<Void> closed = plugin.closeAsync();
+            assertThatThrownBy(() -> closed.get(100, TimeUnit.MILLISECONDS))
+                    .isInstanceOf(TimeoutException.class);
+            assertThat(transcoder.closeCalls).isZero();
+            if (failAppend) {
+                appended.completeExceptionally(new IOException("append failed"));
+            } else {
+                ProduceLogResponse response = new ProduceLogResponse();
+                response.addAllBucketsResps(
+                        Collections.singletonList(
+                                new PbProduceLogRespForBucket().setBucketId(0).setBaseOffset(0L)));
+                appended.complete(response);
+            }
+            closed.get(10, TimeUnit.SECONDS);
+            request.future().get(10, TimeUnit.SECONDS);
+            assertThat(transcoder.closeCalls).isEqualTo(1);
+        } finally {
+            appended.completeExceptionally(new IOException("test cleanup"));
             plugin.closeAsync().get(10, TimeUnit.SECONDS);
             request.releaseBuffer();
         }
@@ -203,24 +264,32 @@ class KafkaProtocolPluginTest {
     }
 
     private static class TrackingTranscoder implements KafkaRecordTranscoder {
+        private final BufferAllocator allocator = BufferAllocatorUtil.createBufferAllocator(null);
+        private final LazyMemorySegmentPool memorySegmentPool =
+                LazyMemorySegmentPool.createServerBufferPool(new Configuration());
+        protected final ArrowKafkaRecordTranscoder arrow =
+                new ArrowKafkaRecordTranscoder(allocator, memorySegmentPool);
         protected volatile int closeCalls;
         private boolean failClose;
 
         @Override
-        public BytesView transcode(int partitionId, List<Record> records, TableInfo table) {
+        public EncodedRecords transcode(int partitionId, List<Record> records, TableInfo table)
+                throws Exception {
             throw new AssertionError("Unexpected conversion");
         }
 
         @Override
-        public void close() throws IOException {
+        public void close() throws Exception {
             closeCalls++;
+            assertThat(memorySegmentPool.usedPages()).isZero();
+            IOUtils.closeAll(arrow, allocator, memorySegmentPool);
             if (failClose) {
                 throw new IOException("test close failure");
             }
         }
     }
 
-    private static final class ProduceMetadataService extends TestingTabletGatewayService {
+    private static class ProduceMetadataService extends TestingTabletGatewayService {
         @Override
         public CompletableFuture<GetTableInfoResponse> getTableInfo(GetTableInfoRequest request) {
             TableDescriptor descriptor =

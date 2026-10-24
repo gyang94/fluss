@@ -28,12 +28,12 @@ import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
-import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.rpc.protocol.RequestType;
+import org.apache.fluss.utils.IOUtils;
 
 import javax.annotation.Nullable;
 
@@ -47,6 +47,8 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
     private final KafkaApiRegistry registry;
     private final KafkaRequestDispatcher dispatcher;
     private final KafkaRecordTranscoder transcoder;
+    private final GatewayKafkaProduceBackend produceBackend;
+    private final @Nullable KafkaProduceResources resources;
 
     /** Creates a Kafka request handler with the capabilities provided by a TabletServer. */
     public KafkaRequestHandler(Configuration conf, RpcGatewayService service) {
@@ -58,7 +60,15 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
             Configuration conf,
             RpcGatewayService service,
             @Nullable KafkaProduceConversionExecutor conversionExecutor) {
-        this(conf, service, conversionExecutor, new ArrowKafkaRecordTranscoder());
+        this(conf, service, conversionExecutor, new KafkaProduceResources(conf));
+    }
+
+    private KafkaRequestHandler(
+            Configuration conf,
+            RpcGatewayService service,
+            @Nullable KafkaProduceConversionExecutor conversionExecutor,
+            KafkaProduceResources resources) {
+        this(conf, service, conversionExecutor, resources.createTranscoder(), resources);
     }
 
     KafkaRequestHandler(
@@ -66,8 +76,25 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
             RpcGatewayService service,
             @Nullable KafkaProduceConversionExecutor conversionExecutor,
             KafkaRecordTranscoder transcoder) {
+        this(conf, service, conversionExecutor, transcoder, null);
+    }
+
+    private KafkaRequestHandler(
+            Configuration conf,
+            RpcGatewayService service,
+            @Nullable KafkaProduceConversionExecutor conversionExecutor,
+            KafkaRecordTranscoder transcoder,
+            @Nullable KafkaProduceResources resources) {
         this.transcoder = checkNotNull(transcoder);
+        this.resources = resources;
         KafkaTopicMapper topicMapper = new KafkaTopicMapper(checkNotNull(conf));
+        this.produceBackend =
+                new GatewayKafkaProduceBackend(
+                        service,
+                        (TabletServerGateway) service,
+                        topicMapper,
+                        transcoder,
+                        conversionExecutor);
         this.registry =
                 new KafkaApiRegistry(
                         Arrays.asList(
@@ -75,13 +102,7 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
                                 new MetadataHandler(
                                         new GatewayKafkaMetadataBackend(service, topicMapper),
                                         topicMapper),
-                                new ProduceHandler(
-                                        new GatewayKafkaProduceBackend(
-                                                service,
-                                                (TabletServerGateway) service,
-                                                topicMapper,
-                                                transcoder,
-                                                conversionExecutor))));
+                                new ProduceHandler(produceBackend)));
         this.dispatcher = new KafkaRequestDispatcher(registry, new KafkaErrorMapper());
     }
 
@@ -104,10 +125,11 @@ public class KafkaRequestHandler implements RequestHandler<KafkaRequest>, AutoCl
                         });
     }
 
-    /** Releases conversion resources after request processing and conversion workers stop. */
+    /** Waits for native appends before releasing conversion resources. */
     @Override
     public void close() throws Exception {
-        transcoder.close();
+        produceBackend.closeAsync().get();
+        IOUtils.closeAll(transcoder, resources);
     }
 
     private KafkaApiRegistry apiRegistry() {

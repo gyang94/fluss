@@ -21,7 +21,6 @@ import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceConversionExecutor;
-import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
@@ -44,12 +43,13 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
     private final Supplier<KafkaRecordTranscoder> transcoderFactory;
     private final List<KafkaRequestHandler> requestHandlers = new ArrayList<>();
     private Configuration conf;
+    private KafkaProduceResources resources;
     private KafkaProduceConversionExecutor conversionExecutor;
     private CompletableFuture<Void> closeFuture;
 
     /** Creates a plugin that owns the conversion resources of its request handlers. */
     public KafkaProtocolPlugin() {
-        this(ArrowKafkaRecordTranscoder::new);
+        this(null);
     }
 
     @VisibleForTesting
@@ -102,7 +102,11 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
                                     conf.get(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS)));
             conversionExecutor = new KafkaProduceConversionExecutor(threads, queueCapacity);
         }
-        KafkaRecordTranscoder transcoder = transcoderFactory.get();
+        if (transcoderFactory == null && resources == null) {
+            resources = new KafkaProduceResources(conf);
+        }
+        KafkaRecordTranscoder transcoder =
+                transcoderFactory == null ? resources.createTranscoder() : transcoderFactory.get();
         try {
             KafkaRequestHandler handler =
                     new KafkaRequestHandler(conf, service, conversionExecutor, transcoder);
@@ -121,10 +125,12 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin {
                     conversionExecutor == null
                             ? CompletableFuture.completedFuture(null)
                             : conversionExecutor.closeAsync();
-            // Writers may still be borrowed by a conversion until its worker terminates.
+            // Handlers drain native acknowledgements before releasing writers and shared memory.
+            List<AutoCloseable> resourcesToClose = new ArrayList<>(requestHandlers);
+            resourcesToClose.add(resources);
             closeFuture =
                     FutureUtils.runAfterwardsAsync(
-                            workersClosed, () -> IOUtils.closeAll(requestHandlers));
+                            workersClosed, () -> IOUtils.closeAll(resourcesToClose));
         }
         return closeFuture;
     }

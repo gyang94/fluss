@@ -28,13 +28,14 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaResolver;
+import org.apache.fluss.kafka.transcode.EncodedRecords;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
-import org.apache.fluss.kafka.transcode.KafkaTopicWritePlan;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
-import org.apache.fluss.record.bytesview.BytesView;
+import org.apache.fluss.record.MemoryLogRecords;
+import org.apache.fluss.record.bytesview.MemorySegmentBytesView;
 import org.apache.fluss.rpc.RpcGatewayService;
 import org.apache.fluss.rpc.gateway.TabletServerGateway;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
@@ -55,8 +56,10 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -71,6 +74,8 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 @Internal
 public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
+    private final Set<CompletableFuture<Void>> pendingWrites = new HashSet<>();
+    private CompletableFuture<Void> closeFuture;
     private final RpcGatewayService service;
     private final TabletServerGateway gateway;
     private final KafkaTopicMapper topicMapper;
@@ -104,13 +109,46 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     @Override
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
-        // The request owns the payloads only until write returns. Metadata lookup can also
-        // complete asynchronously when no conversion executor is configured.
-        KafkaProduceCommand ownedCommand = copyCommand(command);
-        if (conversionExecutor != null) {
-            return writePartitions(ownedCommand);
+        CompletableFuture<Void> finished = new CompletableFuture<>();
+        synchronized (pendingWrites) {
+            if (closeFuture != null) {
+                throw new RejectedExecutionException("Kafka Produce backend is closed.");
+            }
+            pendingWrites.add(finished);
         }
-        return writeTopics(ownedCommand);
+        try {
+            // The request owns the payloads only until write returns. Metadata lookup can also
+            // complete asynchronously when no conversion executor is configured.
+            KafkaProduceCommand ownedCommand = copyCommand(command);
+            CompletableFuture<KafkaProduceResult> result =
+                    conversionExecutor != null
+                            ? writePartitions(ownedCommand)
+                            : writeTopics(ownedCommand);
+            // Caller cancellation must not release resources still held by native append.
+            return result.whenComplete((ignored, failure) -> finishWrite(finished))
+                    .thenApply(value -> value);
+        } catch (RuntimeException | Error failure) {
+            finishWrite(finished);
+            throw failure;
+        }
+    }
+
+    /** Stops admission and waits until accepted writes have released their encoded records. */
+    public CompletableFuture<Void> closeAsync() {
+        synchronized (pendingWrites) {
+            if (closeFuture == null) {
+                closeFuture =
+                        CompletableFuture.allOf(pendingWrites.toArray(new CompletableFuture[0]));
+            }
+            return closeFuture;
+        }
+    }
+
+    private void finishWrite(CompletableFuture<Void> finished) {
+        synchronized (pendingWrites) {
+            pendingWrites.remove(finished);
+            finished.complete(null);
+        }
     }
 
     private static KafkaProduceCommand copyCommand(KafkaProduceCommand command) {
@@ -256,13 +294,14 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             throw new TableNotExistException(
                     "Table " + tableInfo.getTablePath() + " is not enabled for Kafka.");
         }
-        KafkaTopicWritePlan writePlan = transcoder.prepare(tableInfo);
+        schemaResolver.resolve(tableInfo.toTableDescriptor());
         ProduceLogRequest request =
                 new ProduceLogRequest()
                         .setTableId(tableInfo.getTableId())
                         .setAcks(command.acks())
                         .setTimeoutMs(command.timeoutMs());
         Map<Integer, PartitionResult> failures = new HashMap<>();
+        List<EncodedRecords> encoded = new ArrayList<>();
         for (PartitionWrite partition : topic.partitions()) {
             if (partition.partitionId() < 0
                     || partition.partitionId() >= tableInfo.getNumBuckets()) {
@@ -276,12 +315,18 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                 continue;
             }
             try {
-                BytesView records =
+                EncodedRecords converted =
                         transcoder.transcode(
-                                partition.partitionId(), partition.records(), writePlan);
+                                partition.partitionId(), partition.records(), tableInfo);
+                encoded.add(converted);
+                MemoryLogRecords records = converted.records();
                 request.addBucketsReq()
                         .setBucketId(partition.partitionId())
-                        .setRecordsBytesView(records);
+                        .setRecordsBytesView(
+                                new MemorySegmentBytesView(
+                                        records.getMemorySegment(),
+                                        records.getPosition(),
+                                        records.sizeInBytes()));
             } catch (Exception failure) {
                 failures.put(
                         partition.partitionId(), failedPartition(partition.partitionId(), failure));
@@ -298,12 +343,15 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             }
             setCurrentSession(command);
             CompletableFuture<ProduceLogResponse> appended = gateway.produceLog(request);
-            return appended.handle(
-                    (response, failure) ->
-                            failure == null
-                                    ? toTopicResult(topic, response, failures)
-                                    : failedAppend(topic, failures, failure));
+            return appended.whenComplete(
+                            (ignored, failure) -> encoded.forEach(EncodedRecords::deallocate))
+                    .handle(
+                            (response, failure) ->
+                                    failure == null
+                                            ? toTopicResult(topic, response, failures)
+                                            : failedAppend(topic, failures, failure));
         } catch (Exception failure) {
+            encoded.forEach(EncodedRecords::deallocate);
             return CompletableFuture.completedFuture(failedAppend(topic, failures, failure));
         }
     }

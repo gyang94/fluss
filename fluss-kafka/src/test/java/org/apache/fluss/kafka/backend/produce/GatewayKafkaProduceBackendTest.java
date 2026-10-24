@@ -32,22 +32,23 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
 import org.apache.fluss.kafka.transcode.ArrowKafkaRecordTranscoder;
+import org.apache.fluss.kafka.transcode.EncodedRecords;
+import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.kafka.transcode.KafkaRecordTranscoder;
-import org.apache.fluss.kafka.transcode.KafkaTopicWritePlan;
-import org.apache.fluss.memory.MemorySegment;
+import org.apache.fluss.memory.LazyMemorySegmentPool;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
-import org.apache.fluss.record.bytesview.BytesView;
-import org.apache.fluss.record.bytesview.MemorySegmentBytesView;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.messages.GetTableInfoRequest;
 import org.apache.fluss.rpc.messages.GetTableInfoResponse;
 import org.apache.fluss.rpc.messages.PbProduceLogRespForBucket;
 import org.apache.fluss.rpc.messages.ProduceLogRequest;
 import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.IOUtils;
 
@@ -74,17 +75,28 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 class GatewayKafkaProduceBackendTest {
 
+    private final BufferAllocator allocator = BufferAllocatorUtil.createBufferAllocator(null);
+    private final LazyMemorySegmentPool memorySegmentPool =
+            LazyMemorySegmentPool.createServerBufferPool(new Configuration());
     private final List<ArrowKafkaRecordTranscoder> transcoders = new ArrayList<>();
 
     private ArrowKafkaRecordTranscoder createTranscoder() {
-        ArrowKafkaRecordTranscoder transcoder = new ArrowKafkaRecordTranscoder();
+        ArrowKafkaRecordTranscoder transcoder =
+                new ArrowKafkaRecordTranscoder(allocator, memorySegmentPool);
         transcoders.add(transcoder);
         return transcoder;
     }
 
     @AfterEach
     void closeTranscoders() throws Exception {
-        IOUtils.closeAll(transcoders);
+        try {
+            assertThat(memorySegmentPool.usedPages()).isZero();
+        } finally {
+            List<AutoCloseable> resources = new ArrayList<>(transcoders);
+            resources.add(allocator);
+            resources.add(memorySegmentPool);
+            IOUtils.closeAll(resources);
+        }
     }
 
     @ParameterizedTest
@@ -101,10 +113,11 @@ class GatewayKafkaProduceBackendTest {
                         service,
                         service,
                         mapper(),
-                        (partitionId, records, table) -> {
-                            seen.addAll(records);
-                            return arrow.transcode(partitionId, records, table);
-                        },
+                        (TestingTranscoder)
+                                (partitionId, records, table) -> {
+                                    seen.addAll(records);
+                                    return arrow.transcode(partitionId, records, table);
+                                },
                         executor);
         ByteBuffer key = ByteBuffer.allocateDirect(4);
         key.put(new byte[] {0, 1, 2, 0});
@@ -270,10 +283,11 @@ class GatewayKafkaProduceBackendTest {
                         service,
                         service,
                         mapper(),
-                        (partitionId, records, table) -> {
-                            seen.addAll(records);
-                            return transcoder.transcode(partitionId, records, table);
-                        });
+                        (TestingTranscoder)
+                                (partitionId, records, table) -> {
+                                    seen.addAll(records);
+                                    return transcoder.transcode(partitionId, records, table);
+                                });
         Record nullRecord = nullValue(0).records().get(0);
         Record empty = new Record(1L, null, ByteBuffer.allocate(0), Collections.emptyList());
         Record valid = good(0).records().get(0);
@@ -320,6 +334,32 @@ class GatewayKafkaProduceBackendTest {
         assertThat(result.join().topics().get(0).partitions().get(0).baseOffset()).isEqualTo(17L);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"success", "failure", "cancel"})
+    void testPooledOutputLivesUntilNativeAppendCompletes(String outcome) throws Exception {
+        TestingProduceService service = new TestingProduceService();
+        service.pendingAppend = new CompletableFuture<>();
+        GatewayKafkaProduceBackend backend = backend(service);
+        CompletableFuture<KafkaProduceResult> result =
+                backend.write(command((short) -1, topic("topic", good(0), good(1))));
+        assertThat(memorySegmentPool.usedPages()).isPositive();
+        assertThat(result).isNotDone();
+        if (outcome.equals("cancel")) {
+            result.cancel(false);
+        }
+        CompletableFuture<Void> closed = backend.closeAsync();
+        assertThat(closed).isNotDone();
+        assertThat(memorySegmentPool.usedPages()).isPositive();
+        if (outcome.equals("failure")) {
+            service.pendingAppend.completeExceptionally(new IllegalStateException("append failed"));
+        } else {
+            service.pendingAppend.complete(success(0));
+        }
+        closed.get(10, TimeUnit.SECONDS);
+        assertThat(memorySegmentPool.usedPages()).isZero();
+        assertThat(backend.closeAsync()).isSameAs(closed);
+    }
+
     @Test
     void testMapsSynchronousAppendFailure() throws Exception {
         TestingProduceService service = new TestingProduceService();
@@ -342,12 +382,21 @@ class GatewayKafkaProduceBackendTest {
                                         null,
                                         ByteBuffer.wrap(new byte[] {(byte) 0xff}),
                                         Collections.emptyList())));
+        ArrowKafkaRecordTranscoder arrow = createTranscoder();
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(
+                        service,
+                        service,
+                        mapper(),
+                        (TestingTranscoder)
+                                (partitionId, records, table) -> {
+                                    if (partitionId == 0) {
+                                        throw new KafkaRecordEncodingException("invalid record");
+                                    }
+                                    return arrow.transcode(partitionId, records, table);
+                                });
         KafkaProduceResult result =
-                backend(service)
-                        .write(
-                                command(
-                                        (short) 1,
-                                        topic("kafka.topic", malformed, good(1), good(8))))
+                backend.write(command((short) 1, topic("kafka.topic", malformed, good(1), good(8))))
                         .join();
         assertErrors(result, Errors.INVALID_RECORD, Errors.NONE, Errors.UNKNOWN_TOPIC_OR_PARTITION);
         assertThat(service.append.getBucketsReqsList()).hasSize(1);
@@ -449,10 +498,11 @@ class GatewayKafkaProduceBackendTest {
                         service,
                         service,
                         mapper(),
-                        (partitionId, records, tableInfo) -> {
-                            transcodedPaths.add(tableInfo.getTablePath());
-                            return transcoder.transcode(partitionId, records, tableInfo);
-                        });
+                        (TestingTranscoder)
+                                (partitionId, records, tableInfo) -> {
+                                    transcodedPaths.add(tableInfo.getTablePath());
+                                    return transcoder.transcode(partitionId, records, tableInfo);
+                                });
 
         KafkaProduceResult result =
                 backend.write(
@@ -504,43 +554,27 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testReusesPlansButAlwaysRefreshesMetadataAndValidatesChangedContract() throws Exception {
+    void testReusesSnapshotsButAlwaysRefreshesMetadataAndValidatesChangedContract()
+            throws Exception {
         TestingProduceService service = new TestingProduceService();
         ArrowKafkaRecordTranscoder arrow = createTranscoder();
-        List<KafkaTopicWritePlan> prepared = new ArrayList<>();
-        List<KafkaTopicWritePlan> converted = new ArrayList<>();
+        List<TableInfo> prepared = new ArrayList<>();
+        List<TableInfo> converted = new ArrayList<>();
         List<Integer> convertedPartitions = new ArrayList<>();
         KafkaRecordTranscoder transcoder =
-                new KafkaRecordTranscoder() {
-                    @Override
-                    public KafkaTopicWritePlan prepare(TableInfo tableInfo) {
-                        KafkaTopicWritePlan plan = arrow.prepare(tableInfo);
-                        prepared.add(plan);
-                        return plan;
-                    }
-
-                    @Override
-                    public BytesView transcode(
-                            int partitionId, List<Record> records, TableInfo tableInfo)
-                            throws Exception {
-                        return arrow.transcode(partitionId, records, tableInfo);
-                    }
-
-                    @Override
-                    public BytesView transcode(
-                            int partitionId, List<Record> records, KafkaTopicWritePlan plan)
-                            throws Exception {
-                        converted.add(plan);
-                        convertedPartitions.add(partitionId);
-                        return arrow.transcode(partitionId, records, plan);
-                    }
-                };
+                (TestingTranscoder)
+                        (partitionId, records, tableInfo) -> {
+                            prepared.add(tableInfo);
+                            converted.add(tableInfo);
+                            convertedPartitions.add(partitionId);
+                            return arrow.transcode(partitionId, records, tableInfo);
+                        };
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(service, service, mapper(), transcoder);
         backend.write(command((short) 1, topic("kafka.topic", good(0), good(1)))).join();
         backend.write(command((short) 1, topic("kafka.topic", good(0)))).join();
         assertThat(service.metadataPaths).hasSize(2);
-        assertThat(prepared).hasSize(2);
+        assertThat(prepared).hasSize(3);
         assertThat(prepared.get(1)).isSameAs(prepared.get(0));
         assertThat(converted).containsExactly(prepared.get(0), prepared.get(0), prepared.get(0));
         assertThat(convertedPartitions).containsExactly(0, 1, 0);
@@ -571,19 +605,29 @@ class GatewayKafkaProduceBackendTest {
         CountDownLatch firstConverting = new CountDownLatch(1);
         CountDownLatch secondConverted = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
+        ArrowKafkaRecordTranscoder arrow = createTranscoder();
+        java.util.Map<Integer, byte[]> encodedBytes =
+                new java.util.concurrent.ConcurrentHashMap<>();
         KafkaRecordTranscoder transcoder =
-                (partitionId, records, table) -> {
-                    ByteBuffer buffer = records.get(0).value();
-                    byte[] value = new byte[buffer.remaining()];
-                    buffer.get(value);
-                    if (value[0] == 1) {
-                        firstConverting.countDown();
-                        assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
-                    } else {
-                        secondConverted.countDown();
-                    }
-                    return new MemorySegmentBytesView(MemorySegment.wrap(value), 0, value.length);
-                };
+                (TestingTranscoder)
+                        (partitionId, records, table) -> {
+                            ByteBuffer buffer = records.get(0).value();
+                            byte[] value = new byte[buffer.remaining()];
+                            buffer.get(value);
+                            if (value[0] == 1) {
+                                firstConverting.countDown();
+                                assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
+                            } else {
+                                secondConverted.countDown();
+                            }
+                            EncodedRecords encoded = arrow.transcode(partitionId, records, table);
+                            byte[] bytes = new byte[encoded.records().sizeInBytes()];
+                            encoded.records()
+                                    .getMemorySegment()
+                                    .get(encoded.records().getPosition(), bytes);
+                            encodedBytes.put((int) value[0], bytes);
+                            return encoded;
+                        };
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(service, service, mapper(), transcoder, executor);
         try {
@@ -598,8 +642,8 @@ class GatewayKafkaProduceBackendTest {
             releaseFirst.countDown();
             assertThat(service.appended.await(10, TimeUnit.SECONDS)).isTrue();
             assertThat(service.appends)
-                    .extracting(request -> request.getBucketsReqsList().get(0).getRecords()[0])
-                    .containsExactly((byte) 1, (byte) 2);
+                    .extracting(request -> request.getBucketsReqsList().get(0).getRecords())
+                    .containsExactly(encodedBytes.get(1), encodedBytes.get(2));
             assertThat(first).isNotDone();
             assertThat(second).isNotDone();
             service.pendingAppend.complete(success(0));
@@ -622,13 +666,14 @@ class GatewayKafkaProduceBackendTest {
         CountDownLatch releaseFirst = new CountDownLatch(1);
         ArrowKafkaRecordTranscoder arrow = createTranscoder();
         KafkaRecordTranscoder transcoder =
-                (partitionId, records, table) -> {
-                    if (table.getTableId() == 42L && partitionId == 0) {
-                        firstConverting.countDown();
-                        assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
-                    }
-                    return arrow.transcode(partitionId, records, table);
-                };
+                (TestingTranscoder)
+                        (partitionId, records, table) -> {
+                            if (table.getTableId() == 42L && partitionId == 0) {
+                                firstConverting.countDown();
+                                assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
+                            }
+                            return arrow.transcode(partitionId, records, table);
+                        };
         GatewayKafkaProduceBackend backend =
                 new GatewayKafkaProduceBackend(service, service, mapper(), transcoder, executor);
         try {
@@ -668,10 +713,11 @@ class GatewayKafkaProduceBackendTest {
                         service,
                         service,
                         mapper(),
-                        (partitionId, records, table) -> {
-                            snapshots.add(table);
-                            return transcoder.transcode(partitionId, records, table);
-                        },
+                        (TestingTranscoder)
+                                (partitionId, records, table) -> {
+                                    snapshots.add(table);
+                                    return transcoder.transcode(partitionId, records, table);
+                                },
                         executor);
         KafkaProduceCommand command = command((short) 1, topic("kafka.topic", good(0)));
         try {
@@ -858,7 +904,8 @@ class GatewayKafkaProduceBackendTest {
     }
 
     @Test
-    void testPropertyOnlyChangesRejectInvalidContractsAndRecompileRecoveredPlan() throws Exception {
+    void testPropertyOnlyChangesRejectInvalidContractsAndRefreshRecoveredSnapshot()
+            throws Exception {
         TestingProduceService service = new TestingProduceService();
         RecordingTranscoder transcoder = new RecordingTranscoder();
         GatewayKafkaProduceBackend backend =
@@ -911,7 +958,7 @@ class GatewayKafkaProduceBackendTest {
                 Errors.NONE);
         assertThat(transcoder.prepared).hasSize(2);
         assertThat(transcoder.prepared.get(1)).isNotSameAs(transcoder.prepared.get(0));
-        assertThat(transcoder.prepared.get(1).tableInfo().getSchemaId()).isEqualTo(1);
+        assertThat(transcoder.prepared.get(1).getSchemaId()).isEqualTo(1);
         assertThat(service.appends).hasSize(2);
         assertThat(service.metadataPaths).hasSize(6);
     }
@@ -1077,20 +1124,19 @@ class GatewayKafkaProduceBackendTest {
         assertThat(service.writeChecks).isZero();
     }
 
-    private final class RecordingTranscoder implements KafkaRecordTranscoder {
+    private interface TestingTranscoder extends KafkaRecordTranscoder {
+        @Override
+        default void close() {}
+    }
+
+    private final class RecordingTranscoder implements TestingTranscoder {
         private final ArrowKafkaRecordTranscoder arrow = createTranscoder();
-        private final List<KafkaTopicWritePlan> prepared = new ArrayList<>();
+        private final List<TableInfo> prepared = new ArrayList<>();
 
         @Override
-        public KafkaTopicWritePlan prepare(TableInfo table) {
-            KafkaTopicWritePlan plan = arrow.prepare(table);
-            prepared.add(plan);
-            return plan;
-        }
-
-        @Override
-        public BytesView transcode(int partitionId, List<Record> records, TableInfo table)
+        public EncodedRecords transcode(int partitionId, List<Record> records, TableInfo table)
                 throws Exception {
+            prepared.add(table);
             return arrow.transcode(partitionId, records, table);
         }
     }
@@ -1231,8 +1277,8 @@ class GatewayKafkaProduceBackendTest {
             assertThat(currentListenerName()).isEqualTo("KAFKA");
             assertThat(currentSession().getInetAddress())
                     .isEqualTo(InetAddress.getLoopbackAddress());
-            append = request;
-            appends.add(request);
+            append = new ProduceLogRequest().copyFrom(request);
+            appends.add(append);
             if (throwAppend) {
                 throw new IllegalStateException("append failed");
             }
