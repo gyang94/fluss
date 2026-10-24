@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
+import org.apache.fluss.exception.FlussRuntimeException;
 import org.apache.fluss.memory.UnmanagedPagedOutputView;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.record.ChangeType;
@@ -27,15 +28,41 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.arrow.ArrowWriter;
 import org.apache.fluss.row.arrow.ArrowWriterPool;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocator;
-import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.RootAllocator;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.BufferAllocatorUtil;
+import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.OutOfMemoryException;
+
+import javax.annotation.concurrent.ThreadSafe;
 
 import java.util.List;
 
-/** Encodes assembled physical Fluss rows into one native Arrow log batch. */
+import static org.apache.fluss.utils.Preconditions.checkArgument;
+
+/**
+ * Encodes borrowed rows synchronously into independently owned Arrow log batches.
+ *
+ * <p>Each batch creates and closes its own allocator and writer pool. The allocator limit covers
+ * Arrow vectors and compression buffers. Input data, Java objects and independently owned heap
+ * output pages are outside this limit. Concurrent batches have independent allocators.
+ */
 @Internal
+@ThreadSafe
 public final class FlussArrowRecordEncoder {
 
-    private static final int INITIAL_PAGE_SIZE = 4096;
+    private static final int PAGE_SIZE = 4096;
+    private static final long DEFAULT_ARROW_MEMORY_LIMIT = Integer.MAX_VALUE;
+
+    private final long arrowMemoryLimit;
+
+    /** Creates an encoder with an {@link Integer#MAX_VALUE} byte limit on Arrow allocations. */
+    public FlussArrowRecordEncoder() {
+        this(DEFAULT_ARROW_MEMORY_LIMIT);
+    }
+
+    /** Creates an encoder with a limit on each batch's Arrow allocations, in bytes. */
+    public FlussArrowRecordEncoder(long arrowMemoryLimit) {
+        checkArgument(arrowMemoryLimit > 0, "Arrow memory limit must be positive.");
+        this.arrowMemoryLimit = arrowMemoryLimit;
+    }
 
     /** Encodes all rows using the table's current schema ID and Arrow compression settings. */
     public BytesView encode(List<GenericRow> rows, TableInfo tableInfo) throws Exception {
@@ -49,12 +76,14 @@ public final class FlussArrowRecordEncoder {
     }
 
     BytesView encodeStreaming(RowSource rowSource, TableInfo tableInfo) throws Exception {
-        try (BufferAllocator allocator = new RootAllocator(Integer.MAX_VALUE);
+        try (BufferAllocator allocator = BufferAllocatorUtil.createBufferAllocator(null);
                 ArrowWriterPool provider = new ArrowWriterPool(allocator)) {
+            allocator.setLimit(arrowMemoryLimit);
             ArrowWriter writer =
                     provider.getOrCreateWriter(
                             tableInfo.getTableId(),
                             tableInfo.getSchemaId(),
+                            // Keep the whole conversion in one batch, as in the Put KV WAL path.
                             Integer.MAX_VALUE,
                             tableInfo.getRowType(),
                             tableInfo.getTableConfig().getArrowCompressionInfo());
@@ -64,16 +93,21 @@ public final class FlussArrowRecordEncoder {
                         MemoryLogRecordsArrowBuilder.builder(
                                 tableInfo.getSchemaId(),
                                 writer,
-                                new UnmanagedPagedOutputView(INITIAL_PAGE_SIZE),
+                                new UnmanagedPagedOutputView(PAGE_SIZE),
                                 true,
                                 null);
                 rowSource.produce(row -> builder.append(ChangeType.APPEND_ONLY, row));
-                // The output view owns heap pages. The result remains valid after the Arrow
-                // writer and allocator close, including across asynchronous append completion.
+                // The result owns heap pages and remains valid after these resources close.
                 return builder.build();
             } finally {
                 writer.recycle(epoch);
             }
+        } catch (OutOfMemoryException e) {
+            throw new FlussRuntimeException(
+                    "Kafka transcode Arrow memory limit exceeded (allocator limit "
+                            + arrowMemoryLimit
+                            + " bytes).",
+                    e);
         }
     }
 

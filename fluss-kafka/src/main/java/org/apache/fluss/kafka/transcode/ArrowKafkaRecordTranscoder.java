@@ -35,13 +35,24 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
+import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
 /** Converts binary/string Kafka values and fixed system columns into owned Arrow log bytes. */
 @Internal
 public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
     private final KafkaTopicSchemaResolver schemaResolver = new KafkaTopicSchemaResolver();
-    private final FlussArrowRecordEncoder arrowRecordEncoder = new FlussArrowRecordEncoder();
+    private final FlussArrowRecordEncoder arrowRecordEncoder;
     private final KafkaCompiledWritePlanCache writePlanCache = new KafkaCompiledWritePlanCache();
+
+    /** Creates a transcoder with the default bounded encoder. */
+    public ArrowKafkaRecordTranscoder() {
+        this(new FlussArrowRecordEncoder());
+    }
+
+    /** Creates a transcoder using an encoder with a custom Arrow allocation limit. */
+    public ArrowKafkaRecordTranscoder(FlussArrowRecordEncoder arrowRecordEncoder) {
+        this.arrowRecordEncoder = checkNotNull(arrowRecordEncoder);
+    }
 
     @Override
     public KafkaTopicWritePlan prepare(TableInfo tableInfo) {
