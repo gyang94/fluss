@@ -52,47 +52,15 @@ public class SaslServerFactory {
             List<AppConfigurationEntry> configurationEntries)
             throws SaslException {
 
-        try {
-
-            AuthenticateCallbackHandler callbackHandler;
-            if (mechanism.equals("PLAIN")) {
-                callbackHandler = new PlainServerCallbackHandler();
-            } else {
-                throw new IllegalArgumentException("Unsupported mechanism: " + mechanism);
-            }
-
-            callbackHandler.configure(mechanism, configurationEntries);
-            // Construct Fluss's PLAIN server directly. Kafka clients register a provider with the
-            // same JVM provider name as Fluss's PLAIN provider. Delegating this server-side path
-            // to Sasl.createSaslServer would therefore make the selected callback type depend on
-            // class-loading order when both implementations share a process.
-            if (PlainSaslServer.PLAIN_MECHANISM.equals(mechanism)) {
-                return new PlainSaslServer(callbackHandler);
-            }
-            SaslServer saslServer =
-                    Subject.doAs(
-                            loginManager.subject(),
-                            (PrivilegedExceptionAction<SaslServer>)
-                                    () ->
-                                            Sasl.createSaslServer(
-                                                    mechanism,
-                                                    "fluss",
-                                                    hostName,
-                                                    props,
-                                                    callbackHandler));
-            if (saslServer == null) {
-                throw new SaslException(
-                        "Fluss Server failed to create a SaslServer to interact with a client during session authentication with server mechanism "
-                                + mechanism);
-            }
-
-            return saslServer;
-        } catch (PrivilegedActionException e) {
-            throw new SaslException(
-                    "Fluss Server failed to create a SaslServer to interact with a client during session authentication with server mechanism "
-                            + mechanism,
-                    e.getCause());
+        if (!PlainSaslServer.PLAIN_MECHANISM.equals(mechanism)) {
+            throw new IllegalArgumentException("Unsupported mechanism: " + mechanism);
         }
+
+        AuthenticateCallbackHandler callbackHandler = new PlainServerCallbackHandler();
+        callbackHandler.configure(mechanism, configurationEntries);
+        // Kafka and Fluss register PLAIN providers with the same JVM provider name. Construct
+        // Fluss's server directly so callback types do not depend on provider registration order.
+        return new PlainSaslServer(callbackHandler);
     }
 
     public static SaslClient createSaslClient(
