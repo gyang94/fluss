@@ -57,31 +57,8 @@ public class KafkaRequest implements RpcRequest {
     private final long startTimeMs;
     private final CompletableFuture<AbstractResponse> future;
     private final AtomicBoolean bufferReleased = new AtomicBoolean();
-    private volatile boolean processorOwnsBuffer;
     private volatile boolean cancelled = false;
     private volatile boolean closeConnectionAfterResponse;
-
-    /** Creates an anonymous request for the supplied listener. */
-    protected KafkaRequest(
-            ApiKeys apiKey,
-            short apiVersion,
-            RequestHeader header,
-            AbstractRequest request,
-            String listenerName,
-            ByteBuf buffer,
-            ChannelHandlerContext ctx,
-            CompletableFuture<AbstractResponse> future) {
-        this(
-                apiKey,
-                apiVersion,
-                header,
-                request,
-                listenerName,
-                KafkaSaslConnection.plaintext(),
-                buffer,
-                ctx,
-                future);
-    }
 
     /** Creates a request that snapshots identity from the supplied connection security state. */
     protected KafkaRequest(
@@ -116,18 +93,6 @@ public class KafkaRequest implements RpcRequest {
     public void releaseBuffer() {
         if (bufferReleased.compareAndSet(false, true)) {
             ReferenceCountUtil.safeRelease(buffer);
-        }
-    }
-
-    /** Transfers input ownership to the worker, which releases it after synchronous conversion. */
-    void transferBufferToProcessor() {
-        processorOwnsBuffer = true;
-    }
-
-    /** Direct handler callers have no worker to release their input after response generation. */
-    void releaseResponseBuffer() {
-        if (!processorOwnsBuffer) {
-            releaseBuffer();
         }
     }
 
@@ -211,7 +176,7 @@ public class KafkaRequest implements RpcRequest {
             AbstractResponse response = request.getErrorResponse(t);
             return serialize(response);
         } finally {
-            releaseResponseBuffer();
+            releaseBuffer();
         }
     }
 

@@ -24,6 +24,7 @@ import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelInitializer;
 import org.apache.fluss.shaded.netty4.io.netty.channel.socket.SocketChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.codec.LengthFieldPrepender;
 import org.apache.fluss.shaded.netty4.io.netty.handler.flow.FlowControlHandler;
+import org.apache.fluss.utils.MathUtils;
 
 import javax.annotation.Nullable;
 
@@ -40,17 +41,6 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
     private final int maxRequestSize;
     private final @Nullable Supplier<ServerAuthenticator> authenticatorSupplier;
     private final LengthFieldPrepender prepender = new LengthFieldPrepender(4);
-    private final boolean preferHeap;
-
-    /** Creates a PLAINTEXT channel initializer. */
-    public KafkaChannelInitializer(
-            RequestChannel[] requestChannels,
-            String listenerName,
-            long maxIdleTimeSeconds,
-            int maxRequestSize,
-            boolean preferHeap) {
-        this(requestChannels, listenerName, maxIdleTimeSeconds, maxRequestSize, preferHeap, null);
-    }
 
     /** Creates a channel initializer with an optional per-connection authenticator supplier. */
     public KafkaChannelInitializer(
@@ -58,13 +48,11 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
             String listenerName,
             long maxIdleTimeSeconds,
             int maxRequestSize,
-            boolean preferHeap,
             @Nullable Supplier<ServerAuthenticator> authenticatorSupplier) {
         super(maxIdleTimeSeconds);
         this.requestChannels = requestChannels;
         this.listenerName = listenerName;
         this.maxRequestSize = maxRequestSize;
-        this.preferHeap = preferHeap;
         this.authenticatorSupplier = authenticatorSupplier;
     }
 
@@ -78,11 +66,15 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
         }
         addIdleStateHandler(ch);
         ch.pipeline().addLast(prepender);
-        addFrameDecoder(ch, maxRequestSize, 4, preferHeap);
+        addFrameDecoder(ch, maxRequestSize, 4, false);
         ch.pipeline().addLast("flowController", new FlowControlHandler());
         ch.pipeline()
                 .addLast(
                         new KafkaCommandDecoder(
-                                requestChannels, listenerName, authenticatorSupplier));
+                                requestChannels[
+                                        MathUtils.murmurHash(ch.id().hashCode())
+                                                % requestChannels.length],
+                                listenerName,
+                                authenticatorSupplier));
     }
 }

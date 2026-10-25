@@ -17,6 +17,7 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.annotation.VisibleForTesting;
 import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.security.auth.ServerAuthenticator;
@@ -29,7 +30,6 @@ import org.apache.fluss.shaded.netty4.io.netty.channel.SimpleChannelInboundHandl
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleState;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateEvent;
 import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
-import org.apache.fluss.utils.MathUtils;
 
 import org.apache.kafka.common.errors.LeaderNotAvailableException;
 import org.apache.kafka.common.message.ApiVersionsRequestData;
@@ -62,8 +62,7 @@ import static org.apache.kafka.common.protocol.ApiKeys.PRODUCE;
 public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaCommandDecoder.class);
 
-    private final RequestChannel[] requestChannels;
-    private final int numChannels;
+    private final RequestChannel requestChannel;
     private final String listenerName;
     private final KafkaSaslConnection saslConnection;
 
@@ -77,18 +76,18 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     protected SocketAddress remoteAddress;
 
     /** Creates a decoder for a PLAINTEXT Kafka connection. */
-    public KafkaCommandDecoder(RequestChannel[] requestChannels, String listenerName) {
-        this(requestChannels, listenerName, null);
+    @VisibleForTesting
+    KafkaCommandDecoder(RequestChannel requestChannel, String listenerName) {
+        this(requestChannel, listenerName, null);
     }
 
     /** Creates a decoder that requires SASL when an authenticator supplier is provided. */
     public KafkaCommandDecoder(
-            RequestChannel[] requestChannels,
+            RequestChannel requestChannel,
             String listenerName,
             @Nullable Supplier<ServerAuthenticator> authenticatorSupplier) {
         super(false);
-        this.requestChannels = requestChannels;
-        this.numChannels = requestChannels.length;
+        this.requestChannel = requestChannel;
         this.listenerName = listenerName;
         this.saslConnection =
                 authenticatorSupplier == null
@@ -100,7 +99,6 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     public void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
         CompletableFuture<AbstractResponse> future = new CompletableFuture<>();
         KafkaRequest request = null;
-        boolean handedToProcessor = false;
         try {
             if (saslConnection.isAuthenticatingWithRawTokens()) {
                 // Handshake v0 tokens have only the length prefix removed by the frame decoder;
@@ -123,29 +121,22 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                             ctx, future, buffer, listenerName, saslConnection, header, nioBuffer);
             inflightResponses.addLast(request);
             future.whenCompleteAsync((r, t) -> sendResponse(ctx), ctx.executor());
-            int channelIndex =
-                    MathUtils.murmurHash(ctx.channel().id().asLongText().hashCode()) % numChannels;
-            // The worker owns the input until synchronous conversion finishes; responses do not
-            // retain record bytes while waiting for an asynchronous native append.
-            // RequestChannel enqueues before reconciling backpressure. Once handed over, the
-            // worker may already own this reference even if backpressure notification throws.
-            request.transferBufferToProcessor();
-            handedToProcessor = true;
-            requestChannels[channelIndex].putRequest(request);
+            requestChannel.putRequest(request);
 
             if (!isActive.get()) {
                 LOG.warn("Received a request on an inactive channel: {}", remoteAddress);
                 request.fail(new LeaderNotAvailableException("Channel is inactive"));
             }
         } catch (Throwable t) {
-            if (request != null && !handedToProcessor) {
+            if (request != null) {
                 request.releaseBuffer();
             }
             LOG.error("Error handling request", t);
             close();
         } finally {
-            // The worker retains the request input until synchronous conversion has consumed it.
-            // Release the decoder's reference on every path, including SASL rejection.
+            // KafkaRequest retains the buffer to transfer ownership to request processing. Release
+            // the decoder's ownership on every path. KafkaRequest.releaseBuffer() is idempotent
+            // because worker cleanup and response completion can both release that ownership.
             ReferenceCountUtil.release(buffer);
         }
     }
@@ -219,14 +210,14 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 if (produceRequest.acks() == 0 && isDone) {
                     // if acks=0, we don't need to wait for the response to be sent
                     inflightResponses.pollFirst();
-                    request.releaseResponseBuffer();
+                    request.releaseBuffer();
                     continue;
                 }
             }
 
             if (cancelled) {
                 inflightResponses.pollFirst();
-                request.releaseResponseBuffer();
+                request.releaseBuffer();
                 continue;
             }
 
@@ -251,7 +242,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                     break;
                 }
             } else {
-                request.releaseResponseBuffer();
+                request.releaseBuffer();
             }
         }
     }
@@ -277,7 +268,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
         KafkaRequest request;
         while ((request = inflightResponses.pollFirst()) != null) {
             request.cancel();
-            request.releaseResponseBuffer();
+            request.releaseBuffer();
         }
     }
 

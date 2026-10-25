@@ -46,16 +46,6 @@ public final class KafkaProduceCommand {
     private final @Nullable InetAddress clientAddress;
     private final FlussPrincipal principal;
 
-    /** Creates a Kafka write command. */
-    public KafkaProduceCommand(
-            short acks,
-            int timeoutMs,
-            List<TopicWrite> topics,
-            String listenerName,
-            @Nullable InetAddress clientAddress) {
-        this(acks, timeoutMs, topics, listenerName, clientAddress, FlussPrincipal.ANONYMOUS);
-    }
-
     /** Creates a Kafka write command for the authenticated Kafka principal. */
     public KafkaProduceCommand(
             short acks,

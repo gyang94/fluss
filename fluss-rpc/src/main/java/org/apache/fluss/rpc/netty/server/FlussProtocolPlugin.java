@@ -47,6 +47,7 @@ public class FlussProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     private final ApiManager apiManager;
     private final List<String> listeners;
     private final RequestsMetrics requestsMetrics;
+    private Configuration conf;
     private PlainSaslServerConfigManager plainSaslServerConfigManager;
     @Nullable private SslConfig sslConfig;
     /** Shared by every TLS listener; {@code null} when no listener enables TLS. */
@@ -67,11 +68,10 @@ public class FlussProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public void setup(Configuration conf) {
         this.plainSaslServerConfigManager = new PlainSaslServerConfigManager(conf);
+        this.conf = plainSaslServerConfigManager.getConfiguration();
         // Built once here so that invalid TLS settings fail the server at startup rather than
         // every accepted connection later.
-        this.sslConfig =
-                SslConfig.fromServerConfig(plainSaslServerConfigManager.getConfiguration())
-                        .orElse(null);
+        this.sslConfig = SslConfig.fromServerConfig(conf).orElse(null);
         if (sslConfig != null) {
             checkTlsListenersExist(sslConfig.enabledListeners());
             checkInternalListenerIsPlaintext(sslConfig.enabledListeners());
@@ -87,7 +87,6 @@ public class FlussProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public ChannelHandler createChannelHandler(
             RequestChannel[] requestChannels, String listenerName) {
-        Configuration conf = plainSaslServerConfigManager.getConfiguration();
         return new ServerChannelInitializer(
                 requestChannels,
                 apiManager,
@@ -136,10 +135,7 @@ public class FlussProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
      * <p>TODO: remove once the client side supports TLS (#3797).
      */
     private void checkInternalListenerIsPlaintext(List<String> tlsListeners) {
-        String internalListener =
-                plainSaslServerConfigManager
-                        .getConfiguration()
-                        .get(ConfigOptions.INTERNAL_LISTENER_NAME);
+        String internalListener = conf.get(ConfigOptions.INTERNAL_LISTENER_NAME);
         if (tlsListeners.contains(internalListener)) {
             throw new IllegalConfigurationException(
                     "TLS is not supported yet on the internal listener '%s' (see '%s'): servers connect to each other without TLS. Remove it from '%s'.",

@@ -21,8 +21,7 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
-import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
-import org.apache.fluss.shaded.netty4.io.netty.channel.socket.SocketChannel;
+import org.apache.fluss.shaded.netty4.io.netty.channel.socket.nio.NioSocketChannel;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleStateHandler;
 
 import org.junit.jupiter.api.Test;
@@ -31,8 +30,6 @@ import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /** Tests listener configuration and required TabletService support. */
 class KafkaProtocolPluginTest {
@@ -40,24 +37,22 @@ class KafkaProtocolPluginTest {
     void testZeroDisablesNettyIdleTimeout() throws Exception {
         Configuration conf = new Configuration();
         conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ZERO);
-        EmbeddedChannel channel = new EmbeddedChannel();
+        NioSocketChannel channel = new NioSocketChannel();
         try {
-            // Adapt the socket type while installing the real pipeline on the embedded event loop.
-            SocketChannel socket = mock(SocketChannel.class);
-            when(socket.pipeline()).thenReturn(channel.pipeline());
             KafkaProtocolPlugin plugin = new KafkaProtocolPlugin();
             plugin.setup(conf);
             KafkaChannelInitializer initializer =
                     (KafkaChannelInitializer)
                             plugin.createChannelHandler(
                                     new RequestChannel[] {new RequestChannel(1)}, "KAFKA");
-            initializer.initChannel(socket);
+            initializer.initChannel(channel);
             IdleStateHandler idleHandler = channel.pipeline().get(IdleStateHandler.class);
             assertThat(idleHandler.getAllIdleTimeInMillis()).isZero();
             assertThat(idleHandler.getReaderIdleTimeInMillis()).isZero();
             assertThat(idleHandler.getWriterIdleTimeInMillis()).isZero();
         } finally {
-            channel.finishAndReleaseAll();
+            // This unregistered channel has no event loop to handle an asynchronous close.
+            channel.unsafe().closeForcibly();
         }
     }
 

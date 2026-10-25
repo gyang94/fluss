@@ -26,6 +26,7 @@ import org.apache.fluss.exception.ConfigException;
 import org.apache.fluss.security.acl.FlussPrincipal;
 
 import javax.annotation.Nullable;
+import javax.annotation.concurrent.GuardedBy;
 
 import java.util.Collections;
 import java.util.HashMap;
@@ -74,6 +75,7 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
     private final boolean principalIgnoreCase;
 
     // Access is guarded by synchronized validate/reconfigure calls.
+    @GuardedBy("this")
     private Map<String, String> currentPlainCredentials;
 
     /**
@@ -89,7 +91,6 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
                 configuration.get(ConfigOptions.SECURITY_ACL_PRINCIPAL_IGNORE_CASE);
         this.superUsers = parseSuperUsers(configuration);
         this.initialPlainCredentialsFromJaasConfig = parseCredentialsFromJaasConfig(configuration);
-        validate(configuration);
         reconfigure(configuration);
     }
 
@@ -152,7 +153,7 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
     private static Map<String, String> readPlainCredentials(Configuration configuration)
             throws ConfigException {
         try {
-            return copyCredentials(configuration.get(ConfigOptions.SERVER_SASL_CREDENTIALS));
+            return configuration.get(ConfigOptions.SERVER_SASL_CREDENTIALS);
         } catch (IllegalArgumentException | IllegalStateException e) {
             // Parsing errors, such as duplicate map keys, may include passwords in their
             // messages or causes. Do not retain them in an exception that can be logged.
@@ -191,6 +192,14 @@ public final class PlainSaslServerConfigManager implements ServerReconfigurable 
         }
     }
 
+    /**
+     * Generates the merged JAAS config string by combining existing credentials from the current
+     * {@code security.sasl.plain.jaas.config} with the given new credentials map. New credentials
+     * take priority on username conflict.
+     *
+     * @param newCredentials map of username to password from SERVER_SASL_CREDENTIALS
+     * @return the generated JAAS config string
+     */
     private String generateMergedJaasConfig(Map<String, String> newCredentials) {
         Map<String, String> mergedCredentials = mergePlainCredentials(newCredentials);
 

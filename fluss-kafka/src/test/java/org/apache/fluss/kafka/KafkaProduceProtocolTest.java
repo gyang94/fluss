@@ -27,6 +27,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.TopicResult;
 import org.apache.fluss.kafka.dispatcher.KafkaApiRegistry;
 import org.apache.fluss.kafka.dispatcher.KafkaRequestDispatcher;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
@@ -646,8 +647,7 @@ class KafkaProduceProtocolTest {
         for (boolean failure : Arrays.asList(false, true)) {
             RequestChannel requests = new RequestChannel(100);
             EmbeddedChannel channel =
-                    new EmbeddedChannel(
-                            new KafkaCommandDecoder(new RequestChannel[] {requests}, "KAFKA"));
+                    new EmbeddedChannel(new KafkaCommandDecoder(requests, "KAFKA"));
             ProduceRequest body = request((short) 11, (short) 0, partition(0, records()));
             RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, (short) 11, "producer", 1);
             ByteBuf buffer =
@@ -718,6 +718,7 @@ class KafkaProduceProtocolTest {
                         header,
                         body,
                         "KAFKA",
+                        KafkaSaslConnection.plaintext(),
                         buffer,
                         new TestingChannelHandlerContext(),
                         new CompletableFuture<>());

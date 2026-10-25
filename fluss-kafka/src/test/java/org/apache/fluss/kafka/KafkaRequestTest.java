@@ -93,6 +93,7 @@ public class KafkaRequestTest {
                         new RequestHeader(ApiKeys.API_VERSIONS, version, "client-id", 1),
                         new ApiVersionsRequest.Builder().build(version),
                         "KAFKA",
+                        KafkaSaslConnection.plaintext(),
                         buffer,
                         mock(ChannelHandlerContext.class),
                         new CompletableFuture<>());

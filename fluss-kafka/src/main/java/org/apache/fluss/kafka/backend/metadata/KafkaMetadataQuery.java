@@ -41,15 +41,6 @@ public final class KafkaMetadataQuery {
     private final @Nullable InetAddress clientAddress;
     private final FlussPrincipal principal;
 
-    /** Creates a metadata query. */
-    public KafkaMetadataQuery(
-            boolean allTopics,
-            List<TopicReference> topics,
-            String listenerName,
-            @Nullable InetAddress clientAddress) {
-        this(allTopics, topics, listenerName, clientAddress, FlussPrincipal.ANONYMOUS);
-    }
-
     /** Creates a metadata query for the authenticated Kafka principal. */
     public KafkaMetadataQuery(
             boolean allTopics,

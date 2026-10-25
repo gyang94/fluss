@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
@@ -76,9 +77,7 @@ public class KafkaRequestHandlerTest extends KafkaServerTestBase {
     @Test
     public void testUnsupportedWireVersionFallsBackAndAllowsRenegotiation() {
         RequestChannel requests = new RequestChannel(100);
-        EmbeddedChannel channel =
-                new EmbeddedChannel(
-                        new KafkaCommandDecoder(new RequestChannel[] {requests}, "KAFKA"));
+        EmbeddedChannel channel = new EmbeddedChannel(new KafkaCommandDecoder(requests, "KAFKA"));
         short unsupportedVersion = (short) (ApiKeys.API_VERSIONS.latestVersion() + 1);
         try {
             // An unknown request version must be rejected without parsing its body schema.
@@ -293,6 +292,7 @@ public class KafkaRequestHandlerTest extends KafkaServerTestBase {
                     header,
                     requestBody,
                     "KAFKA",
+                    KafkaSaslConnection.plaintext(),
                     requestBuffer,
                     context,
                     new CompletableFuture<>());

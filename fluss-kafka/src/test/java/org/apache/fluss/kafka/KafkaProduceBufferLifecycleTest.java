@@ -83,9 +83,7 @@ class KafkaProduceBufferLifecycleTest {
     void testZeroCopyDecodeReleasesBufferBeforeAsyncWriteCompletes(
             short version, boolean direct, short acks, boolean failWrite) {
         RequestChannel requests = new RequestChannel(100);
-        EmbeddedChannel channel =
-                new EmbeddedChannel(
-                        new KafkaCommandDecoder(new RequestChannel[] {requests}, "KAFKA"));
+        EmbeddedChannel channel = new EmbeddedChannel(new KafkaCommandDecoder(requests, "KAFKA"));
         ByteBuf buffer = requestBuffer(version, acks, direct, "{\"value\":2,\"text\":\"中文\"}");
         CompletableFuture<KafkaProduceResult> pending = new CompletableFuture<>();
         AtomicReference<JsonNode> decodedKey = new AtomicReference<>();
@@ -159,9 +157,7 @@ class KafkaProduceBufferLifecycleTest {
     @ValueSource(shorts = {0, 1})
     void testSynchronousDecodeFailureReleasesBuffer(short acks) {
         RequestChannel requests = new RequestChannel(100);
-        EmbeddedChannel channel =
-                new EmbeddedChannel(
-                        new KafkaCommandDecoder(new RequestChannel[] {requests}, "KAFKA"));
+        EmbeddedChannel channel = new EmbeddedChannel(new KafkaCommandDecoder(requests, "KAFKA"));
         ByteBuf buffer = requestBuffer((short) 11, acks, true, "{\"value\":");
         KafkaRequest parsed = null;
         try {

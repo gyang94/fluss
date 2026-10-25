@@ -22,6 +22,7 @@ import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
+import org.apache.fluss.security.acl.FlussPrincipal;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -212,7 +213,8 @@ class KafkaProduceCommandTest {
         List<TopicWrite> topics =
                 new ArrayList<>(Collections.singletonList(new TopicWrite("db.topic", partitions)));
         KafkaProduceCommand command =
-                new KafkaProduceCommand((short) -1, 1000, topics, "KAFKA", null);
+                new KafkaProduceCommand(
+                        (short) -1, 1000, topics, "KAFKA", null, FlussPrincipal.ANONYMOUS);
         records.clear();
         partitions.clear();
         topics.clear();

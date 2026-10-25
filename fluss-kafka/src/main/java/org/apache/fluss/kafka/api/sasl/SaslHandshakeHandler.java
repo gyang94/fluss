@@ -61,14 +61,6 @@ public final class SaslHandshakeHandler implements KafkaApiHandler<SaslHandshake
             KafkaSaslConnection connection,
             String listenerName,
             SocketAddress remoteAddress,
-            SaslHandshakeRequest request) {
-        return handle(connection, listenerName, remoteAddress, request, () -> {});
-    }
-
-    CompletableFuture<SaslHandshakeResponse> handle(
-            KafkaSaslConnection connection,
-            String listenerName,
-            SocketAddress remoteAddress,
             SaslHandshakeRequest request,
             Runnable closeConnectionAfterResponse) {
         if (!connection.authenticationEnabled() || !connection.isAwaitingHandshake()) {

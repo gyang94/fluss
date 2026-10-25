@@ -50,7 +50,7 @@ Credential changes apply to new authentications; established connections retain 
 identity. Kafka TLS, SCRAM, and re-authentication are not supported by this implementation.
 `SASL_PLAINTEXT` does not encrypt credentials or record data.
 
-Configure a Kafka producer with:
+Configure a Kafka producer with properties:
 
 ```properties
 bootstrap.servers=localhost:9092
@@ -60,10 +60,10 @@ sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule require
 enable.idempotence=false
 ```
 
-After authentication, Metadata and Produce use the authenticated user for Fluss ACL checks.
-When authorization is enabled, grant that user the appropriate table permissions; successful
-authentication does not itself grant access. SASL handshake versions 0–1 and SaslAuthenticate
-versions 0–2 are supported. Ordinary requests are rejected until authentication completes.
+After authentication, Kafka requests use the authenticated user's identity for Fluss ACL checks.
+When authorization is enabled, the user must also have the required permissions on the target tables.
+SASL handshake versions 0–1 and SaslAuthenticate versions 0–2 are supported. Ordinary requests are
+rejected until authentication completes.
 
 ## Topic-to-table mapping
 

@@ -26,6 +26,7 @@ import org.apache.fluss.exception.TableNotExistException;
 import org.apache.fluss.kafka.backend.metadata.GatewayKafkaMetadataBackend;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult;
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
@@ -768,6 +769,7 @@ public class KafkaMetadataHandlerTest {
                             new RequestHeader(ApiKeys.METADATA, version, "client-id", 1),
                             requestBody,
                             "KAFKA",
+                            KafkaSaslConnection.plaintext(),
                             requestBuffer,
                             new TestingChannelHandlerContext(),
                             new CompletableFuture<>());

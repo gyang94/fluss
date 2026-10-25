@@ -287,7 +287,12 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
 
     private static KafkaProduceCommand command(short acks, TopicWrite... topics) {
         return new KafkaProduceCommand(
-                acks, 30000, Arrays.asList(topics), "KAFKA", InetAddress.getLoopbackAddress());
+                acks,
+                30000,
+                Arrays.asList(topics),
+                "KAFKA",
+                InetAddress.getLoopbackAddress(),
+                FlussPrincipal.ANONYMOUS);
     }
 
     private static TopicWrite topic(String name, PartitionWrite... partitions) {

@@ -55,11 +55,6 @@ public final class SaslAuthenticateHandler implements KafkaApiHandler<SaslAuthen
     }
 
     CompletableFuture<SaslAuthenticateResponse> handle(
-            KafkaSaslConnection connection, SaslAuthenticateRequest request) {
-        return handle(connection, request, () -> {});
-    }
-
-    CompletableFuture<SaslAuthenticateResponse> handle(
             KafkaSaslConnection connection,
             SaslAuthenticateRequest request,
             Runnable closeConnectionAfterResponse) {

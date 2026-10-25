@@ -51,9 +51,7 @@ public class KafkaCommandDecoderTest extends KafkaServerTestBase {
             throws Exception {
         RequestChannel requestChannel = new RequestChannel(1);
         EmbeddedChannel channel =
-                new EmbeddedChannel(
-                        new KafkaCommandDecoder(
-                                new RequestChannel[] {requestChannel}, "KAFKA_EXTERNAL"));
+                new EmbeddedChannel(new KafkaCommandDecoder(requestChannel, "KAFKA_EXTERNAL"));
         short unsupportedVersion = (short) (ApiKeys.API_VERSIONS.latestVersion() + 1);
         RequestHeader header =
                 new RequestHeader(ApiKeys.API_VERSIONS, unsupportedVersion, "client", 42);
@@ -102,11 +100,10 @@ public class KafkaCommandDecoderTest extends KafkaServerTestBase {
     }
 
     @Test
-    public void testDisconnectDoesNotReleaseQueuedRequestBuffer() {
+    public void testDisconnectReleasesQueuedRequestBuffer() {
         RequestChannel requestChannel = new RequestChannel(100);
         EmbeddedChannel channel =
-                new EmbeddedChannel(
-                        new KafkaCommandDecoder(new RequestChannel[] {requestChannel}, "KAFKA"));
+                new EmbeddedChannel(new KafkaCommandDecoder(requestChannel, "KAFKA"));
         short produceVersion = ApiKeys.PRODUCE.latestVersion();
         ProduceRequest produceRequest =
                 new ProduceRequest(
@@ -124,10 +121,8 @@ public class KafkaCommandDecoderTest extends KafkaServerTestBase {
             channel.close();
             channel.runPendingTasks();
 
-            // Disconnect cancels the response while the worker keeps its input until conversion
-            // finishes, without retaining that input for the response queue.
-            assertThat(requestBuffer.refCnt()).isOne();
-            assertThat(queuedRequest.<ProduceRequest>request().acks()).isEqualTo((short) 1);
+            assertThat(queuedRequest.cancelled()).isTrue();
+            assertThat(requestBuffer.refCnt()).isZero();
             queuedRequest.releaseBuffer();
             assertThat(requestBuffer.refCnt()).isZero();
         } finally {
@@ -139,8 +134,7 @@ public class KafkaCommandDecoderTest extends KafkaServerTestBase {
     public void testAcksZeroSuppressesResponseAndUnblocksFollowingResponse() {
         RequestChannel requestChannel = new RequestChannel(100);
         EmbeddedChannel channel =
-                new EmbeddedChannel(
-                        new KafkaCommandDecoder(new RequestChannel[] {requestChannel}, "KAFKA"));
+                new EmbeddedChannel(new KafkaCommandDecoder(requestChannel, "KAFKA"));
         short produceVersion = ApiKeys.PRODUCE.latestVersion();
         ProduceRequest produceRequest =
                 new ProduceRequest(
