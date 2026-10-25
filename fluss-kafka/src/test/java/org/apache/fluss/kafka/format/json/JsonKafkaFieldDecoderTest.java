@@ -88,7 +88,7 @@ class JsonKafkaFieldDecoderTest {
                         .decode(
                                 buffer(
                                         "{\"label\":{\"k\":1},\"items\":[{\"k\":2},[3,null]],"
-                                                + "\"enabled\":{},\"count\":1.9}"));
+                                                + "\"enabled\":{\"nested\":[true,{\"x\":\"ok\"}]},\"count\":1.9}"));
         GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
         assertThat(row.getString(0).toString()).isEqualTo("{\"k\":1}");
         assertThat(row.getArray(1).getString(0).toString()).isEqualTo("{\"k\":2}");
@@ -105,6 +105,18 @@ class JsonKafkaFieldDecoderTest {
                     .as("invalid record: %s", json)
                     .isInstanceOf(KafkaRecordEncodingException.class);
         }
+    }
+
+    @Test
+    void testIgnoredValuesStillValidateUnicode() {
+        JsonKafkaFieldDecoder decoder = decoder(COMPLEX_TYPE, false);
+        assertThatThrownBy(
+                        () ->
+                                decoder.decode(
+                                        buffer(
+                                                "{\"items\":[{\"quantity\":1,\"extra\":{\"text\":\"\\uD800\"}}]}")))
+                .isInstanceOf(KafkaRecordEncodingException.class)
+                .hasMessageContaining("unpaired UTF-16 surrogate");
     }
 
     @Test

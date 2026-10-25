@@ -28,6 +28,9 @@ import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.Base64Variants;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonToken;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -56,13 +59,12 @@ import java.time.OffsetDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
-import java.util.Iterator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.function.Consumer;
 
 import static org.apache.fluss.utils.DateTimeUtils.timestampToMicros;
@@ -96,20 +98,22 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter createValidated(DataType dataType) {
         final JsonToFlussConverter notNullConverter = createNotNull(dataType);
-        return (node, path, rescue) -> {
-            if (node == null || node.isNull() || node.isMissingNode()) {
+        return (parser, path, rescue) -> {
+            if (parser == null
+                    || parser.currentToken() == JsonToken.VALUE_NULL
+                    || parser.currentToken() == JsonToken.NOT_AVAILABLE) {
                 if (!dataType.isNullable()) {
                     throw invalid(path, dataType, "field is missing or null").recordException();
                 }
                 return null;
             }
             try {
-                return notNullConverter.convert(node, path, rescue);
+                return notNullConverter.convert(parser, path, rescue);
             } catch (KafkaRecordEncodingException e) {
                 throw e;
             } catch (ConversionException | NumberFormatException e) {
                 if (rescue != null && dataType.isNullable()) {
-                    rescue.accept(node);
+                    rescue.accept(JsonParserUtils.readValue(parser));
                     return null;
                 }
                 throw e instanceof ConversionException
@@ -170,55 +174,72 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter booleanConverter() {
-        // parseBoolean treats every non-true string as false.
-        return (node, path, rescue) ->
-                node.isBoolean() ? node.booleanValue() : Boolean.parseBoolean(node.asText().trim());
+        return (parser, path, rescue) -> {
+            // Containers have empty scalar text, which Boolean.parseBoolean treats as false.
+            boolean value = Boolean.parseBoolean(JsonParserUtils.scalarText(parser).trim());
+            JsonParserUtils.skipValue(parser);
+            return value;
+        };
     }
 
     private static JsonToFlussConverter tinyIntConverter() {
-        return (node, path, rescue) -> Byte.parseByte(node.asText().trim());
+        return (parser, path, rescue) -> Byte.parseByte(JsonParserUtils.scalarText(parser).trim());
     }
 
     private static JsonToFlussConverter smallIntConverter() {
-        return (node, path, rescue) -> Short.parseShort(node.asText().trim());
+        return (parser, path, rescue) ->
+                Short.parseShort(JsonParserUtils.scalarText(parser).trim());
     }
 
     private static JsonToFlussConverter intConverter() {
-        // Flink truncates fractional numeric nodes, but parses text as an exact integer.
-        return (node, path, rescue) ->
-                node.canConvertToInt() ? node.asInt() : Integer.parseInt(node.asText().trim());
+        return (parser, path, rescue) -> {
+            if (parser.currentToken() == JsonToken.VALUE_NUMBER_FLOAT) {
+                BigDecimal value = parser.getDecimalValue();
+                if (value.compareTo(BigDecimal.valueOf(Integer.MIN_VALUE)) >= 0
+                        && value.compareTo(BigDecimal.valueOf(Integer.MAX_VALUE)) <= 0) {
+                    return value.intValue();
+                }
+            }
+            return Integer.parseInt(JsonParserUtils.scalarText(parser).trim());
+        };
     }
 
     private static JsonToFlussConverter bigIntConverter() {
-        return (node, path, rescue) ->
-                node.canConvertToLong() ? node.asLong() : Long.parseLong(node.asText().trim());
+        return (parser, path, rescue) -> {
+            if (parser.currentToken() == JsonToken.VALUE_NUMBER_FLOAT) {
+                BigDecimal value = parser.getDecimalValue();
+                if (value.compareTo(BigDecimal.valueOf(Long.MIN_VALUE)) >= 0
+                        && value.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) <= 0) {
+                    return value.longValue();
+                }
+            }
+            return Long.parseLong(JsonParserUtils.scalarText(parser).trim());
+        };
     }
 
     private static JsonToFlussConverter floatConverter(DataType dataType) {
-        return (node, path, rescue) -> {
+        return (parser, path, rescue) -> {
             // Parse decimal text directly to float to avoid an intermediate double rounding.
-            float value =
-                    node.isDouble()
-                            ? (float) node.asDouble()
-                            : Float.parseFloat(node.asText().trim());
+            float value = Float.parseFloat(JsonParserUtils.scalarText(parser).trim());
             require(Float.isFinite(value), path, dataType, "non-finite or overflowing number");
             return value;
         };
     }
 
     private static JsonToFlussConverter doubleConverter(DataType dataType) {
-        return (node, path, rescue) -> {
-            double value =
-                    node.isDouble() ? node.asDouble() : Double.parseDouble(node.asText().trim());
+        return (parser, path, rescue) -> {
+            double value = Double.parseDouble(JsonParserUtils.scalarText(parser).trim());
             require(Double.isFinite(value), path, dataType, "non-finite or overflowing number");
             return value;
         };
     }
 
     private static JsonToFlussConverter decimalConverter(DecimalType dataType) {
-        return (node, path, rescue) -> {
+        return (parser, path, rescue) -> {
             BigDecimal value =
-                    node.isBigDecimal() ? node.decimalValue() : new BigDecimal(node.asText());
+                    parser.currentToken().isNumeric()
+                            ? parser.getDecimalValue()
+                            : new BigDecimal(JsonParserUtils.scalarText(parser));
             if (value.signum() == 0) {
                 return Decimal.zero(dataType.getPrecision(), dataType.getScale());
             }
@@ -246,13 +267,16 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter stringConverter() {
-        return (node, path, rescue) ->
-                BinaryString.fromString(node.isContainerNode() ? node.toString() : node.asText());
+        return (parser, path, rescue) ->
+                BinaryString.fromString(
+                        parser.currentToken().isStructStart()
+                                ? JsonParserUtils.readValue(parser).toString()
+                                : JsonParserUtils.scalarText(parser));
     }
 
     private static JsonToFlussConverter binaryConverter(BinaryType dataType) {
-        return (node, path, rescue) -> {
-            byte[] value = decodeBase64(node, path, dataType);
+        return (parser, path, rescue) -> {
+            byte[] value = decodeBase64(parser, path, dataType);
             // Arrow uses FixedSizeBinaryVector: zero-pad short values and truncate long ones.
             return value.length == dataType.getLength()
                     ? value
@@ -261,12 +285,12 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter bytesConverter(DataType dataType) {
-        return (node, path, rescue) -> decodeBase64(node, path, dataType);
+        return (parser, path, rescue) -> decodeBase64(parser, path, dataType);
     }
 
     private static JsonToFlussConverter dateConverter(DataType dataType) {
-        return (node, path, rescue) -> {
-            String value = textualValue(node, path, dataType);
+        return (parser, path, rescue) -> {
+            String value = textualValue(parser, path, dataType);
             try {
                 return Math.toIntExact(LocalDate.parse(value).toEpochDay());
             } catch (DateTimeException | ArithmeticException e) {
@@ -277,8 +301,8 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter timeConverter(TimeType dataType) {
         final int nanosPerUnit = nanosPerUnit(Math.min(dataType.getPrecision(), 3));
-        return (node, path, rescue) -> {
-            String value = textualValue(node, path, dataType);
+        return (parser, path, rescue) -> {
+            String value = textualValue(parser, path, dataType);
             final LocalTime time;
             try {
                 time = LocalTime.parse(value);
@@ -292,8 +316,8 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter timestampConverter(TimestampType dataType) {
         final int nanosPerUnit = nanosPerUnit(dataType.getPrecision());
-        return (node, path, rescue) -> {
-            String value = textualValue(node, path, dataType).replace(' ', 'T');
+        return (parser, path, rescue) -> {
+            String value = textualValue(parser, path, dataType).replace(' ', 'T');
             final LocalDateTime timestamp;
             try {
                 timestamp = LocalDateTime.parse(value);
@@ -315,8 +339,8 @@ final class JsonToFlussConverters {
     private static JsonToFlussConverter timestampLtzConverter(LocalZonedTimestampType dataType) {
         final int nanosPerUnit = nanosPerUnit(dataType.getPrecision());
         final ZoneId localZone = ZoneId.systemDefault();
-        return (node, path, rescue) -> {
-            String value = textualValue(node, path, dataType).replace(' ', 'T');
+        return (parser, path, rescue) -> {
+            String value = textualValue(parser, path, dataType).replace(' ', 'T');
             Instant timestamp;
             try {
                 timestamp = OffsetDateTime.parse(value).toInstant();
@@ -338,39 +362,49 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter arrayConverter(ArrayType dataType) {
         JsonToFlussConverter elementConverter = createValidated(dataType.getElementType());
-        return (node, path, rescue) -> {
-            require(node.isArray(), path, dataType, "expected a JSON array");
+        return (parser, path, rescue) -> {
+            require(
+                    parser.currentToken() == JsonToken.START_ARRAY,
+                    path,
+                    dataType,
+                    "expected a JSON array");
             RescueCollector collector = rescue == null ? null : new RescueCollector(rescue);
-            Object[] elements = new Object[node.size()];
-            for (int i = 0; i < elements.length; i++) {
-                elements[i] =
+            List<Object> elements = new ArrayList<>();
+            while (parser.nextToken() != JsonToken.END_ARRAY) {
+                int index = elements.size();
+                elements.add(
                         elementConverter.convert(
-                                node.get(i),
-                                JsonPath.index(path, i),
-                                collector == null ? null : collector.element(i, elements.length));
+                                parser,
+                                JsonPath.index(path, index),
+                                collector == null ? null : collector.element(index)));
             }
             if (collector != null) {
-                collector.finish();
+                collector.finishArray(elements.size());
             }
-            return new GenericArray(elements);
+            return new GenericArray(elements.toArray());
         };
     }
 
     private static JsonToFlussConverter mapConverter(MapType dataType) {
         JsonToFlussConverter valueConverter = createValidated(dataType.getValueType());
-        return (node, path, rescue) -> {
-            require(node.isObject(), path, dataType, "expected a JSON object");
+        return (parser, path, rescue) -> {
+            require(
+                    parser.currentToken() == JsonToken.START_OBJECT,
+                    path,
+                    dataType,
+                    "expected a JSON object");
             RescueCollector collector = rescue == null ? null : new RescueCollector(rescue);
             Map<BinaryString, Object> values = new LinkedHashMap<>();
-            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                JsonParserUtils.requireField(parser);
+                String key = parser.currentName();
+                parser.nextToken();
                 values.put(
-                        BinaryString.fromString(field.getKey()),
+                        BinaryString.fromString(key),
                         valueConverter.convert(
-                                field.getValue(),
-                                JsonPath.field(path, field.getKey()),
-                                collector == null ? null : collector.field(field.getKey())));
+                                parser,
+                                JsonPath.field(path, key),
+                                collector == null ? null : collector.field(key)));
             }
             if (collector != null) {
                 collector.finish();
@@ -383,32 +417,56 @@ final class JsonToFlussConverters {
         List<DataField> fields = dataType.getFields();
         String[] fieldNames = new String[fields.size()];
         JsonToFlussConverter[] fieldConverters = new JsonToFlussConverter[fields.size()];
+        Map<String, Integer> positions = new HashMap<>();
         for (int i = 0; i < fields.size(); i++) {
             DataField field = fields.get(i);
             fieldNames[i] = field.getName();
             fieldConverters[i] = createValidated(field.getType());
+            positions.put(field.getName(), i);
         }
-        Set<String> knownFields = new HashSet<>(Arrays.asList(fieldNames));
-        return (node, path, rescue) -> {
-            require(node.isObject(), path, dataType, "expected a JSON object");
+        return (parser, path, rescue) -> {
+            require(
+                    parser.currentToken() == JsonToken.START_OBJECT,
+                    path,
+                    dataType,
+                    "expected a JSON object");
             RescueCollector collector = rescue == null ? null : new RescueCollector(rescue);
-            if (collector != null) {
-                Iterator<Map.Entry<String, JsonNode>> members = node.fields();
-                while (members.hasNext()) {
-                    Map.Entry<String, JsonNode> member = members.next();
-                    if (!knownFields.contains(member.getKey())) {
-                        collector.addField(member.getKey(), member.getValue());
+            JsonNode[] fieldRescues = rescue == null ? null : new JsonNode[fieldNames.length];
+            boolean[] present = new boolean[fieldNames.length];
+            GenericRow row = new GenericRow(fieldNames.length);
+            while (parser.nextToken() != JsonToken.END_OBJECT) {
+                JsonParserUtils.requireField(parser);
+                String name = parser.currentName();
+                Integer position = positions.get(name);
+                parser.nextToken();
+                if (position == null) {
+                    if (collector == null) {
+                        JsonParserUtils.skipValue(parser);
+                    } else {
+                        collector.addField(name, JsonParserUtils.readValue(parser));
                     }
+                } else {
+                    row.setField(
+                            position,
+                            fieldConverters[position].convert(
+                                    parser,
+                                    JsonPath.field(path, name),
+                                    collector == null
+                                            ? null
+                                            : value -> fieldRescues[position] = value));
+                    present[position] = true;
                 }
             }
-            GenericRow row = new GenericRow(fieldNames.length);
             for (int i = 0; i < fieldNames.length; i++) {
-                row.setField(
-                        i,
-                        fieldConverters[i].convert(
-                                node.get(fieldNames[i]),
-                                JsonPath.field(path, fieldNames[i]),
-                                collector == null ? null : collector.field(fieldNames[i])));
+                if (!present[i]) {
+                    row.setField(
+                            i,
+                            fieldConverters[i].convert(null, JsonPath.field(path, fieldNames[i])));
+                }
+                // Preserve unknown-input order followed by declared-field order in rescue JSON.
+                if (collector != null && fieldRescues[i] != null) {
+                    collector.addField(fieldNames[i], fieldRescues[i]);
+                }
             }
             if (collector != null) {
                 collector.finish();
@@ -437,18 +495,27 @@ final class JsonToFlussConverters {
             ((ObjectNode) rescued).set(name, value);
         }
 
-        private Consumer<JsonNode> element(int index, int size) {
+        private Consumer<JsonNode> element(int index) {
             return value -> {
                 if (rescued == null) {
-                    ArrayNode array = JsonNodeFactory.instance.arrayNode(size);
-                    // Keep original indices so rescued values can be matched to array elements.
-                    for (int i = 0; i < size; i++) {
-                        array.addNull();
-                    }
-                    rescued = array;
+                    rescued = JsonNodeFactory.instance.arrayNode();
                 }
-                ((ArrayNode) rescued).set(index, value);
+                ArrayNode array = (ArrayNode) rescued;
+                while (array.size() <= index) {
+                    array.addNull();
+                }
+                array.set(index, value);
             };
+        }
+
+        private void finishArray(int size) {
+            if (rescued != null) {
+                ArrayNode array = (ArrayNode) rescued;
+                while (array.size() < size) {
+                    array.addNull();
+                }
+            }
+            finish();
         }
 
         private void finish() {
@@ -476,20 +543,32 @@ final class JsonToFlussConverters {
         }
     }
 
-    private static String textualValue(JsonNode node, String path, DataType dataType) {
-        require(node.isTextual(), path, dataType, "expected a JSON string");
-        return node.textValue();
+    private static String textualValue(JsonParser parser, String path, DataType dataType)
+            throws IOException {
+        require(
+                parser.currentToken() == JsonToken.VALUE_STRING,
+                path,
+                dataType,
+                "expected a JSON string");
+        return parser.getText();
     }
 
-    private static byte[] decodeBase64(JsonNode node, String path, DataType dataType) {
+    private static byte[] decodeBase64(JsonParser parser, String path, DataType dataType)
+            throws IOException {
         require(
-                node.isTextual() || node.isBinary(),
+                parser.currentToken() == JsonToken.VALUE_STRING
+                        || parser.currentToken() == JsonToken.VALUE_EMBEDDED_OBJECT,
                 path,
                 dataType,
                 "expected a Base64 string or binary node");
+        if (parser.currentToken() == JsonToken.VALUE_EMBEDDED_OBJECT) {
+            return parser.getBinaryValue();
+        }
+        // Materialize text before decoding: getBinaryValue may partially consume an invalid token.
+        String value = parser.getText();
         try {
-            return node.binaryValue();
-        } catch (IOException e) {
+            return Base64Variants.getDefaultVariant().decode(value);
+        } catch (IllegalArgumentException e) {
             throw invalid(path, dataType, "invalid Base64 string", e);
         }
     }

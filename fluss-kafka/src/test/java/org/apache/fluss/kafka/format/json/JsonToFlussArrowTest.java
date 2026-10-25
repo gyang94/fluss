@@ -28,8 +28,6 @@ import org.apache.fluss.row.columnar.ColumnVector;
 import org.apache.fluss.row.columnar.ColumnarRow;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.memory.RootAllocator;
 import org.apache.fluss.shaded.arrow.org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
-import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.ArrowUtils;
@@ -40,12 +38,11 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
+import static org.apache.fluss.kafka.format.json.JsonConverterTestUtils.convertJson;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Verifies converted JSON values through the Fluss Arrow writers and readers. */
 class JsonToFlussArrowTest {
-    private static final ObjectMapper MAPPER =
-            new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -64,7 +61,7 @@ class JsonToFlussArrowTest {
             ArrowFieldWriter writer =
                     ArrowUtils.createArrowFieldWriter(root.getVector(0), schema.getTypeAt(0));
             for (int i = 0; i < json.length; i++) {
-                Object value = converter.convert(MAPPER.readTree(json[i]), "$[\"binary\"]");
+                Object value = convertJson(converter, json[i], "$[\"binary\"]");
                 writer.write(i, GenericRow.of(value), 0, handleSafe);
             }
             root.setRowCount(json.length);
@@ -115,7 +112,7 @@ class JsonToFlussArrowTest {
                                 root.getVector(field), schema.getTypeAt(field));
             }
             for (int i = 0; i < json.length; i++) {
-                GenericRow row = (GenericRow) converter.convert(MAPPER.readTree(json[i]), "$");
+                GenericRow row = (GenericRow) convertJson(converter, json[i], "$");
                 for (int field = 0; field < writers.length; field++) {
                     writers[field].write(i, row, field, handleSafe);
                 }

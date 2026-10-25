@@ -27,10 +27,11 @@ import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalArray;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.util.JsonParserDelegate;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.TextNode;
 import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -74,8 +75,8 @@ class JsonKafkaRescueTest {
                 decoder.decode(
                         bytes(
                                 "{\"id\":\"bad\",\"details\":{\"known\":\"bad\",\"label\":{\"k\":1},"
-                                        + "\"extra\":[1,null]},\"items\":[null,{\"known\":\"2\"},"
-                                        + "{\"known\":\"bad\",\"extra\":true},\"wrong shape\"],"
+                                        + "\"extra\":[1,null]},\"items\":[null,[1,{\"x\":2}],{\"known\":\"2\"},"
+                                        + "{\"known\":\"bad\",\"extra\":true},null],"
                                         + "\"attributes\":{\"k\":{\"known\":\"bad\",\"extra\":null},"
                                         + "\"good\":{\"known\":4}},\"ratio\":1e400,"
                                         + "\"_kafka_key\":42,\"_kafka_rescue\":{\"origin\":true},\"extra\":"
@@ -87,11 +88,12 @@ class JsonKafkaRescueTest {
         assertThat(row.getRow(1, 2).isNullAt(0)).isTrue();
         assertThat(row.getRow(1, 2).getString(1).toString()).isEqualTo("{\"k\":1}");
         InternalArray items = row.getArray(2);
-        assertThat(items.size()).isEqualTo(4);
+        assertThat(items.size()).isEqualTo(5);
         assertThat(items.isNullAt(0)).isTrue();
-        assertThat(items.getRow(1, 1).getInt(0)).isEqualTo(2);
-        assertThat(items.getRow(2, 1).isNullAt(0)).isTrue();
-        assertThat(items.isNullAt(3)).isTrue();
+        assertThat(items.isNullAt(1)).isTrue();
+        assertThat(items.getRow(2, 1).getInt(0)).isEqualTo(2);
+        assertThat(items.getRow(3, 1).isNullAt(0)).isTrue();
+        assertThat(items.isNullAt(4)).isTrue();
         assertThat(row.getMap(3).valueArray().getRow(0, 1).isNullAt(0)).isTrue();
         assertThat(row.getMap(3).valueArray().getRow(1, 1).getInt(0)).isEqualTo(4);
         assertThat(row.isNullAt(4)).isTrue();
@@ -103,7 +105,7 @@ class JsonKafkaRescueTest {
                                 "{\"_kafka_key\":42,\"_kafka_rescue\":{\"origin\":true},\"extra\":"
                                         + extra
                                         + ",\"id\":\"bad\",\"details\":{\"known\":\"bad\",\"extra\":[1,null]},"
-                                        + "\"items\":[null,null,{\"known\":\"bad\",\"extra\":true},\"wrong shape\"],"
+                                        + "\"items\":[null,[1,{\"x\":2}],null,{\"known\":\"bad\",\"extra\":true},null],"
                                         + "\"attributes\":{\"k\":{\"known\":\"bad\",\"extra\":null}},\"ratio\":1e400}",
                                 Map.class));
         assertThat(decoder.decode(bytes("{\"id\":9}"))[values.length - 1]).isNull();
@@ -150,22 +152,24 @@ class JsonKafkaRescueTest {
     }
 
     @Test
-    void testInternalErrorsAreNotRescued() {
+    void testInternalErrorsAreNotRescued() throws Exception {
         IllegalStateException failure = new IllegalStateException("internal error");
-        JsonNode brokenNode =
-                new TextNode("value") {
+        List<JsonNode> rescued = new ArrayList<>();
+        try (JsonParser parser =
+                new JsonParserDelegate(new ObjectMapper().getFactory().createParser("\"value\"")) {
                     @Override
-                    public String asText() {
+                    public String getText() {
                         throw failure;
                     }
-                };
-        List<JsonNode> rescued = new ArrayList<>();
-        assertThatThrownBy(
-                        () ->
-                                JsonToFlussConverters.create(DataTypes.INT())
-                                        .convert(brokenNode, "$", rescued::add))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasCause(failure);
+                }) {
+            parser.nextToken();
+            assertThatThrownBy(
+                            () ->
+                                    JsonToFlussConverters.create(DataTypes.INT())
+                                            .convert(parser, "$", rescued::add))
+                    .isInstanceOf(KafkaRecordEncodingException.class)
+                    .hasCause(failure);
+        }
         assertThat(rescued).isEmpty();
     }
 
