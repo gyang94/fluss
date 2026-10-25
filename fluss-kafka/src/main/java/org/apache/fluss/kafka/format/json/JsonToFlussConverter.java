@@ -18,30 +18,23 @@
 package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 
 import javax.annotation.Nullable;
 
-import java.io.IOException;
 import java.util.function.Consumer;
 
-/** Converts one JSON value into the internal representation of one Fluss field. */
+/** Converts one JSON node into the internal representation of one Fluss field. */
 @Internal
 interface JsonToFlussConverter {
 
-    /** Converts the current value, or null when the JSON property is missing. */
+    /** Converts the node, which is null when the JSON property is missing. */
     @Nullable
-    default Object convert(@Nullable JsonParser parser, String path) throws IOException {
-        return convert(parser, path, null);
+    default Object convert(@Nullable JsonNode node, String path) {
+        return convert(node, path, null);
     }
 
-    /**
-     * Converts the current value, optionally collecting unknown members and failed nullable values.
-     * Leaves the parser on the scalar token or the matching container end token, including after
-     * rescue. The caller advances to the next field or element.
-     */
+    /** Converts a node, optionally collecting unknown members and failed nullable values. */
     @Nullable
-    Object convert(@Nullable JsonParser parser, String path, @Nullable Consumer<JsonNode> rescue)
-            throws IOException;
+    Object convert(@Nullable JsonNode node, String path, @Nullable Consumer<JsonNode> rescue);
 }

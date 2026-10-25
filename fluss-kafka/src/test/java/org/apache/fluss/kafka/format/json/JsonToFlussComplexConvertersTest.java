@@ -39,8 +39,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.math.BigDecimal;
 import java.util.stream.Stream;
 
-import static org.apache.fluss.kafka.format.json.JsonConverterTestUtils.convertJson;
-import static org.apache.fluss.kafka.format.json.JsonConverterTestUtils.convertNode;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -206,14 +204,14 @@ class JsonToFlussComplexConvertersTest {
     }
 
     @Test
-    void testConvertsAtSchemaNestingLimit() throws Exception {
+    void testConvertsAtSchemaNestingLimit() {
         DataType type = DataTypes.INT();
         JsonNode value = MAPPER.getNodeFactory().numberNode(42);
         for (int i = 0; i < KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; i++) {
             type = DataTypes.ARRAY(type);
             value = MAPPER.createArrayNode().add(value);
         }
-        Object result = convertNode(JsonToFlussConverters.create(type), value, "$");
+        Object result = JsonToFlussConverters.create(type).convert(value, "$");
         for (int i = 0; i < KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH; i++) {
             result = ((GenericArray) result).toObjectArray()[0];
         }
@@ -229,7 +227,7 @@ class JsonToFlussComplexConvertersTest {
         ObjectNode object = MAPPER.createObjectNode().put(name.toString(), "invalid");
         JsonToFlussConverter converter =
                 JsonToFlussConverters.create(DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()));
-        assertThatThrownBy(() -> convertNode(converter, object, "$"))
+        assertThatThrownBy(() -> converter.convert(object, "$"))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("$[\"quoted\\\"\\\\\\n\\t\\r\\b\\f")
                 .hasMessageContaining("...")
@@ -242,6 +240,6 @@ class JsonToFlussComplexConvertersTest {
     }
 
     private static Object convert(DataType type, String json) throws Exception {
-        return convertJson(JsonToFlussConverters.create(type), json, "$");
+        return JsonToFlussConverters.create(type).convert(MAPPER.readTree(json), "$");
     }
 }

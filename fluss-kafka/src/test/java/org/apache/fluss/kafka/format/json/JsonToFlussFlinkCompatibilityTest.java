@@ -24,6 +24,7 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.Deseriali
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.BinaryNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.FloatNode;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -36,8 +37,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.math.BigDecimal;
 import java.util.stream.Stream;
 
-import static org.apache.fluss.kafka.format.json.JsonConverterTestUtils.convertJson;
-import static org.apache.fluss.kafka.format.json.JsonConverterTestUtils.convertNode;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -81,26 +80,20 @@ class JsonToFlussFlinkCompatibilityTest {
     }
 
     @Test
-    void testDecimalTextAndNumericTokens() throws Exception {
+    void testDecimalTextAndFloatingPointNodes() throws Exception {
         assertThat(((Decimal) convert(DataTypes.DECIMAL(5, 2), "\"12.345\"")).toBigDecimal())
                 .isEqualByComparingTo("12.35");
         assertThat(((Decimal) convert(DataTypes.DECIMAL(5, 2), "\"1.2345e1\"")).toBigDecimal())
                 .isEqualByComparingTo("12.35");
         assertThat(((Decimal) convert(DataTypes.DECIMAL(5, 2), "\"1e-2147483647\"")).toBigDecimal())
                 .isEqualByComparingTo(BigDecimal.ZERO);
-        JsonNode floatNode = MAPPER.readTree("0.1");
+        JsonNode floatNode = FloatNode.valueOf(0.1F);
         Decimal decimal =
                 (Decimal)
-                        convertNode(
-                                JsonToFlussConverters.create(DataTypes.DECIMAL(20, 10)),
-                                floatNode,
-                                "$.field");
+                        JsonToFlussConverters.create(DataTypes.DECIMAL(20, 10))
+                                .convert(floatNode, "$.field");
         assertThat(decimal.toBigDecimal()).isEqualByComparingTo("0.1");
-        assertThat(
-                        convertNode(
-                                JsonToFlussConverters.create(DataTypes.DOUBLE()),
-                                floatNode,
-                                "$.field"))
+        assertThat(JsonToFlussConverters.create(DataTypes.DOUBLE()).convert(floatNode, "$.field"))
                 .isEqualTo(0.1D);
     }
 
@@ -108,19 +101,12 @@ class JsonToFlussFlinkCompatibilityTest {
     void testJacksonBinaryNodesAndBase64Whitespace() throws Exception {
         byte[] bytes = {1, 2, 3, 4};
         JsonNode binary = BinaryNode.valueOf(bytes);
-        assertThat(
-                        (byte[])
-                                convertNode(
-                                        JsonToFlussConverters.create(DataTypes.BYTES()),
-                                        binary,
-                                        "$.b"))
+        assertThat((byte[]) JsonToFlussConverters.create(DataTypes.BYTES()).convert(binary, "$.b"))
                 .containsExactly(bytes);
         assertThat(
                         (byte[])
-                                convertNode(
-                                        JsonToFlussConverters.create(DataTypes.BINARY(2)),
-                                        binary,
-                                        "$.b"))
+                                JsonToFlussConverters.create(DataTypes.BINARY(2))
+                                        .convert(binary, "$.b"))
                 .containsExactly((byte) 1, (byte) 2);
         assertThat((byte[]) convert(DataTypes.BYTES(), "\" AQID\\nBA== \"")).containsExactly(bytes);
         assertThat((byte[]) convert(DataTypes.BINARY(6), "\" AQID\\nBA== \""))
@@ -185,6 +171,6 @@ class JsonToFlussFlinkCompatibilityTest {
     }
 
     private static Object convert(DataType type, String json) throws Exception {
-        return convertJson(JsonToFlussConverters.create(type), json, "$.field");
+        return JsonToFlussConverters.create(type).convert(MAPPER.readTree(json), "$.field");
     }
 }
