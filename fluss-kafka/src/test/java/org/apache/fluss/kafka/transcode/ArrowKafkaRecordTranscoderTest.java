@@ -27,7 +27,6 @@ import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.memory.LazyMemorySegmentPool;
 import org.apache.fluss.memory.MemorySegment;
 import org.apache.fluss.metadata.KafkaTableSchema;
@@ -345,7 +344,7 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @Test
-    void testRejectsUnsupportedJsonContainersEvenForNull() {
+    void testConvertsNullJsonContainer() throws Exception {
         TableInfo table =
                 table(
                         descriptor(
@@ -357,9 +356,11 @@ class ArrowKafkaRecordTranscoderTest {
                                         ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
                                         KafkaValueConversionType.PARSE_JSON)
                                 .build());
-        assertThatThrownBy(() -> transcode(table, (byte[]) null))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("ARRAY");
+        read(
+                transcode(table, (byte[]) null),
+                table,
+                1,
+                row -> assertThat(row.isNullAt(0)).isTrue());
     }
 
     @Test

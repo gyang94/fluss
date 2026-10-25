@@ -31,10 +31,15 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.core.StreamReadCon
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.DoubleNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.FloatNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.util.ByteBufferBackedInputStream;
+import org.apache.fluss.types.ArrayType;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
+import org.apache.fluss.types.MapType;
 import org.apache.fluss.types.RowType;
 
 import javax.annotation.Nullable;
@@ -53,10 +58,9 @@ import java.util.Map;
 /** Decodes a strict UTF-8 JSON object according to the projected Fluss fields. */
 @Internal
 public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
-    // Jackson counts the JSON root; the shared business-schema depth starts below that root.
-    // The physical nested ROW adds no JSON level. This stage rejects all business containers.
-    static final int MAX_JSON_NESTING_DEPTH = 64;
-    static final int MAX_CONTAINER_ELEMENTS = 10_000;
+    // The JSON root and a container at business depth zero add two levels to schema depth.
+    // The nested physical ROW represents the JSON root and adds no extra level.
+    static final int MAX_JSON_NESTING_DEPTH = KafkaTableSchema.MAX_JSON_SCHEMA_NESTING_DEPTH + 2;
     private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
 
     private final KafkaFieldProjection projection;
@@ -99,18 +103,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             if (projectedFields.put(name, i) != null) {
                 throw new KafkaTopicSchemaException("Duplicate Kafka JSON field '" + name + "'.");
             }
-            DataType type = this.projection.dataTypeAt(i);
-            switch (type.getTypeRoot()) {
-                case ARRAY:
-                case MAP:
-                case ROW:
-                    throw new KafkaTopicSchemaException(
-                            "Kafka JSON scalar decoding does not support Fluss type "
-                                    + type.asSummaryString()
-                                    + ".");
-                default:
-                    converters[i] = JsonToFlussConverters.create(type);
-            }
+            converters[i] = JsonToFlussConverters.create(this.projection.dataTypeAt(i));
         }
     }
 
@@ -133,14 +126,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             }
             Object[] values = new Object[projection.size()];
             boolean[] present = new boolean[projection.size()];
-            int fieldCount = 0;
             while (parser.nextToken() != JsonToken.END_OBJECT) {
-                if (++fieldCount > MAX_CONTAINER_ELEMENTS) {
-                    throw new KafkaRecordEncodingException(
-                            "Kafka JSON object exceeds the maximum field count of "
-                                    + MAX_CONTAINER_ELEMENTS
-                                    + ".");
-                }
                 String fieldName = parser.currentName();
                 String path = JsonPath.field(JsonPath.ROOT, fieldName);
                 if (KafkaTableSchema.isReservedName(fieldName)) {
@@ -152,14 +138,8 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                     throw new KafkaRecordEncodingException(
                             "Invalid Kafka record value at " + path + ": unknown field.");
                 }
-                JsonToken token = parser.nextToken();
-                // This stage supports scalar fields only. Reject containers before readTree
-                // can allocate their contents, even when the container is wide and shallow.
-                if (token == JsonToken.START_OBJECT || token == JsonToken.START_ARRAY) {
-                    throw new KafkaRecordEncodingException(
-                            "Invalid Kafka record value at " + path + ": expected a JSON scalar.");
-                }
-                JsonNode value = readScalar(parser, projection.dataTypeAt(position));
+                parser.nextToken();
+                JsonNode value = readValue(parser, projection.dataTypeAt(position), path);
                 values[position] = converters[position].convert(value, path);
                 present[position] = true;
             }
@@ -181,6 +161,68 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             throw new KafkaRecordEncodingException(
                     "Kafka record value is not valid strict UTF-8 JSON.", e);
         }
+    }
+
+    private static JsonNode readValue(JsonParser parser, DataType dataType, String path)
+            throws IOException {
+        if (parser.currentToken() != JsonToken.START_OBJECT
+                && parser.currentToken() != JsonToken.START_ARRAY) {
+            return readScalar(parser, dataType);
+        }
+        switch (dataType.getTypeRoot()) {
+            case ARRAY:
+                return readArray(parser, (ArrayType) dataType, path);
+            case ROW:
+            case MAP:
+                return readObject(parser, dataType, path);
+            default:
+                throw new KafkaRecordEncodingException(
+                        "Invalid Kafka record value at " + path + ": expected a JSON scalar.");
+        }
+    }
+
+    private static ArrayNode readArray(JsonParser parser, ArrayType dataType, String path)
+            throws IOException {
+        if (parser.currentToken() != JsonToken.START_ARRAY) {
+            throw new KafkaRecordEncodingException(
+                    "Invalid Kafka record value at " + path + ": expected a JSON array.");
+        }
+        DataType elementType = dataType.getElementType();
+        ArrayNode array = OBJECT_MAPPER.createArrayNode();
+        while (parser.nextToken() != JsonToken.END_ARRAY) {
+            array.add(readValue(parser, elementType, JsonPath.index(path, array.size())));
+        }
+        return array;
+    }
+
+    private static ObjectNode readObject(JsonParser parser, DataType dataType, String path)
+            throws IOException {
+        if (parser.currentToken() != JsonToken.START_OBJECT) {
+            throw new KafkaRecordEncodingException(
+                    "Invalid Kafka record value at " + path + ": expected a JSON object.");
+        }
+        Map<String, DataType> rowFields = new HashMap<>();
+        if (dataType instanceof RowType) {
+            for (DataField field : ((RowType) dataType).getFields()) {
+                rowFields.put(field.getName(), field.getType());
+            }
+        }
+        ObjectNode object = OBJECT_MAPPER.createObjectNode();
+        while (parser.nextToken() != JsonToken.END_OBJECT) {
+            String fieldName = parser.currentName();
+            String fieldPath = JsonPath.field(path, fieldName);
+            DataType fieldType =
+                    dataType instanceof MapType
+                            ? ((MapType) dataType).getValueType()
+                            : rowFields.get(fieldName);
+            if (fieldType == null) {
+                throw new KafkaRecordEncodingException(
+                        "Invalid Kafka record value at " + fieldPath + ": unknown field.");
+            }
+            parser.nextToken();
+            object.set(fieldName, readValue(parser, fieldType, fieldPath));
+        }
+        return object;
     }
 
     private static JsonNode readScalar(JsonParser parser, DataType dataType) throws IOException {
@@ -232,7 +274,7 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                                 .build());
         mapper.enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         mapper.enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION);
-        // Trailing content is checked after the root object, not after individual scalar values.
+        // Trailing content is checked after the root object, not after individual field values.
         return mapper;
     }
 }

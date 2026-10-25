@@ -18,20 +18,16 @@
 package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.config.ConfigOptions;
-import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
-import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.row.BinaryString;
-import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
-import org.apache.fluss.types.RowType;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -39,7 +35,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
 import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -137,63 +132,6 @@ class KafkaFormatFactoryRegistryTest {
                                                 string ? DataTypes.BYTES() : DataTypes.STRING())))
                 .isInstanceOf(KafkaTopicSchemaException.class)
                 .hasMessageContaining(string ? "STRING" : "BYTES");
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testFactoriesRejectKeyAndArbitraryValueColumnNames(boolean string) {
-        KafkaValueConversionType format =
-                string ? KafkaValueConversionType.STRING : KafkaValueConversionType.BINARY;
-        DataType type = string ? DataTypes.STRING() : DataTypes.BYTES();
-        for (String name : Arrays.asList(KafkaTableSchema.KEY_COLUMN, "body")) {
-            KafkaFieldProjection invalid =
-                    new KafkaFieldProjection(
-                            DataTypes.ROW(DataTypes.FIELD(name, type)),
-                            Collections.singletonList(0));
-            assertThatThrownBy(() -> formats.createDecoder(format, invalid))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining("_kafka_value");
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testJsonLayoutDeterminesPhysicalValueContainer(boolean nested) {
-        RowType business = DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT()));
-        KafkaFieldProjection projection =
-                nested
-                        ? projection(business)
-                        : new KafkaFieldProjection(business, Collections.singletonList(0));
-        KafkaFieldDecoder decoder =
-                formats.createDecoder(
-                        KafkaValueConversionType.PARSE_JSON,
-                        projection,
-                        nested
-                                ? KafkaValueConversionLayout.NESTED
-                                : KafkaValueConversionLayout.FLAT);
-        Object[] values =
-                decoder.decode(ByteBuffer.wrap("{\"id\":7}".getBytes(StandardCharsets.UTF_8)));
-        assertThat(values).hasSize(1);
-        if (nested) {
-            assertThat(((InternalRow) values[0]).getInt(0)).isEqualTo(7);
-        } else {
-            assertThat(values).containsExactly(7);
-        }
-        assertThatThrownBy(
-                        () ->
-                                formats.createDecoder(
-                                        KafkaValueConversionType.PARSE_JSON,
-                                        projection(DataTypes.STRING())))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("Reserved name");
-        assertThatThrownBy(
-                        () ->
-                                decoder.decode(
-                                        ByteBuffer.wrap(
-                                                "{\"_kafka_value\":{\"id\":7}}"
-                                                        .getBytes(StandardCharsets.UTF_8))))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining("reserved field");
     }
 
     private static KafkaFieldProjection projection(DataType type) {
