@@ -65,6 +65,18 @@ When authorization is enabled, the user must also have the required permissions 
 SASL handshake versions 0–1 and SaslAuthenticate versions 0–2 are supported. Ordinary requests are
 rejected until authentication completes.
 
+`kafka.enabled` can be updated through the dynamic cluster configuration API. Disabling it
+keeps configured Kafka listeners bound and leaves native Fluss access available. New writes are
+rejected with the non-retryable `INVALID_REQUEST` error; writes already submitted may complete.
+Clients must reconnect after re-enabling the service because existing connections remain retired.
+
+Requests without a legal error response, including Produce with `acks=0` and Metadata with no
+explicit topics, close the connection after earlier responses. `kafka.service.drain-timeout`
+(default `30 s`, positive, startup-only) bounds that wait; disconnecting does not roll back writes.
+
+Deploy `fluss-kafka` and `fluss-server` from the same build. The Kafka JAR bundles `kafka-clients`
+and uses the compression libraries provided by the server JAR.
+
 ## Topic-to-table mapping
 
 Topic names use `<database>.<table>`. Names without a database prefix use

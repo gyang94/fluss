@@ -25,7 +25,8 @@ import org.apache.fluss.metrics.util.NOPMetricsGroup;
 import org.apache.fluss.rpc.netty.server.NettyServer;
 import org.apache.fluss.rpc.netty.server.RequestsMetrics;
 
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -37,10 +38,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** Tests idle connection closure through the Kafka listener's actual Netty pipeline. */
 class KafkaProtocolPluginITCase extends KafkaServerTestBase {
 
-    @Test
-    void testKafkaConnectionClosesAfterConfiguredNettyIdleTimeout() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testIdleConnectionCloses(boolean enabled) throws Exception {
         Configuration conf = new Configuration();
-        conf.set(ConfigOptions.KAFKA_ENABLED, true);
+        conf.set(ConfigOptions.KAFKA_ENABLED, enabled);
         conf.set(ConfigOptions.NETTY_SERVER_NUM_WORKER_THREADS, 1);
         conf.set(ConfigOptions.NETTY_SERVER_NUM_NETWORK_THREADS, 1);
         conf.set(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME, Duration.ofSeconds(1));

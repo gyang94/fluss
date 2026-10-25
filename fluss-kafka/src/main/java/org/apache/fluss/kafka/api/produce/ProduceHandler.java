@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.api.produce;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.KafkaRequestContext;
+import org.apache.fluss.kafka.KafkaServiceUnavailableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceBackend;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
@@ -34,6 +35,7 @@ import org.apache.fluss.utils.ExceptionUtils;
 
 import org.apache.kafka.common.InvalidRecordException;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.ApiException;
 import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.errors.InvalidRequiredAcksException;
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -53,9 +55,11 @@ import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.utils.BufferSupplier;
 import org.apache.kafka.common.utils.CloseableIterator;
 
+import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.nio.BufferUnderflowException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -95,6 +99,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
     @Override
     public CompletableFuture<? extends AbstractResponse> handle(
             KafkaRequestContext context, ProduceRequest request) {
+        context.serviceGuard().ensureAvailable();
         validateRequest(request);
         List<TopicWrite> topics = new ArrayList<>();
         Map<TopicPartition, PartitionResult> failures = new HashMap<>();
@@ -102,6 +107,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
             List<PartitionWrite> partitions = new ArrayList<>();
             for (PartitionProduceData partition : topic.partitionData()) {
                 try {
+                    context.serviceGuard().ensureAvailable();
                     if (!Topic.isValid(topic.name())) {
                         throw new InvalidTopicException("Invalid Kafka topic name " + topic.name());
                     }
@@ -122,6 +128,7 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                 topics.add(new TopicWrite(topic.name(), partitions));
             }
         }
+        context.serviceGuard().ensureAvailable();
         KafkaProduceCommand command =
                 new KafkaProduceCommand(
                         request.acks(),
@@ -129,7 +136,8 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                         topics,
                         context.listenerName(),
                         clientAddress(context.remoteAddress()),
-                        context.principal());
+                        context.principal(),
+                        context.serviceGuard());
         CompletableFuture<KafkaProduceResult> result;
         try {
             // The backend consumes borrowed payloads before returning. Only the write result may
@@ -175,6 +183,19 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                             partitions.add(value);
                         }
                         ordered.add(new TopicResult(topic.name(), partitions));
+                    }
+                    if (ordered.stream()
+                            .flatMap(topic -> topic.partitions().stream())
+                            .anyMatch(
+                                    partition ->
+                                            partition.error() == Errors.INVALID_REQUEST
+                                                    && KafkaServiceUnavailableException.MESSAGE
+                                                            .equals(partition.errorMessage()))) {
+                        org.slf4j.LoggerFactory.getLogger(ProduceHandler.class)
+                                .info(KafkaServiceUnavailableException.MESSAGE);
+                        if (request.acks() == 0) {
+                            context.closeWithoutResponse();
+                        }
                     }
                     return toResponse(new KafkaProduceResult(ordered));
                 });
@@ -261,6 +282,8 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                                     record.hasValue() ? record.value() : null,
                                     readHeaders(record.headers())));
                 }
+            } catch (RuntimeException failure) {
+                throw normalizeRecordCopyFailure(failure);
             }
         }
         if (parsedRecords.isEmpty() || validBytes != records.sizeInBytes()) {
@@ -280,6 +303,28 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
             default:
                 throw new InvalidRecordException("Unknown batch timestamp type.");
         }
+    }
+
+    static RuntimeException normalizeRecordCopyFailure(RuntimeException failure) {
+        Throwable cause = failure;
+        Throwable streamFailure = null;
+        while (cause != null && cause != cause.getCause()) {
+            // Codec wrappers must preserve specific protocol errors, including admission limits.
+            if (cause instanceof ApiException) {
+                return (ApiException) cause;
+            }
+            // The LZ4 header reader can expose buffer underflow for a truncated descriptor.
+            if (cause instanceof IOException || cause instanceof BufferUnderflowException) {
+                streamFailure = cause;
+            }
+            cause = cause.getCause();
+        }
+        // The protocol sends only the message, so include codec diagnostics and retain the full
+        // exception chain as the cause for server-side debugging.
+        return streamFailure != null
+                ? new InvalidRecordException(
+                        "Failed to decompress Kafka record batch: " + streamFailure, failure)
+                : failure;
     }
 
     private static ProduceResponse toResponse(KafkaProduceResult result) {

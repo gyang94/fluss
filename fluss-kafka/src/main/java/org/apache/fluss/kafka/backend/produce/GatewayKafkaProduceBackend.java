@@ -19,6 +19,7 @@ package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.exception.TableNotExistException;
+import org.apache.fluss.kafka.KafkaServiceUnavailableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceResult.PartitionResult;
@@ -37,7 +38,6 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.rpc.entity.ProduceLogResultForBucket;
 import org.apache.fluss.rpc.netty.server.Session;
-import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.server.entity.UserContext;
 import org.apache.fluss.server.metadata.TabletServerMetadataCache;
 import org.apache.fluss.server.replica.ReplicaManager;
@@ -84,10 +84,10 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
 
     @Override
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
+        command.ensureServiceAvailable();
         setCurrentSession(command);
         List<CompletableFuture<TopicResult>> topics = new ArrayList<>();
-        try (AppendBatch batch =
-                new AppendBatch(command.timeoutMs(), command.acks(), command.principal())) {
+        try (AppendBatch batch = new AppendBatch(command)) {
             for (TopicWrite topic : command.topics()) {
                 List<CompletableFuture<PartitionResult>> partitions = new ArrayList<>();
                 for (PartitionWrite partition : topic.partitions()) {
@@ -121,6 +121,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         continue;
                     }
                     try {
+                        command.ensureServiceAvailable();
                         service.authorizeTable(WRITE, path);
                         EncodedRecords converted =
                                 transcoder.transcode(
@@ -163,18 +164,14 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     }
 
     private final class AppendBatch implements AutoCloseable {
-        private final int timeoutMs;
-        private final short acks;
-        private final FlussPrincipal principal;
+        private final KafkaProduceCommand command;
         private final Map<TableBucket, MemoryLogRecords> entriesPerBucket = new HashMap<>();
         private final Map<TableBucket, CompletableFuture<PartitionResult>> results =
                 new HashMap<>();
         private final List<EncodedRecords> convertedRecords = new ArrayList<>();
 
-        private AppendBatch(int timeoutMs, short acks, FlussPrincipal principal) {
-            this.timeoutMs = timeoutMs;
-            this.acks = acks;
-            this.principal = principal;
+        private AppendBatch(KafkaProduceCommand command) {
+            this.command = command;
         }
 
         private void appendLogs() {
@@ -185,12 +182,16 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             // payloads or converted records. Local append consumes all records synchronously.
             Map<TableBucket, CompletableFuture<PartitionResult>> pending = new HashMap<>(results);
             try {
-                replicaManager.appendRecordsToLog(
-                        timeoutMs,
-                        acks,
-                        entriesPerBucket,
-                        new UserContext(principal),
-                        responses -> completeResults(pending, responses));
+                command.submitIfServiceAvailable(
+                        () -> {
+                            replicaManager.appendRecordsToLog(
+                                    command.timeoutMs(),
+                                    command.acks(),
+                                    entriesPerBucket,
+                                    new UserContext(command.principal()),
+                                    responses -> completeResults(pending, responses));
+                            return null;
+                        });
             } catch (Exception failure) {
                 pending.forEach(
                         (bucket, result) ->
@@ -235,7 +236,9 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private static PartitionResult failedPartition(int partitionId, Throwable failure) {
         Throwable cause = unwrap(failure);
         Errors kafkaError;
-        if (cause instanceof RejectedExecutionException
+        if (cause instanceof KafkaServiceUnavailableException) {
+            kafkaError = Errors.INVALID_REQUEST;
+        } else if (cause instanceof RejectedExecutionException
                 || cause instanceof TimeoutException
                 || cause instanceof InterruptedException
                 || cause instanceof CancellationException) {

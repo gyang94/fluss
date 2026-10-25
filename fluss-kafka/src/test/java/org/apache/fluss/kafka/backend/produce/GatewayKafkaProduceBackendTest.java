@@ -22,6 +22,8 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.MemorySize;
 import org.apache.fluss.exception.AuthorizationException;
 import org.apache.fluss.kafka.KafkaServerTestBase;
+import org.apache.fluss.kafka.KafkaServiceGuard;
+import org.apache.fluss.kafka.KafkaServiceUnavailableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.PartitionWrite;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TopicWrite;
@@ -64,8 +66,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests direct local append, per-partition failures and shared conversion memory. */
 class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
@@ -224,6 +228,80 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
         assertThat(result.topics().get(1).partitions().get(0).error())
                 .isEqualTo(Errors.NOT_ENOUGH_REPLICAS);
         assertThat(replicaManager.getMemorySegmentPool().usedPages()).isZero();
+    }
+
+    @Test
+    void testDisabledCommandDoesNotAllocateOrAppend() throws Exception {
+        createTable("topic", 42L, Collections.singletonList(TABLET_SERVER_ID));
+        KafkaProduceCommand command =
+                new KafkaProduceCommand(
+                        (short) 1,
+                        30000,
+                        Collections.singletonList(topic("topic", good(0))),
+                        "KAFKA",
+                        InetAddress.getLoopbackAddress(),
+                        FlussPrincipal.ANONYMOUS,
+                        new KafkaServiceGuard(() -> false));
+        GatewayKafkaProduceBackend backend = backend();
+        assertThatThrownBy(() -> backend.write(command))
+                .isInstanceOf(KafkaServiceUnavailableException.class);
+        assertThat(
+                        replicaManager
+                                .getReplicaOrException(new TableBucket(42L, 0))
+                                .getLocalLogEndOffset())
+                .isZero();
+        assertThat(replicaManager.getMemorySegmentPool().usedPages()).isZero();
+    }
+
+    @Test
+    void testDisableDuringConversionRejectsNativeSubmissionAndReleasesMemory() throws Exception {
+        createTable("topic", 42L, Collections.singletonList(TABLET_SERVER_ID));
+        AtomicBoolean enabled = new AtomicBoolean(true);
+        DefaultAuthorizer authorizer =
+                new DefaultAuthorizer(
+                        new AuthorizationPlugin.Context() {
+                            @Override
+                            public Configuration getConfiguration() {
+                                return conf;
+                            }
+
+                            @Override
+                            public Optional<ZooKeeperClient> getZooKeeperClient() {
+                                return Optional.of(zkClient);
+                            }
+                        }) {
+                    @Override
+                    public void authorize(
+                            Session session, OperationType operation, Resource resource) {
+                        enabled.set(false);
+                    }
+                };
+        GatewayKafkaProduceBackend backend =
+                new GatewayKafkaProduceBackend(createTabletService(authorizer), mapper());
+        backends.add(backend);
+        KafkaProduceCommand command =
+                new KafkaProduceCommand(
+                        (short) 1,
+                        30000,
+                        Collections.singletonList(topic("topic", good(0))),
+                        "KAFKA",
+                        InetAddress.getLoopbackAddress(),
+                        FlussPrincipal.ANONYMOUS,
+                        new KafkaServiceGuard(enabled::get));
+        try {
+            KafkaProduceResult result = backend.write(command).join();
+            assertErrors(result, Errors.INVALID_REQUEST);
+            assertThat(result.topics().get(0).partitions().get(0).errorMessage())
+                    .isEqualTo(KafkaServiceUnavailableException.MESSAGE);
+            assertThat(
+                            replicaManager
+                                    .getReplicaOrException(new TableBucket(42L, 0))
+                                    .getLocalLogEndOffset())
+                    .isZero();
+            assertThat(replicaManager.getMemorySegmentPool().usedPages()).isZero();
+        } finally {
+            authorizer.close();
+        }
     }
 
     private void acknowledge(TableBucket bucket) throws Exception {

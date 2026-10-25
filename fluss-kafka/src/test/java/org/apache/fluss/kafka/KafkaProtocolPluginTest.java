@@ -19,6 +19,7 @@ package org.apache.fluss.kafka;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.exception.ConfigException;
 import org.apache.fluss.rpc.TestingTabletGatewayService;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.channel.socket.nio.NioSocketChannel;
@@ -62,5 +63,35 @@ class KafkaProtocolPluginTest {
         plugin.setup(new Configuration());
         assertThatThrownBy(() -> plugin.createRequestHandler(new TestingTabletGatewayService()))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void testRejectsNonPositiveDrainTimeout() {
+        Configuration config = new Configuration();
+        config.set(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT, Duration.ZERO);
+        assertThatThrownBy(() -> new KafkaProtocolPlugin().setup(config))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining("kafka.service.drain-timeout");
+    }
+
+    @Test
+    void testReconfigureAndClose() {
+        Configuration config = new Configuration();
+        KafkaProtocolPlugin plugin = new KafkaProtocolPlugin();
+        plugin.setup(config);
+        try {
+            for (boolean enabled : new boolean[] {true, false, true, false}) {
+                config.set(ConfigOptions.KAFKA_ENABLED, enabled);
+                plugin.validate(config);
+                plugin.reconfigure(config);
+                assertThat(plugin.getServiceControllerForTesting().isEnabled()).isEqualTo(enabled);
+            }
+            plugin.closeAsync().join();
+            config.set(ConfigOptions.KAFKA_ENABLED, true);
+            plugin.reconfigure(config);
+            assertThat(plugin.getServiceControllerForTesting().isEnabled()).isFalse();
+        } finally {
+            plugin.closeAsync().join();
+        }
     }
 }

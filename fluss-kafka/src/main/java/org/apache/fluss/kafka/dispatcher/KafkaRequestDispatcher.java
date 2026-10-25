@@ -20,12 +20,17 @@ package org.apache.fluss.kafka.dispatcher;
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.kafka.KafkaRequest;
 import org.apache.fluss.kafka.KafkaRequestContext;
+import org.apache.fluss.kafka.KafkaServiceUnavailableException;
 import org.apache.fluss.kafka.error.KafkaErrorMapper;
 import org.apache.fluss.utils.concurrent.FutureUtils;
 
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.MetadataRequest;
+import org.apache.kafka.common.requests.ProduceRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -34,6 +39,8 @@ import static org.apache.fluss.utils.Preconditions.checkNotNull;
 /** Validates and dispatches parsed Kafka requests to independently registered API handlers. */
 @Internal
 public final class KafkaRequestDispatcher {
+
+    private static final Logger LOG = LoggerFactory.getLogger(KafkaRequestDispatcher.class);
 
     private final KafkaApiRegistry registry;
     private final KafkaErrorMapper errorMapper;
@@ -46,6 +53,10 @@ public final class KafkaRequestDispatcher {
 
     /** Dispatches a request and maps handler failures to Kafka protocol responses. */
     public CompletableFuture<AbstractResponse> dispatch(KafkaRequest request) {
+        if (request.cancelled() || request.isConnectionClosing()) {
+            request.closeWithoutResponse();
+            return CompletableFuture.completedFuture(null);
+        }
         AbstractRequest abstractRequest = request.request();
         KafkaApiHandler<?> handler = registry.lookup(request.apiKey());
         if (handler == null) {
@@ -68,6 +79,9 @@ public final class KafkaRequestDispatcher {
                                     spec.maxVersion())));
         }
 
+        if (!request.serviceAvailable()) {
+            return disabledResponse(request);
+        }
         CompletableFuture<? extends AbstractResponse> responseFuture;
         try {
             responseFuture =
@@ -75,6 +89,8 @@ public final class KafkaRequestDispatcher {
             if (responseFuture == null) {
                 throw new NullPointerException("Kafka API handler returned a null future.");
             }
+        } catch (KafkaServiceUnavailableException disabled) {
+            return disabledResponse(request);
         } catch (Throwable t) {
             return completedErrorResponse(abstractRequest, t);
         }
@@ -101,6 +117,24 @@ public final class KafkaRequestDispatcher {
                     }
                 });
         return result;
+    }
+
+    private CompletableFuture<AbstractResponse> disabledResponse(KafkaRequest request) {
+        LOG.info(
+                "{} API={}, version={}, correlationId={}",
+                KafkaServiceUnavailableException.MESSAGE,
+                request.apiKey(),
+                request.apiVersion(),
+                request.header().correlationId());
+        AbstractRequest body = request.request();
+        if ((body instanceof ProduceRequest && ((ProduceRequest) body).acks() == 0)
+                || (body instanceof MetadataRequest
+                        && (((MetadataRequest) body).isAllTopics()
+                                || ((MetadataRequest) body).topics().isEmpty()))) {
+            request.closeWithoutResponse();
+            return CompletableFuture.completedFuture(null);
+        }
+        return completedErrorResponse(body, new KafkaServiceUnavailableException());
     }
 
     @SuppressWarnings("unchecked")

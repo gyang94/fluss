@@ -227,6 +227,7 @@ class KafkaRequestDispatcherTest {
     private static KafkaRequest request(short version) {
         KafkaRequest request = mock(KafkaRequest.class);
         when(request.apiKey()).thenReturn(ApiKeys.API_VERSIONS);
+        when(request.serviceAvailable()).thenReturn(true);
         when(request.apiVersion()).thenReturn(version);
         when(request.request()).thenReturn(new ApiVersionsRequest.Builder().build(version));
         when(request.header())

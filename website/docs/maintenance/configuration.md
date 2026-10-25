@@ -306,7 +306,8 @@ Kafka protocol compatibility is still in development.
 
 | Option                         | Type     | Default | Description                                                                                                        |
 |--------------------------------|----------|---------|--------------------------------------------------------------------------------------------------------------------|
-| kafka.enabled                  | Boolean  | false   | Whether enable Fluss Kafka. Disabled by default. When this option is set to true, the Fluss Kafka will be enabled. |
+| kafka.enabled                  | Boolean  | false   | Whether Kafka listeners provide service. Dynamically configurable; disabling service keeps configured listeners bound and rejects new Kafka writes. |
+| kafka.service.drain-timeout | Duration | 30 s | Maximum wait for earlier responses before closing a Kafka connection that cannot receive an error response. Positive, startup-only; submitted writes are not rolled back. |
 | kafka.listener.names           | String   | KAFKA   | The listener names for Kafka wire protocol communication. Support multiple listener names, separated by comma.     |
 | kafka.default.database         | String   | fluss   | Database used for unqualified Kafka topic names. When Kafka is enabled, the coordinator creates this database if missing, including `fluss`. |
 
