@@ -54,6 +54,8 @@ import java.util.Set;
 /**
  * Decodes a strict UTF-8 JSON object according to the projected Fluss fields.
  *
+ * <p>Unpaired surrogate escapes follow Jackson parsing and Fluss's default string encoding.
+ *
  * <p>Jackson's node tree preserves ordinary decimal precision but normalizes signed zero. Extreme
  * exponents may be rejected or lose numeric fidelity during parsing, including in rescued JSON.
  */
@@ -114,7 +116,6 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
                 throw new KafkaRecordEncodingException(
                         "Kafka record value is not valid strict UTF-8 JSON: trailing content.");
             }
-            validateUnicode(root, JsonPath.ROOT);
             ObjectNode rescuedFields = rescueEnabled ? OBJECT_MAPPER.createObjectNode() : null;
             Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
             while (fields.hasNext()) {
@@ -150,39 +151,6 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
         } catch (IOException | RuntimeException e) {
             throw new KafkaRecordEncodingException(
                     "Kafka record value is not valid strict UTF-8 JSON.", e);
-        }
-    }
-
-    private static void validateUnicode(JsonNode node, String path) {
-        if (node.isObject()) {
-            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                String fieldPath = JsonPath.field(path, field.getKey());
-                validateUnicode(field.getKey(), fieldPath);
-                validateUnicode(field.getValue(), fieldPath);
-            }
-        } else if (node.isArray()) {
-            for (int i = 0; i < node.size(); i++) {
-                validateUnicode(node.get(i), JsonPath.index(path, i));
-            }
-        } else if (node.isTextual()) {
-            validateUnicode(node.textValue(), path);
-        }
-    }
-
-    private static void validateUnicode(String value, String path) {
-        // Reject unpaired JSON escapes before UTF-8 encoding replaces them with '?'.
-        for (int i = 0; i < value.length(); i++) {
-            char character = value.charAt(i);
-            if (Character.isHighSurrogate(character)
-                    && i + 1 < value.length()
-                    && Character.isLowSurrogate(value.charAt(i + 1))) {
-                i++;
-            } else if (Character.isSurrogate(character)) {
-                throw new KafkaRecordEncodingException(
-                        "Invalid Kafka record value at " + path + ": unpaired UTF-16 surrogate.");
-            }
         }
     }
 

@@ -116,6 +116,22 @@ class JsonKafkaRescueTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void testUnpairedSurrogateEscapesFollowDefaultEncoding(boolean nested) throws Exception {
+        KafkaDecodedValue decoded =
+                decoder(nested, true)
+                        .decode(
+                                bytes(
+                                        "{\"details\":{\"label\":\"\\uD800\"},\"extra\":\"\\uDC00\"}"));
+        Object[] values = decoded.valueFields();
+        GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
+        assertThat(row.getRow(1, 2).getString(1).toString()).isEqualTo("?");
+        ObjectMapper mapper = new ObjectMapper();
+        assertThat(mapper.readTree(decoded.rescue()))
+                .isEqualTo(mapper.readTree("{\"extra\":\"\\uDC00\"}"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void testRescueRequiresTheFixedSystemColumn(boolean nested) {
         KafkaFieldDecoder decoder = decoder(nested, false);
         assertThat(decoder.decode(bytes("{\"id\":7}")).valueFields())
@@ -145,7 +161,6 @@ class JsonKafkaRescueTest {
                 Arrays.asList(
                         "{\"extra\":[",
                         "{\"extra\":1,\"extra\":2}",
-                        "{\"extra\":\"\\uD800\"}",
                         "[]",
                         "{} {}",
                         "{\"extra\":[{\"k\":1,\"k\":2}]}",
