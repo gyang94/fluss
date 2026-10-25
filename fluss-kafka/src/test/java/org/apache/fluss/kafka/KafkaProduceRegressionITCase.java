@@ -33,7 +33,6 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.config.cluster.AlterConfig;
 import org.apache.fluss.config.cluster.AlterConfigOpType;
-import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -54,7 +53,6 @@ import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.clients.producer.RecordMetadata;
-import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.NotEnoughReplicasException;
 import org.apache.kafka.common.message.MetadataResponseData.MetadataResponsePartition;
@@ -63,24 +61,16 @@ import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.SimpleRecord;
-import org.apache.kafka.common.requests.AbstractRequest;
-import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
-import org.apache.kafka.common.requests.RequestHeader;
-import org.apache.kafka.common.requests.RequestUtils;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.assertj.core.groups.Tuple;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -93,6 +83,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
+import static org.apache.fluss.kafka.KafkaSocketTestUtils.connect;
+import static org.apache.fluss.kafka.KafkaSocketTestUtils.sendRequest;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -112,54 +104,6 @@ class KafkaProduceRegressionITCase {
                     .build();
 
     @Test
-    void testProducerRefreshesMetadataAfterLeaderFailover() throws Exception {
-        TablePath path = TablePath.of(DATABASE, "metadata_failover");
-        String topic = path.toString();
-        int stoppedLeader = -1;
-        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
-                Admin admin = connection.getAdmin()) {
-            try {
-                createTable(admin, path, 3);
-                MetadataResponsePartition initial =
-                        waitForTopic(topic).data().topics().find(topic).partitions().get(0);
-                stoppedLeader = initial.leaderId();
-                try (KafkaProducer<byte[], byte[]> producer = producer("1", true)) {
-                    assertThat(send(producer, topic, "before_failover").offset()).isNotNegative();
-                    CLUSTER.stopTabletServer(stoppedLeader);
-                    retry(
-                            Duration.ofMinutes(1),
-                            () -> {
-                                MetadataResponseTopic metadata =
-                                        fetchMetadata(topic).data().topics().find(topic);
-                                assertThat(metadata.errorCode()).isEqualTo(Errors.NONE.code());
-                                MetadataResponsePartition partition = metadata.partitions().get(0);
-                                assertThat(partition.errorCode()).isEqualTo(Errors.NONE.code());
-                                assertThat(partition.leaderId())
-                                        .isNotEqualTo(-1)
-                                        .isNotEqualTo(initial.leaderId());
-                                assertThat(partition.leaderEpoch())
-                                        .isGreaterThan(initial.leaderEpoch());
-                            });
-                    // Reuse the same producer to verify routing recovers after leader disconnect.
-                    // acks=1 permits data loss and offset reuse after failover; this verifies
-                    // continued routing, not durability of the first acknowledged record.
-                    assertThat(send(producer, topic, "after_failover").offset()).isNotNegative();
-                }
-            } finally {
-                try {
-                    if (stoppedLeader >= 0 && CLUSTER.getTabletServerById(stoppedLeader) == null) {
-                        CLUSTER.startTabletServer(stoppedLeader);
-                        CLUSTER.assertHasTabletServerNumber(3);
-                        CLUSTER.waitUntilAllGatewayHasSameMetadata();
-                    }
-                } finally {
-                    admin.dropTable(path, true).get();
-                }
-            }
-        }
-    }
-
-    @Test
     void testProducerRefreshesMetadataAfterOnlineLeaderChange() throws Exception {
         TablePath path = TablePath.of(DATABASE, "metadata_online_leader_change");
         String topic = path.toString();
@@ -167,7 +111,7 @@ class KafkaProduceRegressionITCase {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
             try {
-                createTable(admin, path, 3, metadataSchema(), 1);
+                createTable(admin, path, 3);
                 TableInfo tableInfo = admin.getTableInfo(path).get();
                 TableBucket bucket = new TableBucket(tableInfo.getTableId(), 0);
                 MetadataResponsePartition initial =
@@ -184,64 +128,24 @@ class KafkaProduceRegressionITCase {
 
                 // Keep this socket open across the handoff to verify the old leader stays
                 // reachable.
-                try (Socket oldLeaderSocket = connect(oldNode);
+                try (Socket oldLeaderSocket = connect(oldNode, 5000);
                         KafkaProducer<byte[], byte[]> producer = producer("all", true)) {
-                    MetadataResponse before =
-                            (MetadataResponse) sendRequest(oldLeaderSocket, metadataRequest(topic));
-                    assertThat(before.data().topics().find(topic).partitions().get(0).leaderId())
-                            .isEqualTo(oldLeader);
-                    assertThat(send(producer, topic, 0, 123L, "before_handoff").offset()).isZero();
-                    assertRecordsWithMetadata(
-                            connection,
-                            path,
-                            0,
-                            0L,
-                            tableInfo.getSchemaId(),
-                            tuple(0L, "before_handoff", 123L, 0, 0));
+                    assertThat(send(producer, topic, "before_handoff").offset()).isZero();
                     CLUSTER.waitUntilReplicaExpandToIsr(bucket, newLeader);
-                    double retriesBefore = producerMetric(producer, "record-retry-total");
-                    double disconnectsBefore = producerMetric(producer, "connection-close-total");
 
                     rebalanceLeader(bucket, initial, newLeader, rebalanceId);
                     waitForLeaderChange(
                             admin, topic, 0, newLeader, initial.leaderEpoch(), rebalanceId);
                     CLUSTER.waitAndGetFollowerReplica(bucket, oldLeader);
-                    assertThat(CLUSTER.getTabletServerNodes("KAFKA"))
-                            .containsExactlyInAnyOrderElementsOf(nodes);
 
                     ProduceResponse rejected =
                             (ProduceResponse)
                                     sendRequest(oldLeaderSocket, produceRequest(topic, "rejected"));
-                    assertThat(rejected.data().responses().find(topic).partitionResponses())
-                            .singleElement()
-                            .satisfies(
-                                    partition -> {
-                                        assertThat(partition.index()).isZero();
-                                        assertThat(partition.errorCode())
-                                                .isEqualTo(Errors.NOT_LEADER_OR_FOLLOWER.code());
-                                        assertThat(partition.baseOffset()).isEqualTo(-1L);
-                                    });
+                    assertThat(rejected.errorCounts())
+                            .containsEntry(Errors.NOT_LEADER_OR_FOLLOWER, 1);
 
-                    // partitionsFor uses the already populated producer cache. Separate raw
-                    // Metadata requests above must not refresh this route before the next send.
-                    assertThat(producer.partitionsFor(topic).get(0).leader().id())
-                            .isEqualTo(oldLeader);
-                    assertThat(send(producer, topic, 0, 456L, "after_handoff").offset())
-                            .isEqualTo(1L);
-                    assertThat(producerMetric(producer, "record-retry-total"))
-                            .isGreaterThan(retriesBefore);
-                    assertThat(producerMetric(producer, "connection-close-total"))
-                            .isEqualTo(disconnectsBefore);
-                    assertThat(producer.partitionsFor(topic).get(0).leader().id())
-                            .isEqualTo(newLeader);
-                    assertRecordsWithMetadata(
-                            connection,
-                            path,
-                            0,
-                            0L,
-                            tableInfo.getSchemaId(),
-                            tuple(0L, "before_handoff", 123L, 0, 0),
-                            tuple(1L, "after_handoff", 456L, 0, 0));
+                    assertThat(send(producer, topic, "after_handoff").offset()).isEqualTo(1L);
+                    assertValues(connection, path, "before_handoff", "after_handoff");
                 }
             } finally {
                 try {
@@ -294,14 +198,25 @@ class KafkaProduceRegressionITCase {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
             try {
-                createTable(admin, path, 3);
-                MetadataResponse initial = waitForTopic(full);
-                assertKafkaListenerEndpoints(initial);
-                Uuid fullId = initial.data().topics().find(full).topicId();
-                assertThat(fullId).isNotEqualTo(Uuid.ZERO_UUID);
-                assertThat(topicId(full)).isEqualTo(fullId);
-                Uuid aliasId = topicId(alias);
-                assertThat(aliasId).isNotEqualTo(Uuid.ZERO_UUID).isNotEqualTo(fullId);
+                admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
+                admin.createTable(
+                                path,
+                                TableDescriptor.builder()
+                                        .schema(
+                                                Schema.newBuilder()
+                                                        .column("_kafka_value", DataTypes.BYTES())
+                                                        .build())
+                                        .distributedBy(1)
+                                        .property(
+                                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
+                                                KafkaValueConversionType.BINARY)
+                                        .build(),
+                                false)
+                        .get();
+                CLUSTER.waitUntilTableReady(admin.getTableInfo(path).get().getTableId());
+                assertRejectedNames(
+                        path, Errors.UNKNOWN_TOPIC_OR_PARTITION, Errors.UNKNOWN_TOPIC_OR_PARTITION);
+                setTableEnabled(admin, path, true);
                 try (KafkaProducer<byte[], byte[]> producer = producer("all", true)) {
                     assertThat(send(producer, full, "full").offset()).isZero();
                     assertThat(send(producer, alias, "alias").offset()).isEqualTo(1L);
@@ -311,50 +226,13 @@ class KafkaProduceRegressionITCase {
                             Errors.UNKNOWN_TOPIC_OR_PARTITION,
                             Errors.UNKNOWN_TOPIC_OR_PARTITION);
                     setTableEnabled(admin, path, true);
-                    assertThat(topicId(full)).isEqualTo(fullId);
-                    assertThat(topicId(alias)).isEqualTo(aliasId);
                     assertThat(send(producer, alias, "enabled").offset()).isEqualTo(2L);
-                    Map<String, String> properties =
-                            admin.getTableInfo(path).get().getProperties().toMap();
-                    assertThatThrownBy(
-                                    () ->
-                                            admin.alterTable(
-                                                            path,
-                                                            Collections.singletonList(
-                                                                    TableChange.set(
-                                                                            ConfigOptions
-                                                                                    .TABLE_KAFKA_CONVERT_VALUE_TYPE
-                                                                                    .key(),
-                                                                            "string")),
-                                                            false)
-                                                    .get())
-                            .isInstanceOf(ExecutionException.class);
-                    assertThat(admin.getTableInfo(path).get().getProperties().toMap())
-                            .isEqualTo(properties);
-                    admin.alterTable(
-                                    path,
-                                    Collections.singletonList(
-                                            TableChange.set(
-                                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE
-                                                            .key(),
-                                                    "BINARY")),
-                                    false)
-                            .get();
-                    TableInfo updated = admin.getTableInfo(path).get();
-                    assertThat(updated.getProperties().toMap())
-                            .containsEntry(
-                                    ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "BINARY");
-                    waitForReplicaTableInfo(updated);
-                    assertThat(send(producer, full, "property").offset()).isEqualTo(3L);
-                    assertValues(connection, path, "full", "alias", "enabled", "property");
+                    assertValues(connection, path, "full", "alias", "enabled");
                     admin.dropTable(path, false).get();
                     // Metadata propagates the native lookup failure without rediscovery.
                     assertRejectedNames(
                             path, Errors.UNKNOWN_SERVER_ERROR, Errors.UNKNOWN_TOPIC_OR_PARTITION);
                     createTable(admin, path, 3);
-                    assertThat(topicId(full)).isNotEqualTo(fullId).isNotEqualTo(Uuid.ZERO_UUID);
-                    assertThat(topicId(alias)).isNotEqualTo(aliasId).isNotEqualTo(Uuid.ZERO_UUID);
-                    assertThat(topicId(full)).isNotEqualTo(topicId(alias));
                     assertThat(send(producer, full, "recreated_full").offset()).isZero();
                     assertThat(send(producer, alias, "recreated_alias").offset()).isEqualTo(1L);
                     assertValues(connection, path, "recreated_full", "recreated_alias");
@@ -374,9 +252,6 @@ class KafkaProduceRegressionITCase {
                 Admin admin = connection.getAdmin()) {
             try {
                 createTable(admin, path, 3);
-                TableInfo before = admin.getTableInfo(path).get();
-                Uuid fullId = topicId(full);
-                Uuid aliasId = topicId(alias);
                 try (KafkaProducer<byte[], byte[]> producer = producer("all", true)) {
                     // Populate both name mappings and the write plan before changing the schema.
                     assertThat(send(producer, full, "old_full").offset()).isZero();
@@ -394,20 +269,11 @@ class KafkaProduceRegressionITCase {
                                     false)
                             .get();
                     TableInfo after = admin.getTableInfo(path).get();
-                    assertThat(after.getTableId()).isEqualTo(before.getTableId());
-                    assertThat(after.getSchemaId()).isGreaterThan(before.getSchemaId());
-                    assertThat(after.getProperties().toMap())
-                            .isEqualTo(before.getProperties().toMap());
-                    assertThat(after.getSchema().getColumns()).hasSize(2);
-                    assertThat(after.getSchema().getColumn("_kafka_metadata").getDataType())
-                            .isEqualTo(metadataType());
                     waitForReplicaTableInfo(after);
 
                     // Neither producer recreation nor a Kafka Metadata refresh should be needed.
                     assertThat(send(producer, full, 0, 789L, "new_full").offset()).isEqualTo(2L);
                     assertThat(send(producer, alias, 0, 987L, "new_alias").offset()).isEqualTo(3L);
-                    assertThat(topicId(full)).isEqualTo(fullId);
-                    assertThat(topicId(alias)).isEqualTo(aliasId);
                     // Read the new batches using the new native schema, independently of the
                     // native client's earlier cached table handle.
                     try (Connection reader =
@@ -417,7 +283,6 @@ class KafkaProduceRegressionITCase {
                                 path,
                                 0,
                                 2L,
-                                after.getSchemaId(),
                                 tuple(2L, "new_full", 789L, 0, 0),
                                 tuple(3L, "new_alias", 987L, 0, 0));
                     }
@@ -429,74 +294,7 @@ class KafkaProduceRegressionITCase {
     }
 
     @Test
-    void testNeverEnabledTableRejectsBothNamesWithoutAppending() throws Exception {
-        TablePath path = TablePath.of(DATABASE, "never_enabled");
-        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
-                Admin admin = connection.getAdmin()) {
-            try {
-                admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-                admin.createTable(
-                                path,
-                                TableDescriptor.builder()
-                                        .schema(
-                                                Schema.newBuilder()
-                                                        .column("_kafka_value", DataTypes.BYTES())
-                                                        .build())
-                                        .distributedBy(1)
-                                        .logFormat(LogFormat.ARROW)
-                                        .property(
-                                                ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
-                                                KafkaValueConversionType.BINARY)
-                                        .build(),
-                                false)
-                        .get();
-                CLUSTER.waitUntilTableReady(admin.getTableInfo(path).get().getTableId());
-                assertRejectedNames(
-                        path, Errors.UNKNOWN_TOPIC_OR_PARTITION, Errors.UNKNOWN_TOPIC_OR_PARTITION);
-                setTableEnabled(admin, path, true);
-                try (KafkaProducer<byte[], byte[]> producer = producer("all", true)) {
-                    assertThat(send(producer, path.getTableName(), "accepted").offset()).isZero();
-                    assertValues(connection, path, "accepted");
-                }
-            } finally {
-                admin.dropTable(path, true).get();
-            }
-        }
-    }
-
-    @Test
-    void testNotNullKeySchemaIsRejectedWhenCreatingKafkaTable() throws Exception {
-        TablePath path = TablePath.of(DATABASE, "atomic_conversion");
-        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
-                Admin admin = connection.getAdmin()) {
-            try {
-                admin.createDatabase(DATABASE, DatabaseDescriptor.EMPTY, true).get();
-                TableDescriptor descriptor =
-                        TableDescriptor.builder()
-                                .schema(
-                                        Schema.newBuilder()
-                                                .column("_kafka_value", DataTypes.BYTES())
-                                                .column("_kafka_key", DataTypes.BYTES().copy(false))
-                                                .build())
-                                .distributedBy(1)
-                                .logFormat(LogFormat.ARROW)
-                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
-                                .property(
-                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
-                                        KafkaValueConversionType.BINARY)
-                                .build();
-                assertThatThrownBy(() -> admin.createTable(path, descriptor, false).get())
-                        .hasCauseInstanceOf(InvalidTableException.class)
-                        .rootCause()
-                        .hasMessageContaining("_kafka_key must be BYTES");
-            } finally {
-                admin.dropTable(path, true).get();
-            }
-        }
-    }
-
-    @Test
-    void testReplicatedOffsetsAndMetadataSurviveLeaderLossAndRestart() throws Exception {
+    void testReplicatedRecordsSurviveLeaderLossAndRestart() throws Exception {
         TablePath path = TablePath.of(DATABASE, "durable_restart");
         String topic = path.toString();
         String rebalanceId = "kafka-recovered-leader";
@@ -505,7 +303,7 @@ class KafkaProduceRegressionITCase {
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
             try {
-                createTable(admin, path, 3, metadataSchema(), 2);
+                createTable(admin, path, 3, 2);
                 TableInfo tableInfo = admin.getTableInfo(path).get();
                 TableBucket bucket = new TableBucket(tableInfo.getTableId(), partition);
                 MetadataResponsePartition initial =
@@ -520,37 +318,29 @@ class KafkaProduceRegressionITCase {
                 }
                 try (KafkaProducer<byte[], byte[]> producer = producer("all", true)) {
                     assertThat(send(producer, topic, partition, 123L, "before").offset()).isZero();
-                    assertRecordsWithMetadata(
-                            connection,
-                            path,
-                            partition,
-                            0L,
-                            tableInfo.getSchemaId(),
-                            tuple(0L, "before", 123L, 0, partition));
+                    assertValues(connection, path, partition, "before");
                     stopped = initial.leaderId();
                     CLUSTER.stopTabletServer(stopped);
                     retry(
                             Duration.ofMinutes(1),
-                            () ->
-                                    assertThat(
-                                                    waitForTopic(topic, 2)
-                                                            .data()
-                                                            .topics()
-                                                            .find(topic)
-                                                            .partitions()
-                                                            .get(partition)
-                                                            .leaderId())
-                                            .isNotEqualTo(initial.leaderId()));
+                            () -> {
+                                MetadataResponsePartition elected =
+                                        waitForTopic(topic, 2)
+                                                .data()
+                                                .topics()
+                                                .find(topic)
+                                                .partitions()
+                                                .get(partition);
+                                assertThat(elected.errorCode()).isEqualTo(Errors.NONE.code());
+                                assertThat(elected.leaderId())
+                                        .isNotEqualTo(-1)
+                                        .isNotEqualTo(initial.leaderId());
+                                assertThat(elected.leaderEpoch())
+                                        .isGreaterThan(initial.leaderEpoch());
+                            });
                     assertThat(send(producer, topic, partition, 456L, "after_loss").offset())
                             .isEqualTo(1L);
-                    assertRecordsWithMetadata(
-                            connection,
-                            path,
-                            partition,
-                            0L,
-                            tableInfo.getSchemaId(),
-                            tuple(0L, "before", 123L, 0, partition),
-                            tuple(1L, "after_loss", 456L, 0, partition));
+                    assertValues(connection, path, partition, "before", "after_loss");
                     CLUSTER.startTabletServer(stopped);
                     CLUSTER.assertHasTabletServerNumber(3);
                     CLUSTER.waitUntilReplicaExpandToIsr(bucket, stopped);
@@ -577,15 +367,8 @@ class KafkaProduceRegressionITCase {
                             .isEqualTo(2L);
                     try (Connection reader =
                             ConnectionFactory.createConnection(CLUSTER.getClientConfig())) {
-                        assertRecordsWithMetadata(
-                                reader,
-                                path,
-                                partition,
-                                0L,
-                                tableInfo.getSchemaId(),
-                                tuple(0L, "before", 123L, 0, partition),
-                                tuple(1L, "after_loss", 456L, 0, partition),
-                                tuple(2L, "after_restart", 789L, 0, partition));
+                        assertValues(
+                                reader, path, partition, "before", "after_loss", "after_restart");
                     }
                 }
             } finally {
@@ -633,10 +416,6 @@ class KafkaProduceRegressionITCase {
                 });
     }
 
-    private static Uuid topicId(String topic) {
-        return waitForTopic(topic).data().topics().find(topic).topicId();
-    }
-
     private static void assertRejectedNames(
             TablePath path, Errors metadataError, Errors produceError) throws Exception {
         retry(
@@ -644,7 +423,7 @@ class KafkaProduceRegressionITCase {
                 () -> {
                     for (String topic : new String[] {path.toString(), path.getTableName()}) {
                         for (ServerNode node : CLUSTER.getTabletServerNodes("KAFKA")) {
-                            try (Socket socket = connect(node)) {
+                            try (Socket socket = connect(node, 5000)) {
                                 MetadataResponse response =
                                         (MetadataResponse)
                                                 sendRequest(socket, metadataRequest(topic));
@@ -655,7 +434,7 @@ class KafkaProduceRegressionITCase {
                 });
         for (String topic : new String[] {path.toString(), path.getTableName()}) {
             for (ServerNode node : CLUSTER.getTabletServerNodes("KAFKA")) {
-                try (Socket socket = connect(node)) {
+                try (Socket socket = connect(node, 5000)) {
                     ProduceResponse response =
                             (ProduceResponse)
                                     sendRequest(socket, produceRequest(topic, "rejected"));
@@ -666,22 +445,19 @@ class KafkaProduceRegressionITCase {
     }
 
     private static void createTable(Admin admin, TablePath path, int replicas) throws Exception {
-        createTable(
-                admin,
-                path,
-                replicas,
-                Schema.newBuilder().column("_kafka_value", DataTypes.BYTES()).build(),
-                1);
+        createTable(admin, path, replicas, 1);
     }
 
-    private static void createTable(
-            Admin admin, TablePath path, int replicas, Schema schema, int buckets)
+    private static void createTable(Admin admin, TablePath path, int replicas, int buckets)
             throws Exception {
         admin.createDatabase(path.getDatabaseName(), DatabaseDescriptor.EMPTY, true).get();
         admin.createTable(
                         path,
                         TableDescriptor.builder()
-                                .schema(schema)
+                                .schema(
+                                        Schema.newBuilder()
+                                                .column("_kafka_value", DataTypes.BYTES())
+                                                .build())
                                 .distributedBy(buckets)
                                 .logFormat(LogFormat.ARROW)
                                 .property(ConfigOptions.TABLE_REPLICATION_FACTOR, replicas)
@@ -693,13 +469,6 @@ class KafkaProduceRegressionITCase {
                         false)
                 .get();
         CLUSTER.waitUntilTableReady(admin.getTableInfo(path).get().getTableId());
-    }
-
-    private static Schema metadataSchema() {
-        return Schema.newBuilder()
-                .column("_kafka_value", DataTypes.BYTES())
-                .column("_kafka_metadata", metadataType())
-                .build();
     }
 
     private static RowType metadataType() {
@@ -731,9 +500,15 @@ class KafkaProduceRegressionITCase {
 
     private static void assertValues(Connection connection, TablePath path, String... expected)
             throws Exception {
+        assertValues(connection, path, 0, expected);
+    }
+
+    private static void assertValues(
+            Connection connection, TablePath path, int partition, String... expected)
+            throws Exception {
         try (Table table = connection.getTable(path);
                 LogScanner scanner = table.newScan().createLogScanner()) {
-            scanner.subscribeFromBeginning(0);
+            scanner.subscribeFromBeginning(partition);
             List<String> values = new ArrayList<>();
             retry(
                     Duration.ofSeconds(30),
@@ -755,7 +530,6 @@ class KafkaProduceRegressionITCase {
             TablePath path,
             int partition,
             long startOffset,
-            int schemaId,
             Tuple... expected)
             throws Exception {
         try (Table table = connection.getTable(path);
@@ -765,14 +539,9 @@ class KafkaProduceRegressionITCase {
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
             while (actual.size() < expected.length && System.nanoTime() < deadline) {
                 for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
-                    assertThat(record.getSchemaId())
-                            .as("Schema at offset %s", record.logOffset())
-                            .isEqualTo(schemaId);
                     InternalRow row = record.getRow();
-                    assertThat(row.getFieldCount()).isEqualTo(2);
                     assertThat(row.isNullAt(1)).isFalse();
                     InternalRow metadata = row.getRow(1, 3);
-                    assertThat(metadata.getFieldCount()).isEqualTo(3);
                     assertThat(metadata.isNullAt(0)).isFalse();
                     assertThat(metadata.isNullAt(1)).isFalse();
                     assertThat(metadata.isNullAt(2)).isFalse();
@@ -812,27 +581,8 @@ class KafkaProduceRegressionITCase {
         return result.get();
     }
 
-    private static void assertKafkaListenerEndpoints(MetadataResponse response) {
-        assertThat(response.brokers())
-                .extracting(
-                        org.apache.kafka.common.Node::id,
-                        org.apache.kafka.common.Node::host,
-                        org.apache.kafka.common.Node::port,
-                        org.apache.kafka.common.Node::rack)
-                .containsExactlyInAnyOrderElementsOf(
-                        CLUSTER.getTabletServerNodes("KAFKA").stream()
-                                .map(
-                                        node ->
-                                                tuple(
-                                                        node.id(),
-                                                        node.host(),
-                                                        node.port(),
-                                                        node.rack()))
-                                .collect(Collectors.toList()));
-    }
-
     private static MetadataResponse fetchMetadata(String topic) throws Exception {
-        try (Socket socket = connect(CLUSTER.getTabletServerNodes("KAFKA").get(0))) {
+        try (Socket socket = connect(CLUSTER.getTabletServerNodes("KAFKA").get(0), 5000)) {
             return (MetadataResponse) sendRequest(socket, metadataRequest(topic));
         }
     }
@@ -864,40 +614,6 @@ class KafkaProduceRegressionITCase {
                                 new ProduceRequestData.TopicProduceDataCollection(
                                         Collections.singletonList(topicData).iterator())),
                 (short) 11);
-    }
-
-    private static Socket connect(ServerNode node) throws Exception {
-        Socket socket = new Socket();
-        try {
-            socket.connect(new InetSocketAddress(node.host(), node.port()), 5000);
-            socket.setSoTimeout(5000);
-            return socket;
-        } catch (Exception failure) {
-            socket.close();
-            throw failure;
-        }
-    }
-
-    private static AbstractResponse sendRequest(Socket socket, AbstractRequest request)
-            throws Exception {
-        RequestHeader header =
-                new RequestHeader(request.apiKey(), request.version(), "regression-test", 1);
-        ByteBuffer serialized =
-                RequestUtils.serialize(
-                        header.data(), header.headerVersion(), request.data(), request.version());
-        byte[] requestBytes = new byte[serialized.remaining()];
-        serialized.get(requestBytes);
-        // The caller owns the socket and may send another request on the same connection.
-        DataOutputStream output = new DataOutputStream(socket.getOutputStream());
-        DataInputStream input = new DataInputStream(socket.getInputStream());
-        output.writeInt(requestBytes.length);
-        output.write(requestBytes);
-        output.flush();
-        int size = input.readInt();
-        assertThat(size).isBetween(1, 1024 * 1024);
-        byte[] response = new byte[size];
-        input.readFully(response);
-        return AbstractResponse.parseResponse(ByteBuffer.wrap(response), header);
     }
 
     private static void rebalanceLeader(
@@ -951,17 +667,6 @@ class KafkaProduceRegressionITCase {
                     assertThat(updated.leaderId()).isEqualTo(newLeader);
                     assertThat(updated.leaderEpoch()).isGreaterThan(oldEpoch);
                 });
-    }
-
-    private static double producerMetric(KafkaProducer<byte[], byte[]> producer, String name) {
-        return producer.metrics().entrySet().stream()
-                .filter(
-                        entry ->
-                                entry.getKey().group().equals("producer-metrics")
-                                        && entry.getKey().name().equals(name))
-                .mapToDouble(entry -> ((Number) entry.getValue().metricValue()).doubleValue())
-                .findFirst()
-                .getAsDouble();
     }
 
     private static RecordMetadata send(

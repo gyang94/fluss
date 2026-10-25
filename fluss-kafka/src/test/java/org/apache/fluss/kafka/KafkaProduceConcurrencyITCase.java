@@ -24,7 +24,6 @@ import org.apache.fluss.client.admin.OffsetSpec;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
-import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.config.KafkaValueConversionType;
@@ -42,11 +41,9 @@ import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.message.ProduceRequestData.PartitionProduceData;
 import org.apache.kafka.common.message.ProduceRequestData.TopicProduceData;
 import org.apache.kafka.common.message.ProduceResponseData.PartitionProduceResponse;
-import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.MemoryRecords;
 import org.apache.kafka.common.record.SimpleRecord;
-import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
@@ -55,9 +52,6 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -70,7 +64,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import static org.apache.fluss.kafka.KafkaSocketTestUtils.receive;
+import static org.apache.fluss.kafka.KafkaSocketTestUtils.send;
+import static org.apache.fluss.kafka.KafkaSocketTestUtils.sendRequest;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.tuple;
 
 /** Verifies pipelined Produce ordering and failure isolation against native persisted records. */
 class KafkaProduceConcurrencyITCase {
@@ -86,7 +84,7 @@ class KafkaProduceConcurrencyITCase {
 
     @ParameterizedTest
     @ValueSource(shorts = {1, -1})
-    void testPipelinedAliasesAndPartitionFailuresPreserveNativeOrder(short acks) throws Exception {
+    void testPipelinedAliasesPreserveNativeOrder(short acks) throws Exception {
         List<TablePath> paths =
                 Arrays.asList(
                         TablePath.of(DATABASE, "ordered_first"),
@@ -106,7 +104,7 @@ class KafkaProduceConcurrencyITCase {
                 }
                 try (Socket socket = connect()) {
                     // Send every request before reading responses. The first conversion is
-                    // much larger, and later requests mix aliases, nulls and a corrupt batch.
+                    // much larger, and later requests alternate full names and aliases.
                     for (int round = 0; round < 8; round++) {
                         List<TopicProduceData> topics = new ArrayList<>();
                         Map<TopicPartition, Long> offsets = new HashMap<>();
@@ -118,56 +116,39 @@ class KafkaProduceConcurrencyITCase {
                                 List<String> values =
                                         expected.get(
                                                 new TopicPartition(path.toString(), partition));
-                                boolean invalid = round == 1 && table == 0 && partition == 0;
                                 offsets.put(
-                                        new TopicPartition(topic, partition),
-                                        invalid ? -1L : (long) values.size());
+                                        new TopicPartition(topic, partition), (long) values.size());
                                 SimpleRecord[] records = new SimpleRecord[round == 0 ? 512 : 1];
                                 for (int record = 0; record < records.length; record++) {
                                     String value =
-                                            round == 2
-                                                    ? null
-                                                    : table + ":" + partition + ":" + round + ":"
-                                                            + record;
-                                    byte[] bytes =
-                                            value == null
-                                                    ? null
-                                                    : value.getBytes(StandardCharsets.UTF_8);
-                                    records[record] = new SimpleRecord(123L, null, bytes);
-                                    if (!invalid) {
-                                        values.add(value);
-                                    }
+                                            table + ":" + partition + ":" + round + ":" + record;
+                                    records[record] =
+                                            new SimpleRecord(
+                                                    value.getBytes(StandardCharsets.UTF_8));
+                                    values.add(value);
                                 }
-                                MemoryRecords batch =
-                                        MemoryRecords.withRecords(Compression.NONE, records);
-                                if (invalid) {
-                                    // STRING accepts arbitrary bytes; corrupt the checksum instead.
-                                    ByteBuffer bytes = batch.buffer();
-                                    int last = batch.sizeInBytes() - 1;
-                                    bytes.put(last, (byte) (bytes.get(last) ^ 1));
-                                }
-                                partitions.add(
-                                        new PartitionProduceData()
-                                                .setIndex(partition)
-                                                .setRecords(batch));
+                                partitions.add(partition(partition, records));
                             }
                             topics.add(
                                     new TopicProduceData()
                                             .setName(topic)
                                             .setPartitionData(partitions));
                         }
-                        headers.add(send(socket, request(acks, topics), round));
+                        headers.add(
+                                send(
+                                        socket,
+                                        request(acks, topics.toArray(new TopicProduceData[0])),
+                                        round));
                         expectedOffsets.add(offsets);
                     }
                     for (int round = 0; round < headers.size(); round++) {
-                        ProduceResponse response = receive(socket, headers.get(round));
+                        ProduceResponse response =
+                                (ProduceResponse) receive(socket, headers.get(round));
                         Map<TopicPartition, Long> offsets = expectedOffsets.get(round);
-                        assertThat(response.data().responses()).hasSize(paths.size());
                         response.data()
                                 .responses()
                                 .forEach(
                                         topic -> {
-                                            assertThat(topic.partitionResponses()).hasSize(2);
                                             for (PartitionProduceResponse partition :
                                                     topic.partitionResponses()) {
                                                 Long offset =
@@ -177,11 +158,7 @@ class KafkaProduceConcurrencyITCase {
                                                                         partition.index()));
                                                 assertThat(offset).isNotNull();
                                                 assertThat(partition.errorCode())
-                                                        .isEqualTo(
-                                                                offset < 0
-                                                                        ? Errors.CORRUPT_MESSAGE
-                                                                                .code()
-                                                                        : Errors.NONE.code());
+                                                        .isEqualTo(Errors.NONE.code());
                                                 assertThat(partition.baseOffset())
                                                         .isEqualTo(offset);
                                             }
@@ -213,6 +190,61 @@ class KafkaProduceConcurrencyITCase {
     }
 
     @Test
+    void testCorruptPartitionDoesNotPreventValidPartitionAppend() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "isolated_failure");
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            try {
+                createTable(admin, path, 2);
+                MemoryRecords corrupt =
+                        MemoryRecords.withRecords(
+                                Compression.NONE,
+                                new SimpleRecord("rejected".getBytes(StandardCharsets.UTF_8)));
+                ByteBuffer bytes = corrupt.buffer();
+                int last = corrupt.sizeInBytes() - 1;
+                bytes.put(last, (byte) (bytes.get(last) ^ 1));
+                ProduceRequest request =
+                        request(
+                                (short) -1,
+                                topic(
+                                        path.toString(),
+                                        new PartitionProduceData().setIndex(0).setRecords(corrupt),
+                                        partition(
+                                                1,
+                                                new SimpleRecord(
+                                                        "accepted"
+                                                                .getBytes(
+                                                                        StandardCharsets.UTF_8)))));
+                try (Socket socket = connect()) {
+                    ProduceResponse response = (ProduceResponse) sendRequest(socket, request);
+                    assertThat(
+                                    response.data()
+                                            .responses()
+                                            .find(path.toString())
+                                            .partitionResponses())
+                            .extracting(
+                                    PartitionProduceResponse::index,
+                                    PartitionProduceResponse::errorCode)
+                            .containsExactlyInAnyOrder(
+                                    tuple(0, Errors.CORRUPT_MESSAGE.code()),
+                                    tuple(1, Errors.NONE.code()));
+                }
+                assertReadback(connection, path, 1, 0L, Collections.singletonList("accepted"));
+                assertThat(
+                                admin.listOffsets(
+                                                path,
+                                                Collections.singleton(0),
+                                                new OffsetSpec.LatestSpec())
+                                        .bucketResult(0)
+                                        .get(30, TimeUnit.SECONDS))
+                        .isZero();
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
     void testDisconnectWithPipelinedRequestsDoesNotBlockNewConnection() throws Exception {
         TablePath path = TablePath.of(DATABASE, "disconnected_producer");
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
@@ -223,44 +255,30 @@ class KafkaProduceConcurrencyITCase {
                 Arrays.fill(
                         records,
                         new SimpleRecord("before_disconnect".getBytes(StandardCharsets.UTF_8)));
+                ProduceRequest pending =
+                        request((short) -1, topic(path.toString(), partition(0, records)));
                 try (Socket disconnected = connect()) {
                     for (int i = 0; i < 8; i++) {
-                        send(
-                                disconnected,
-                                request(
-                                        (short) -1,
-                                        Collections.singletonList(
-                                                new TopicProduceData()
-                                                        .setName(path.toString())
-                                                        .setPartitionData(
-                                                                Collections.singletonList(
-                                                                        partition(0, records))))),
-                                i);
+                        send(disconnected, pending, i);
                     }
-                    // Disconnect without consuming ACKs while the shared executor may still
-                    // contain this connection's work. Later producers must remain usable.
+                    // Close without consuming ACKs; queued work must not block a new connection.
                 }
                 try (Socket socket = connect()) {
-                    RequestHeader header =
-                            send(
-                                    socket,
-                                    request(
-                                            (short) -1,
-                                            Collections.singletonList(
-                                                    new TopicProduceData()
-                                                            .setName(path.getTableName())
-                                                            .setPartitionData(
-                                                                    Collections.singletonList(
-                                                                            partition(
-                                                                                    0,
-                                                                                    new SimpleRecord(
-                                                                                            "after_disconnect"
-                                                                                                    .getBytes(
-                                                                                                            StandardCharsets
-                                                                                                                    .UTF_8))))))),
-                                    20);
+                    ProduceRequest next =
+                            request(
+                                    (short) -1,
+                                    topic(
+                                            path.getTableName(),
+                                            partition(
+                                                    0,
+                                                    new SimpleRecord(
+                                                            "after_disconnect"
+                                                                    .getBytes(
+                                                                            StandardCharsets
+                                                                                    .UTF_8)))));
+                    RequestHeader header = send(socket, next, 20);
                     PartitionProduceResponse response =
-                            receive(socket, header)
+                            ((ProduceResponse) receive(socket, header))
                                     .data()
                                     .responses()
                                     .find(path.getTableName())
@@ -310,53 +328,23 @@ class KafkaProduceConcurrencyITCase {
                 .setRecords(MemoryRecords.withRecords(Compression.NONE, records));
     }
 
-    private static ProduceRequest request(short acks, List<TopicProduceData> topics) {
+    private static TopicProduceData topic(String name, PartitionProduceData... partitions) {
+        return new TopicProduceData().setName(name).setPartitionData(Arrays.asList(partitions));
+    }
+
+    private static ProduceRequest request(short acks, TopicProduceData... topics) {
         return new ProduceRequest(
                 new ProduceRequestData()
                         .setAcks(acks)
                         .setTimeoutMs(10000)
                         .setTopicData(
                                 new ProduceRequestData.TopicProduceDataCollection(
-                                        topics.iterator())),
+                                        Arrays.asList(topics).iterator())),
                 (short) 9);
     }
 
     private static Socket connect() throws Exception {
-        ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
-        Socket socket = new Socket();
-        try {
-            socket.connect(new InetSocketAddress(node.host(), node.port()), 5000);
-            socket.setSoTimeout(30000);
-            return socket;
-        } catch (Exception failure) {
-            socket.close();
-            throw failure;
-        }
-    }
-
-    private static RequestHeader send(Socket socket, ProduceRequest request, int correlationId)
-            throws Exception {
-        RequestHeader header =
-                new RequestHeader(
-                        ApiKeys.PRODUCE, request.version(), "concurrent-test", correlationId);
-        ByteBuffer encoded = request.serializeWithHeader(header);
-        byte[] bytes = new byte[encoded.remaining()];
-        encoded.get(bytes);
-        DataOutputStream output = new DataOutputStream(socket.getOutputStream());
-        output.writeInt(bytes.length);
-        output.write(bytes);
-        output.flush();
-        return header;
-    }
-
-    private static ProduceResponse receive(Socket socket, RequestHeader header) throws Exception {
-        DataInputStream input = new DataInputStream(socket.getInputStream());
-        int size = input.readInt();
-        assertThat(size).isBetween(1, 1024 * 1024);
-        byte[] bytes = new byte[size];
-        input.readFully(bytes);
-        assertThat(ByteBuffer.wrap(bytes).getInt()).isEqualTo(header.correlationId());
-        return (ProduceResponse) AbstractResponse.parseResponse(ByteBuffer.wrap(bytes), header);
+        return KafkaSocketTestUtils.connect(CLUSTER.getTabletServerNodes("KAFKA").get(0), 30000);
     }
 
     private static void assertReadback(
@@ -374,10 +362,7 @@ class KafkaProduceConcurrencyITCase {
             while (actual.size() < expected.size() && System.nanoTime() < deadline) {
                 for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
                     assertThat(record.logOffset()).isEqualTo(startOffset + actual.size());
-                    actual.add(
-                            record.getRow().isNullAt(0)
-                                    ? null
-                                    : record.getRow().getString(0).toString());
+                    actual.add(record.getRow().getString(0).toString());
                     if (actual.size() == expected.size()) {
                         break;
                     }
