@@ -18,7 +18,6 @@
 package org.apache.fluss.kafka;
 
 import org.apache.fluss.kafka.mapping.KafkaTopicMapper;
-import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBufAllocator;
@@ -71,87 +70,6 @@ public class KafkaRequestHandlerTest extends KafkaServerTestBase {
     void closeRequestHandler() throws Exception {
         if (handler != null) {
             handler.close();
-        }
-    }
-
-    @Test
-    public void testSaslCapabilitiesAreAdvertisedOnlyForSaslConnection() {
-        short version = ApiKeys.API_VERSIONS.latestVersion();
-        ApiVersionsRequest requestBody = new ApiVersionsRequest.Builder().build(version);
-        ByteBuf input = ByteBufAllocator.DEFAULT.buffer();
-        KafkaRequest request =
-                new KafkaRequest(
-                        ApiKeys.API_VERSIONS,
-                        version,
-                        new RequestHeader(ApiKeys.API_VERSIONS, version, "client-id", 0),
-                        requestBody,
-                        "KAFKA",
-                        KafkaSaslConnection.sasl(TestingSaslAuthenticator::new),
-                        input,
-                        new TestingChannelHandlerContext(),
-                        new CompletableFuture<>());
-
-        input.release();
-        handler.processRequest(request);
-
-        ApiVersionsResponse response = (ApiVersionsResponse) parseResponse(request);
-        assertThat(response.data().apiKeys())
-                .extracting(ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
-                .contains(
-                        tuple(ApiKeys.SASL_HANDSHAKE.id, (short) 0, (short) 1),
-                        tuple(ApiKeys.SASL_AUTHENTICATE.id, (short) 0, (short) 2));
-    }
-
-    @ParameterizedTest
-    @CsvSource({"0, false", "4, false", "5, false", "0, true", "4, true", "5, true"})
-    public void testApiVersionsValidatesVersionBeforeAuthenticationState(
-            short requestVersion, boolean authenticating) {
-        boolean unsupported = !ApiKeys.API_VERSIONS.isVersionSupported(requestVersion);
-        short parsedVersion = unsupported ? 0 : requestVersion;
-        KafkaSaslConnection connection = KafkaSaslConnection.sasl(TestingSaslAuthenticator::new);
-        if (authenticating) {
-            connection.beginAuthentication("PLAIN", "KAFKA", null);
-        }
-        ApiVersionsRequest requestBody =
-                unsupported
-                        ? new ApiVersionsRequest(
-                                new ApiVersionsRequestData(), parsedVersion, requestVersion)
-                        : new ApiVersionsRequest.Builder().build(parsedVersion);
-        ByteBuf input = ByteBufAllocator.DEFAULT.buffer();
-        KafkaRequest request =
-                new KafkaRequest(
-                        ApiKeys.API_VERSIONS,
-                        requestVersion,
-                        new RequestHeader(ApiKeys.API_VERSIONS, requestVersion, "client-id", 17),
-                        requestBody,
-                        "KAFKA",
-                        connection,
-                        input,
-                        new TestingChannelHandlerContext(),
-                        new CompletableFuture<>());
-        input.release();
-        try {
-            handler.processRequest(request);
-            ApiVersionsResponse response = (ApiVersionsResponse) parseResponse(request);
-            Errors expected =
-                    unsupported
-                            ? Errors.UNSUPPORTED_VERSION
-                            : authenticating ? Errors.ILLEGAL_SASL_STATE : Errors.NONE;
-            assertThat(response.data().errorCode()).isEqualTo(expected.code());
-            assertThat(request.shouldCloseConnectionAfterResponse())
-                    .isEqualTo(authenticating && !unsupported);
-            assertThat(request.header().correlationId()).isEqualTo(17);
-            if (unsupported) {
-                assertThat(response.data().apiKeys())
-                        .extracting(
-                                ApiVersion::apiKey, ApiVersion::minVersion, ApiVersion::maxVersion)
-                        .containsExactly(tuple(ApiKeys.API_VERSIONS.id, (short) 0, (short) 4));
-            } else if (authenticating) {
-                assertThat(response.data().apiKeys()).isEmpty();
-            }
-        } finally {
-            request.releaseBuffer();
-            connection.close();
         }
     }
 

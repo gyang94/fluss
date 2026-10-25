@@ -27,8 +27,7 @@ public class TestingSaslAuthenticator implements ServerAuthenticator {
     private final boolean failInitialize;
     private final boolean failAuthentication;
     public boolean closed;
-    public boolean evaluated;
-    public boolean principalCreated;
+    private boolean evaluated;
 
     /** Creates a successful authenticator for alice. */
     public TestingSaslAuthenticator() {
@@ -71,7 +70,6 @@ public class TestingSaslAuthenticator implements ServerAuthenticator {
 
     @Override
     public FlussPrincipal createPrincipal() {
-        principalCreated = true;
         return principal;
     }
 

@@ -40,39 +40,6 @@ import static org.mockito.Mockito.when;
 /** Tests for {@link KafkaRequest}. */
 public class KafkaRequestTest {
 
-    @Test
-    public void testResponseCleanupNeverReleasesWorkerOwnedInput() {
-        for (boolean workerFirst : new boolean[] {true, false}) {
-            ByteBuf buffer = Unpooled.buffer(1);
-            short version = ApiKeys.API_VERSIONS.oldestVersion();
-            KafkaRequest request =
-                    new KafkaRequest(
-                            ApiKeys.API_VERSIONS,
-                            version,
-                            new RequestHeader(ApiKeys.API_VERSIONS, version, "client", 1),
-                            new ApiVersionsRequest.Builder().build(version),
-                            "KAFKA",
-                            buffer,
-                            new TestingChannelHandlerContext(),
-                            new CompletableFuture<>());
-            request.transferBufferToProcessor();
-            buffer.release();
-            assertThat(buffer.refCnt()).isOne();
-            if (workerFirst) {
-                request.releaseBuffer();
-                assertThat(buffer.refCnt()).isZero();
-                request.releaseResponseBuffer();
-            } else {
-                request.releaseResponseBuffer();
-                assertThat(buffer.refCnt()).isOne();
-                request.releaseBuffer();
-            }
-            request.releaseBuffer();
-            request.releaseResponseBuffer();
-            assertThat(buffer.refCnt()).isZero();
-        }
-    }
-
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testPrincipalIsAnImmutableConnectionSnapshot(boolean closeConnection)

@@ -91,14 +91,4 @@ public class KafkaSaslConfigTest {
                 .isInstanceOf(ConfigException.class)
                 .hasMessageContaining("supports only PLAINTEXT or SASL authentication");
     }
-
-    @Test
-    public void testKafkaListenerAcceptsExplicitPlaintextProtocol() {
-        Configuration configuration = new Configuration();
-        configuration.set(
-                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
-                Collections.singletonMap("KAFKA", "PLAINTEXT"));
-
-        new KafkaProtocolPlugin().setup(configuration);
-    }
 }

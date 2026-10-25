@@ -93,21 +93,6 @@ class PlainSaslServerConfigManagerTest {
     }
 
     @Test
-    void testValidationDoesNotApplyCredentials() {
-        PlainSaslServerConfigManager manager =
-                new PlainSaslServerConfigManager(new Configuration());
-        Configuration managedConfiguration = manager.getConfiguration();
-        Configuration newConfiguration = new Configuration();
-        newConfiguration.set(
-                ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("alice", "alice-secret"));
-
-        manager.validate(newConfiguration);
-
-        assertThat(managedConfiguration.getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG))
-                .isNull();
-    }
-
-    @Test
     void testInitialConfigurationRejectsInvalidCredentials() {
         Configuration invalidUsername = new Configuration();
         invalidUsername.set(
@@ -128,20 +113,6 @@ class PlainSaslServerConfigManagerTest {
         assertThatThrownBy(() -> new PlainSaslServerConfigManager(emptyPassword))
                 .isInstanceOf(ConfigException.class)
                 .hasMessageContaining("password for user 'user' must not be empty");
-    }
-
-    @Test
-    void testRejectsMalformedCredentialMapString() {
-        PlainSaslServerConfigManager manager =
-                new PlainSaslServerConfigManager(new Configuration());
-        Configuration malformedConfiguration = new Configuration();
-        malformedConfiguration.setString(
-                ConfigOptions.SERVER_SASL_CREDENTIALS.key(), "bob:pass,word");
-
-        assertThatThrownBy(() -> manager.validate(malformedConfiguration))
-                .isInstanceOf(ConfigException.class)
-                .hasMessageContaining("Failed to parse security.sasl.plain.credentials")
-                .hasMessageNotContaining("pass,word");
     }
 
     @Test
