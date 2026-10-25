@@ -35,6 +35,7 @@ import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -46,12 +47,13 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.TimeZone;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Verifies strict scalar conversion without transport or Arrow dependencies. */
+/** Verifies scalar conversion, normalization, and storage bounds. */
 class JsonToFlussConvertersTest {
     private static final ObjectMapper MAPPER =
             new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
@@ -186,6 +188,10 @@ class JsonToFlussConvertersTest {
     void testMissingAndNullRespectNullability() throws Exception {
         assertThat(JsonToFlussConverters.create(DataTypes.INT()).convert(null, "$.field")).isNull();
         assertThat(convert(DataTypes.INT(), "null")).isNull();
+        assertThat(
+                        JsonToFlussConverters.create(DataTypes.INT())
+                                .convert(MAPPER.missingNode(), "$.field"))
+                .isNull();
         assertThatThrownBy(
                         () ->
                                 JsonToFlussConverters.create(DataTypes.INT().copy(false))
@@ -201,16 +207,17 @@ class JsonToFlussConvertersTest {
     @Test
     void testDecimalBoundsBeforeRescaling() throws Exception {
         for (int scale : new int[] {100_000_000, Integer.MAX_VALUE, Integer.MIN_VALUE}) {
-            assertThatThrownBy(
-                            () ->
-                                    JsonToFlussConverters.create(DataTypes.DECIMAL(5, 2))
-                                            .convert(
-                                                    DecimalNode.valueOf(
-                                                            new BigDecimal(BigInteger.ONE, scale)),
-                                                    "$.amount"))
-                    .isInstanceOf(KafkaRecordEncodingException.class)
-                    .hasMessageContaining("$.amount")
-                    .hasMessageContaining(scale > 0 ? "scale" : "precision");
+            JsonNode value = DecimalNode.valueOf(new BigDecimal(BigInteger.ONE, scale));
+            JsonToFlussConverter converter = JsonToFlussConverters.create(DataTypes.DECIMAL(5, 2));
+            if (scale > 0) {
+                assertThat(((Decimal) converter.convert(value, "$.amount")).toBigDecimal())
+                        .isEqualTo(new BigDecimal("0.00"));
+            } else {
+                assertThatThrownBy(() -> converter.convert(value, "$.amount"))
+                        .isInstanceOf(KafkaRecordEncodingException.class)
+                        .hasMessageContaining("$.amount")
+                        .hasMessageContaining("precision");
+            }
             Decimal zero =
                     (Decimal)
                             JsonToFlussConverters.create(DataTypes.DECIMAL(5, 2))
@@ -228,12 +235,143 @@ class JsonToFlussConvertersTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"\\uD800", "\\uDC00", "a\\uD800b", "\\uD800\\uD800", "\\uDC00\\uD800"})
-    void testRejectsUnpairedSurrogates(String escaped) {
+    void testUnpairedSurrogatesFollowBinaryStringEncoding(String escaped) throws Exception {
         for (DataType type : new DataType[] {DataTypes.STRING(), DataTypes.CHAR(8)}) {
-            assertThatThrownBy(() -> convert(type, "\"" + escaped + "\""))
-                    .isInstanceOf(KafkaRecordEncodingException.class)
-                    .hasMessageContaining("$.field")
-                    .hasMessageContaining("surrogate");
+            String json = "\"" + escaped + "\"";
+            assertThat(convert(type, json))
+                    .isEqualTo(BinaryString.fromString(MAPPER.readTree(json).textValue()));
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("roundedDecimals")
+    void testDecimalRoundsHalfUp(String json, String expected) throws Exception {
+        assertThat(((Decimal) convert(DataTypes.DECIMAL(5, 2), json)).toBigDecimal())
+                .isEqualTo(new BigDecimal(expected));
+    }
+
+    private static Stream<Arguments> roundedDecimals() {
+        return Stream.of(
+                Arguments.of("12.345", "12.35"),
+                Arguments.of("-12.345", "-12.35"),
+                Arguments.of("999.994", "999.99"),
+                Arguments.of("0.005", "0.01"),
+                Arguments.of("-0.005", "-0.01"),
+                Arguments.of("0.0049", "0.00"),
+                Arguments.of("-1e-1000", "0.00"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "123", "1.25", "[1,null,\"x\"]", "{\"a\":true}"})
+    void testStringsAcceptOtherJsonTypes(String json) throws Exception {
+        for (DataType type : new DataType[] {DataTypes.STRING(), DataTypes.CHAR(1)}) {
+            assertThat(convert(type, json)).isEqualTo(BinaryString.fromString(json));
+        }
+    }
+
+    @Test
+    void testCharKeepsFullStringAndBinaryNormalizesWidth() throws Exception {
+        assertThat(convert(DataTypes.CHAR(1), "\"ab😀\""))
+                .isEqualTo(BinaryString.fromString("ab😀"));
+        assertThat((byte[]) convert(DataTypes.BINARY(2), "\"\"")).containsExactly(0, 0);
+        assertThat((byte[]) convert(DataTypes.BINARY(2), "\"AQ==\"")).containsExactly(1, 0);
+        assertThat((byte[]) convert(DataTypes.BINARY(2), "\"AQID\"")).containsExactly(1, 2);
+        assertThat((byte[]) convert(DataTypes.BYTES(), "\"AQID\"")).containsExactly(1, 2, 3);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"T", " "})
+    void testTimestampSeparatorsWithAndWithoutFractions(String separator) throws Exception {
+        for (String fraction : new String[] {"", ".123456"}) {
+            LocalDateTime expected = LocalDateTime.parse("2026-10-25T12:34:56" + fraction);
+            String local = "2026-10-25" + separator + "12:34:56" + fraction;
+            assertThat(convert(DataTypes.TIMESTAMP(6), "\"" + local + "\""))
+                    .isEqualTo(TimestampNtz.fromLocalDateTime(expected));
+            for (String offset : new String[] {"Z", "+08:00"}) {
+                assertThat(convert(DataTypes.TIMESTAMP_LTZ(6), "\"" + local + offset + "\""))
+                        .isEqualTo(
+                                TimestampLtz.fromInstant(
+                                        expected.toInstant(ZoneOffset.of(offset))));
+            }
+        }
+    }
+
+    @Test
+    @ResourceLock("java.util.TimeZone.default")
+    void testTimestampLtzFallsBackToLocalZoneAndPreservesExplicitOffsets() throws Exception {
+        TimeZone previous = TimeZone.getDefault();
+        try {
+            TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+            for (String separator : new String[] {"T", " "}) {
+                for (String fraction : new String[] {"", ".123456"}) {
+                    String local = "2026-10-25" + separator + "12:34:56" + fraction;
+                    TimestampLtz expected =
+                            TimestampLtz.fromInstant(
+                                    Instant.parse("2026-10-25T04:34:56" + fraction + "Z"));
+                    assertThat(convert(DataTypes.TIMESTAMP_LTZ(6), "\"" + local + "\""))
+                            .isEqualTo(expected);
+                    assertThat(convert(DataTypes.TIMESTAMP_LTZ(6), "\"" + local + "+08:00\""))
+                            .isEqualTo(expected);
+                    assertThat(convert(DataTypes.TIMESTAMP_LTZ(6), "\"" + local + "Z\""))
+                            .isEqualTo(
+                                    TimestampLtz.fromInstant(
+                                            Instant.parse("2026-10-25T12:34:56" + fraction + "Z")));
+                }
+            }
+        } finally {
+            TimeZone.setDefault(previous);
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("temporalPrecisions")
+    void testTruncatesTemporalFractions(int precision, int nanos, int timeMillis) throws Exception {
+        assertThat(convert(DataTypes.TIME(precision), "\"12:34:56.123456789\""))
+                .isEqualTo(45_296_000 + timeMillis);
+        for (boolean withZone : new boolean[] {false, true}) {
+            for (String date : new String[] {"1969-12-31", "2026-10-25"}) {
+                Instant expected = Instant.parse(date + "T12:34:56Z").plusNanos(nanos);
+                Object actual =
+                        convert(
+                                timestampType(precision, withZone),
+                                "\"" + date + "T12:34:56.123456789" + (withZone ? "Z\"" : "\""));
+                assertThat(actual)
+                        .isEqualTo(
+                                withZone
+                                        ? TimestampLtz.fromInstant(expected)
+                                        : TimestampNtz.fromLocalDateTime(
+                                                LocalDateTime.ofInstant(expected, ZoneOffset.UTC)));
+            }
+        }
+    }
+
+    private static Stream<Arguments> temporalPrecisions() {
+        return Stream.of(
+                Arguments.of(0, 0, 0),
+                Arguments.of(1, 100_000_000, 100),
+                Arguments.of(2, 120_000_000, 120),
+                Arguments.of(3, 123_000_000, 123),
+                Arguments.of(4, 123_400_000, 123),
+                Arguments.of(5, 123_450_000, 123),
+                Arguments.of(6, 123_456_000, 123),
+                Arguments.of(7, 123_456_700, 123),
+                Arguments.of(8, 123_456_780, 123),
+                Arguments.of(9, 123_456_789, 123));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {3, 6})
+    void testTruncatesBeforeCheckingTimestampStorageRange(int precision) throws Exception {
+        long unitsPerSecond = precision == 3 ? 1_000 : 1_000_000;
+        long nanosPerUnit = 1_000_000_000 / unitsPerSecond;
+        Instant maximum =
+                Instant.ofEpochSecond(
+                        Math.floorDiv(Long.MAX_VALUE, unitsPerSecond),
+                        Math.floorMod(Long.MAX_VALUE, unitsPerSecond) * nanosPerUnit);
+        for (boolean withZone : new boolean[] {false, true}) {
+            DataType type = timestampType(precision, withZone);
+            assertThat(convert(type, timestampJson(maximum.plusNanos(nanosPerUnit - 1), withZone)))
+                    .isEqualTo(convert(type, timestampJson(maximum, withZone)));
         }
     }
 
@@ -336,7 +474,7 @@ class JsonToFlussConvertersTest {
 
     @ParameterizedTest
     @MethodSource("invalidScalars")
-    void testRejectsCoercionOverflowAndPrecisionLoss(DataType type, String json) {
+    void testRejectsInvalidValuesAndOverflow(DataType type, String json) {
         assertThatThrownBy(() -> convert(type, json))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("$.field");
@@ -353,21 +491,18 @@ class JsonToFlussConvertersTest {
                 Arguments.of(DataTypes.BIGINT(), "9223372036854775808"),
                 Arguments.of(DataTypes.FLOAT(), "1e39"),
                 Arguments.of(DataTypes.DOUBLE(), "1e309"),
-                Arguments.of(DataTypes.DECIMAL(5, 2), "1.234"),
+                Arguments.of(DataTypes.DECIMAL(5, 2), "999.995"),
+                Arguments.of(DataTypes.DECIMAL(5, 2), "-999.995"),
                 Arguments.of(DataTypes.DECIMAL(5, 2), "1000"),
-                Arguments.of(DataTypes.CHAR(1), "\"ab\""),
-                Arguments.of(DataTypes.STRING(), "false"),
-                Arguments.of(DataTypes.BINARY(2), "\"AQ==\""),
                 Arguments.of(DataTypes.BYTES(), "\"!invalid!\""),
                 Arguments.of(DataTypes.DATE(), "\"2026-02-30\""),
-                Arguments.of(DataTypes.TIME(0), "\"00:00:00.001\""),
-                Arguments.of(DataTypes.TIME(3), "\"00:00:00.0001\""),
-                Arguments.of(DataTypes.TIMESTAMP(3), "\"2026-09-11T00:00:00.0001\""),
-                Arguments.of(DataTypes.TIMESTAMP_LTZ(3), "\"2026-09-11T00:00:00\""));
+                Arguments.of(DataTypes.TIME(3), "\"24:00:00\""),
+                Arguments.of(DataTypes.TIMESTAMP(3), "\"2026-02-30 12:34:56\""),
+                Arguments.of(DataTypes.TIMESTAMP_LTZ(3), "\"2026-10-25 12:34:56+25:00\""));
     }
 
     @Test
-    void testComplexTypesRemainUnsupportedAtThisStage() {
+    void testComplexTypesFollowTheSharedSchemaContract() {
         for (DataType type :
                 new DataType[] {
                     DataTypes.ARRAY(DataTypes.INT()),
@@ -375,9 +510,7 @@ class JsonToFlussConvertersTest {
                     DataTypes.ROW(DataTypes.INT())
                 }) {
             KafkaTableSchema.validateJsonType(type);
-            assertThatThrownBy(() -> JsonToFlussConverters.create(type))
-                    .isInstanceOf(KafkaTopicSchemaException.class)
-                    .hasMessageContaining("does not support");
+            assertThat(JsonToFlussConverters.create(type).convert(null, "$.field")).isNull();
         }
     }
 
@@ -419,9 +552,7 @@ class JsonToFlussConvertersTest {
         // The top-level business field starts at zero; each child consumes one level.
         DataType atLimit = type;
         KafkaTableSchema.validateJsonType(atLimit);
-        assertThatThrownBy(() -> JsonToFlussConverters.create(atLimit))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining("does not support");
+        assertThat(JsonToFlussConverters.create(atLimit)).isNotNull();
 
         DataType tooDeep = DataTypes.ROW(atLimit);
         String message =

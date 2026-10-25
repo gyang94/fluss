@@ -23,43 +23,61 @@ import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.Decimal;
+import org.apache.fluss.row.GenericArray;
+import org.apache.fluss.row.GenericMap;
+import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BinaryType;
-import org.apache.fluss.types.CharType;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DecimalType;
 import org.apache.fluss.types.LocalZonedTimestampType;
+import org.apache.fluss.types.MapType;
+import org.apache.fluss.types.RowType;
 import org.apache.fluss.types.TimeType;
 import org.apache.fluss.types.TimestampType;
 
 import javax.annotation.Nullable;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static org.apache.fluss.utils.DateTimeUtils.timestampToMicros;
 import static org.apache.fluss.utils.DateTimeUtils.timestampToNanos;
 
-/** Strict JSON-to-Fluss scalar converter construction. */
+/**
+ * JSON-to-Fluss converter construction.
+ *
+ * <p>Recursive ARRAY, MAP, and ROW conversion follows Apache Flink's {@code
+ * JsonToRowDataConverters}, adapted to Fluss internal values, schema nullability, and bounded
+ * containers.
+ */
 final class JsonToFlussConverters {
+
+    static final int MAX_CONTAINER_ELEMENTS = 10_000;
 
     private JsonToFlussConverters() {}
 
     /**
      * Creates a converter for one top-level JSON business field, excluding the JSON root container.
-     * The shared schema contract is validated before checking decoder support; complex types still
-     * require their own converter implementations.
+     * The shared schema contract validates the entire type before recursive converter construction.
      */
     static JsonToFlussConverter create(DataType dataType) {
         try {
@@ -67,9 +85,13 @@ final class JsonToFlussConverters {
         } catch (InvalidTableException e) {
             throw new KafkaTopicSchemaException(e.getMessage());
         }
+        return createValidated(dataType);
+    }
+
+    private static JsonToFlussConverter createValidated(DataType dataType) {
         final JsonToFlussConverter notNullConverter = createNotNull(dataType);
         return (node, path) -> {
-            if (node == null || node.isNull()) {
+            if (node == null || node.isNull() || node.isMissingNode()) {
                 if (!dataType.isNullable()) {
                     throw invalid(path, dataType, "field is missing or null");
                 }
@@ -149,9 +171,10 @@ final class JsonToFlussConverters {
             case DECIMAL:
                 return decimalConverter((DecimalType) dataType);
             case CHAR:
-                return charConverter((CharType) dataType);
             case STRING:
-                return (node, path) -> BinaryString.fromString(textualValue(node, path, dataType));
+                return (node, path) ->
+                        BinaryString.fromString(
+                                node.isContainerNode() ? node.toString() : node.asText());
             case BINARY:
                 return binaryConverter((BinaryType) dataType);
             case BYTES:
@@ -171,6 +194,12 @@ final class JsonToFlussConverters {
                 return timestampConverter((TimestampType) dataType);
             case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
                 return timestampLtzConverter((LocalZonedTimestampType) dataType);
+            case ARRAY:
+                return arrayConverter((ArrayType) dataType);
+            case MAP:
+                return mapConverter((MapType) dataType);
+            case ROW:
+                return rowConverter((RowType) dataType);
             default:
                 throw new KafkaTopicSchemaException(
                         "Kafka JSON format does not support Fluss type "
@@ -194,19 +223,14 @@ final class JsonToFlussConverters {
                     path,
                     dataType,
                     "decimal precision exceeds target");
-            require(
-                    value.stripTrailingZeros().scale() <= dataType.getScale(),
-                    path,
-                    dataType,
-                    "decimal scale exceeds target");
-            final BigDecimal scaled;
-            try {
-                scaled = value.setScale(dataType.getScale(), RoundingMode.UNNECESSARY);
-            } catch (ArithmeticException e) {
-                throw invalid(path, dataType, "decimal scale exceeds target", e);
+            // Values below a tenth of the target unit round to zero. Avoid constructing a huge
+            // power of ten when the input has an extreme negative exponent.
+            if (scaledPrecision < 0) {
+                return Decimal.zero(dataType.getPrecision(), dataType.getScale());
             }
+            // Decimal uses HALF_UP and checks precision again after a possible rounding carry.
             Decimal decimal =
-                    Decimal.fromBigDecimal(scaled, dataType.getPrecision(), dataType.getScale());
+                    Decimal.fromBigDecimal(value, dataType.getPrecision(), dataType.getScale());
             if (decimal == null) {
                 throw invalid(path, dataType, "decimal precision exceeds target");
             }
@@ -214,32 +238,18 @@ final class JsonToFlussConverters {
         };
     }
 
-    private static JsonToFlussConverter charConverter(CharType dataType) {
-        return (node, path) -> {
-            String value = textualValue(node, path, dataType);
-            int codePoints = value.codePointCount(0, value.length());
-            require(
-                    codePoints <= dataType.getLength(),
-                    path,
-                    dataType,
-                    "character length exceeds target");
-            return BinaryString.fromString(value);
-        };
-    }
-
     private static JsonToFlussConverter binaryConverter(BinaryType dataType) {
         return (node, path) -> {
             byte[] value = decodeBase64(node, path, dataType);
-            require(
-                    value.length == dataType.getLength(),
-                    path,
-                    dataType,
-                    "decoded binary length must equal " + dataType.getLength());
-            return value;
+            // Arrow uses FixedSizeBinaryVector: zero-pad short values and truncate long ones.
+            return value.length == dataType.getLength()
+                    ? value
+                    : Arrays.copyOf(value, dataType.getLength());
         };
     }
 
     private static JsonToFlussConverter timeConverter(TimeType dataType) {
+        final int nanosPerUnit = nanosPerUnit(Math.min(dataType.getPrecision(), 3));
         return (node, path) -> {
             String value = textualValue(node, path, dataType);
             final LocalTime time;
@@ -248,54 +258,117 @@ final class JsonToFlussConverters {
             } catch (DateTimeParseException e) {
                 throw invalid(path, dataType, "invalid ISO-8601 local time", e);
             }
-            validatePrecision(time.getNano(), dataType.getPrecision(), path, dataType);
-            require(
-                    time.getNano() % 1_000_000 == 0,
-                    path,
-                    dataType,
-                    "Fluss TIME storage currently requires millisecond precision");
-            return Math.toIntExact(time.toNanoOfDay() / 1_000_000);
+            return time.toSecondOfDay() * 1_000
+                    + (time.getNano() / nanosPerUnit * nanosPerUnit) / 1_000_000;
         };
     }
 
     private static JsonToFlussConverter timestampConverter(TimestampType dataType) {
+        final int nanosPerUnit = nanosPerUnit(dataType.getPrecision());
         return (node, path) -> {
-            String value = textualValue(node, path, dataType);
+            String value = textualValue(node, path, dataType).replace(' ', 'T');
             final LocalDateTime timestamp;
             try {
                 timestamp = LocalDateTime.parse(value);
             } catch (DateTimeParseException e) {
                 throw invalid(path, dataType, "invalid ISO-8601 local timestamp", e);
             }
-            validatePrecision(timestamp.getNano(), dataType.getPrecision(), path, dataType);
+            LocalDateTime normalized =
+                    timestamp.withNano(timestamp.getNano() / nanosPerUnit * nanosPerUnit);
             long millis =
                     timestampMillis(
-                            timestamp.toInstant(ZoneOffset.UTC),
+                            normalized.toInstant(ZoneOffset.UTC),
                             dataType.getPrecision(),
                             path,
                             dataType);
-            return TimestampNtz.fromMillis(millis, timestamp.getNano() % 1_000_000);
+            return TimestampNtz.fromMillis(millis, normalized.getNano() % 1_000_000);
         };
     }
 
     private static JsonToFlussConverter timestampLtzConverter(LocalZonedTimestampType dataType) {
+        final int nanosPerUnit = nanosPerUnit(dataType.getPrecision());
+        final ZoneId localZone = ZoneId.systemDefault();
         return (node, path) -> {
-            String value = textualValue(node, path, dataType);
-            final OffsetDateTime timestamp;
+            String value = textualValue(node, path, dataType).replace(' ', 'T');
+            Instant timestamp;
             try {
-                timestamp = OffsetDateTime.parse(value);
+                timestamp = OffsetDateTime.parse(value).toInstant();
             } catch (DateTimeParseException e) {
-                throw invalid(
-                        path,
-                        dataType,
-                        "invalid ISO-8601 timestamp; an offset or Z is required",
-                        e);
+                try {
+                    timestamp = LocalDateTime.parse(value).atZone(localZone).toInstant();
+                } catch (DateTimeParseException localError) {
+                    throw invalid(path, dataType, "invalid timestamp", localError);
+                }
             }
-            validatePrecision(timestamp.getNano(), dataType.getPrecision(), path, dataType);
-            long millis =
-                    timestampMillis(timestamp.toInstant(), dataType.getPrecision(), path, dataType);
-            return TimestampLtz.fromEpochMillis(millis, timestamp.getNano() % 1_000_000);
+            Instant normalized =
+                    Instant.ofEpochSecond(
+                            timestamp.getEpochSecond(),
+                            timestamp.getNano() / nanosPerUnit * nanosPerUnit);
+            long millis = timestampMillis(normalized, dataType.getPrecision(), path, dataType);
+            return TimestampLtz.fromEpochMillis(millis, normalized.getNano() % 1_000_000);
         };
+    }
+
+    private static JsonToFlussConverter arrayConverter(ArrayType dataType) {
+        JsonToFlussConverter elementConverter = createValidated(dataType.getElementType());
+        return (node, path) -> {
+            require(node.isArray(), path, dataType, "expected a JSON array");
+            requireContainerSize(node.size(), path, dataType);
+            Object[] elements = new Object[node.size()];
+            for (int i = 0; i < elements.length; i++) {
+                elements[i] = elementConverter.convert(node.get(i), JsonPath.index(path, i));
+            }
+            return new GenericArray(elements);
+        };
+    }
+
+    private static JsonToFlussConverter mapConverter(MapType dataType) {
+        JsonToFlussConverter valueConverter = createValidated(dataType.getValueType());
+        return (node, path) -> {
+            require(node.isObject(), path, dataType, "expected a JSON object");
+            requireContainerSize(node.size(), path, dataType);
+            Map<BinaryString, Object> values = new LinkedHashMap<>();
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                values.put(
+                        BinaryString.fromString(field.getKey()),
+                        valueConverter.convert(
+                                field.getValue(), JsonPath.field(path, field.getKey())));
+            }
+            return new GenericMap(values);
+        };
+    }
+
+    private static JsonToFlussConverter rowConverter(RowType dataType) {
+        List<DataField> fields = dataType.getFields();
+        String[] fieldNames = new String[fields.size()];
+        JsonToFlussConverter[] fieldConverters = new JsonToFlussConverter[fields.size()];
+        for (int i = 0; i < fields.size(); i++) {
+            DataField field = fields.get(i);
+            fieldNames[i] = field.getName();
+            fieldConverters[i] = createValidated(field.getType());
+        }
+        return (node, path) -> {
+            require(node.isObject(), path, dataType, "expected a JSON object");
+            requireContainerSize(node.size(), path, dataType);
+            GenericRow row = new GenericRow(fieldNames.length);
+            for (int i = 0; i < fieldNames.length; i++) {
+                row.setField(
+                        i,
+                        fieldConverters[i].convert(
+                                node.get(fieldNames[i]), JsonPath.field(path, fieldNames[i])));
+            }
+            return row;
+        };
+    }
+
+    private static void requireContainerSize(int size, String path, DataType dataType) {
+        require(
+                size <= MAX_CONTAINER_ELEMENTS,
+                path,
+                dataType,
+                "container size exceeds " + MAX_CONTAINER_ELEMENTS);
     }
 
     private static long timestampMillis(
@@ -324,27 +397,7 @@ final class JsonToFlussConverters {
 
     private static String textualValue(JsonNode node, String path, DataType dataType) {
         require(node.isTextual(), path, dataType, "expected a JSON string");
-        String value = node.textValue();
-        // Jackson can retain unpaired JSON escapes in Java strings. Reject them before
-        // BinaryString's UTF-8 encoding silently replaces them with a question mark.
-        for (int i = 0; i < value.length(); i++) {
-            char character = value.charAt(i);
-            if (Character.isHighSurrogate(character)) {
-                require(
-                        i + 1 < value.length() && Character.isLowSurrogate(value.charAt(i + 1)),
-                        path,
-                        dataType,
-                        "unpaired UTF-16 surrogate");
-                i++;
-            } else {
-                require(
-                        !Character.isLowSurrogate(character),
-                        path,
-                        dataType,
-                        "unpaired UTF-16 surrogate");
-            }
-        }
-        return value;
+        return node.textValue();
     }
 
     private static byte[] decodeBase64(JsonNode node, String path, DataType dataType) {
@@ -356,16 +409,12 @@ final class JsonToFlussConverters {
         }
     }
 
-    private static void validatePrecision(
-            int nanos, int precision, String path, DataType dataType) {
-        if (precision >= 9) {
-            return;
-        }
+    private static int nanosPerUnit(int precision) {
         int unit = 1;
         for (int i = precision; i < 9; i++) {
             unit *= 10;
         }
-        require(nanos % unit == 0, path, dataType, "fractional seconds exceed target precision");
+        return unit;
     }
 
     private static void require(boolean condition, String path, DataType dataType, String reason) {
