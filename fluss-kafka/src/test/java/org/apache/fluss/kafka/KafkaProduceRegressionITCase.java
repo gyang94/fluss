@@ -44,6 +44,7 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.server.coordinator.event.RecoverRebalanceEvent;
+import org.apache.fluss.server.tablet.TabletServer;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
 import org.apache.fluss.server.zk.data.RebalanceTask;
 import org.apache.fluss.types.DataTypes;
@@ -339,9 +340,11 @@ class KafkaProduceRegressionITCase {
                                                     "BINARY")),
                                     false)
                             .get();
-                    assertThat(admin.getTableInfo(path).get().getProperties().toMap())
+                    TableInfo updated = admin.getTableInfo(path).get();
+                    assertThat(updated.getProperties().toMap())
                             .containsEntry(
                                     ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "BINARY");
+                    waitForReplicaTableInfo(updated);
                     assertThat(send(producer, full, "property").offset()).isEqualTo(3L);
                     assertValues(connection, path, "full", "alias", "enabled", "property");
                     admin.dropTable(path, false).get();
@@ -398,6 +401,7 @@ class KafkaProduceRegressionITCase {
                     assertThat(after.getSchema().getColumns()).hasSize(2);
                     assertThat(after.getSchema().getColumn("_kafka_metadata").getDataType())
                             .isEqualTo(metadataType());
+                    waitForReplicaTableInfo(after);
 
                     // Neither producer recreation nor a Kafka Metadata refresh should be needed.
                     assertThat(send(producer, full, 0, 789L, "new_full").offset()).isEqualTo(2L);
@@ -608,6 +612,25 @@ class KafkaProduceRegressionITCase {
                                         Boolean.toString(enabled))),
                         false)
                 .get();
+        waitForReplicaTableInfo(admin.getTableInfo(path).get());
+    }
+
+    private static void waitForReplicaTableInfo(TableInfo expected) {
+        // ALTER acknowledgement precedes propagation to the replicas used by Produce.
+        TableBucket bucket = new TableBucket(expected.getTableId(), 0);
+        retry(
+                Duration.ofSeconds(30),
+                () -> {
+                    for (TabletServer server : CLUSTER.getTabletServers()) {
+                        TableInfo actual =
+                                server.getReplicaManager()
+                                        .getReplicaOrException(bucket)
+                                        .getTableInfo();
+                        assertThat(actual.getSchemaId()).isEqualTo(expected.getSchemaId());
+                        assertThat(actual.getProperties().toMap())
+                                .isEqualTo(expected.getProperties().toMap());
+                    }
+                });
     }
 
     private static Uuid topicId(String topic) {
