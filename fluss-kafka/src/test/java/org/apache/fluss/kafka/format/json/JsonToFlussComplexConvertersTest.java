@@ -26,7 +26,6 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
@@ -202,38 +201,6 @@ class JsonToFlussComplexConvertersTest {
                                                 DataTypes.FIELD("quantity", DataTypes.INT())))),
                         "[{\"bad\\\"key\":{\"quantity\":\"bad\"}}]",
                         "$[0][\"bad\\\"key\"][\"quantity\"]"));
-    }
-
-    @Test
-    void testContainersAtTheLimitAndBeyond() {
-        ArrayNode array = MAPPER.createArrayNode();
-        ObjectNode object = MAPPER.createObjectNode();
-        for (int i = 0; i < JsonToFlussConverters.MAX_CONTAINER_ELEMENTS; i++) {
-            array.add(i);
-            object.put("k" + i, i);
-        }
-        JsonToFlussConverter arrayConverter =
-                JsonToFlussConverters.create(DataTypes.ARRAY(DataTypes.INT()));
-        JsonToFlussConverter mapConverter =
-                JsonToFlussConverters.create(DataTypes.MAP(DataTypes.STRING(), DataTypes.INT()));
-        JsonToFlussConverter rowConverter =
-                JsonToFlussConverters.create(DataTypes.ROW(DataTypes.FIELD("k0", DataTypes.INT())));
-        assertThat(((GenericArray) arrayConverter.convert(array, "$")).size())
-                .isEqualTo(JsonToFlussConverters.MAX_CONTAINER_ELEMENTS);
-        assertThat(((GenericMap) mapConverter.convert(object, "$")).size())
-                .isEqualTo(JsonToFlussConverters.MAX_CONTAINER_ELEMENTS);
-        assertThat(((GenericRow) rowConverter.convert(object, "$")).getInt(0)).isZero();
-        array.add(0);
-        object.put("excess", 0);
-        assertThatThrownBy(() -> arrayConverter.convert(array, "$"))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining("container size exceeds");
-        for (JsonToFlussConverter converter :
-                new JsonToFlussConverter[] {mapConverter, rowConverter}) {
-            assertThatThrownBy(() -> converter.convert(object, "$"))
-                    .isInstanceOf(KafkaRecordEncodingException.class)
-                    .hasMessageContaining("container size exceeds");
-        }
     }
 
     @Test

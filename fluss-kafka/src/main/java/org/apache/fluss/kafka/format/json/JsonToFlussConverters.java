@@ -66,14 +66,12 @@ import static org.apache.fluss.utils.DateTimeUtils.timestampToNanos;
  * JSON-to-Fluss converter construction.
  *
  * <p>Scalar coercion and recursive conversion follow Apache Flink 1.20's {@code
- * JsonToRowDataConverters}, adapted to Fluss internal values, schema nullability, and bounded
- * containers. Fluss additionally normalizes temporal precision and fixed binary widths, supports
- * timestamp offsets and local timestamps, and reports numeric overflow instead of storing
- * non-finite numbers or a null decimal.
+ * JsonToRowDataConverters}, adapted to Fluss internal values and schema nullability. Fluss
+ * additionally normalizes temporal precision and fixed binary widths, supports timestamp offsets
+ * and local timestamps, and reports numeric overflow instead of storing non-finite numbers or a
+ * null decimal.
  */
 final class JsonToFlussConverters {
-
-    static final int MAX_CONTAINER_ELEMENTS = 10_000;
 
     private JsonToFlussConverters() {}
 
@@ -112,74 +110,30 @@ final class JsonToFlussConverters {
     private static JsonToFlussConverter createNotNull(DataType dataType) {
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:
-                // Like Flink, parseBoolean treats every non-true string as false.
-                return (node, path) ->
-                        node.isBoolean()
-                                ? node.booleanValue()
-                                : Boolean.parseBoolean(node.asText().trim());
+                return booleanConverter();
             case TINYINT:
-                return (node, path) -> Byte.parseByte(node.asText().trim());
+                return tinyIntConverter();
             case SMALLINT:
-                return (node, path) -> Short.parseShort(node.asText().trim());
+                return smallIntConverter();
             case INTEGER:
-                // Flink truncates fractional numeric nodes, but parses text as an exact integer.
-                return (node, path) ->
-                        node.canConvertToInt()
-                                ? node.asInt()
-                                : Integer.parseInt(node.asText().trim());
+                return intConverter();
             case BIGINT:
-                return (node, path) ->
-                        node.canConvertToLong()
-                                ? node.asLong()
-                                : Long.parseLong(node.asText().trim());
+                return bigIntConverter();
             case FLOAT:
-                return (node, path) -> {
-                    // Parse decimal text directly to float to avoid an intermediate double
-                    // rounding.
-                    float value =
-                            node.isDouble()
-                                    ? (float) node.asDouble()
-                                    : Float.parseFloat(node.asText().trim());
-                    require(
-                            Float.isFinite(value),
-                            path,
-                            dataType,
-                            "non-finite or overflowing number");
-                    return value;
-                };
+                return floatConverter(dataType);
             case DOUBLE:
-                return (node, path) -> {
-                    double value =
-                            node.isDouble()
-                                    ? node.asDouble()
-                                    : Double.parseDouble(node.asText().trim());
-                    require(
-                            Double.isFinite(value),
-                            path,
-                            dataType,
-                            "non-finite or overflowing number");
-                    return value;
-                };
+                return doubleConverter(dataType);
             case DECIMAL:
                 return decimalConverter((DecimalType) dataType);
             case CHAR:
             case STRING:
-                return (node, path) ->
-                        BinaryString.fromString(
-                                node.isContainerNode() ? node.toString() : node.asText());
+                return stringConverter();
             case BINARY:
                 return binaryConverter((BinaryType) dataType);
             case BYTES:
-                return (node, path) -> decodeBase64(node, path, dataType);
+                return bytesConverter(dataType);
             case DATE:
-                return (node, path) -> {
-                    String value = textualValue(node, path, dataType);
-                    try {
-                        return Math.toIntExact(LocalDate.parse(value).toEpochDay());
-                    } catch (DateTimeException | ArithmeticException e) {
-                        throw invalid(path, dataType, "invalid ISO-8601 date", e);
-                    }
-                };
+                return dateConverter(dataType);
             case TIME_WITHOUT_TIME_ZONE:
                 return timeConverter((TimeType) dataType);
             case TIMESTAMP_WITHOUT_TIME_ZONE:
@@ -198,6 +152,52 @@ final class JsonToFlussConverters {
                                 + dataType.asSummaryString()
                                 + ".");
         }
+    }
+
+    private static JsonToFlussConverter booleanConverter() {
+        // parseBoolean treats every non-true string as false.
+        return (node, path) ->
+                node.isBoolean() ? node.booleanValue() : Boolean.parseBoolean(node.asText().trim());
+    }
+
+    private static JsonToFlussConverter tinyIntConverter() {
+        return (node, path) -> Byte.parseByte(node.asText().trim());
+    }
+
+    private static JsonToFlussConverter smallIntConverter() {
+        return (node, path) -> Short.parseShort(node.asText().trim());
+    }
+
+    private static JsonToFlussConverter intConverter() {
+        // Flink truncates fractional numeric nodes, but parses text as an exact integer.
+        return (node, path) ->
+                node.canConvertToInt() ? node.asInt() : Integer.parseInt(node.asText().trim());
+    }
+
+    private static JsonToFlussConverter bigIntConverter() {
+        return (node, path) ->
+                node.canConvertToLong() ? node.asLong() : Long.parseLong(node.asText().trim());
+    }
+
+    private static JsonToFlussConverter floatConverter(DataType dataType) {
+        return (node, path) -> {
+            // Parse decimal text directly to float to avoid an intermediate double rounding.
+            float value =
+                    node.isDouble()
+                            ? (float) node.asDouble()
+                            : Float.parseFloat(node.asText().trim());
+            require(Float.isFinite(value), path, dataType, "non-finite or overflowing number");
+            return value;
+        };
+    }
+
+    private static JsonToFlussConverter doubleConverter(DataType dataType) {
+        return (node, path) -> {
+            double value =
+                    node.isDouble() ? node.asDouble() : Double.parseDouble(node.asText().trim());
+            require(Double.isFinite(value), path, dataType, "non-finite or overflowing number");
+            return value;
+        };
     }
 
     private static JsonToFlussConverter decimalConverter(DecimalType dataType) {
@@ -230,6 +230,11 @@ final class JsonToFlussConverters {
         };
     }
 
+    private static JsonToFlussConverter stringConverter() {
+        return (node, path) ->
+                BinaryString.fromString(node.isContainerNode() ? node.toString() : node.asText());
+    }
+
     private static JsonToFlussConverter binaryConverter(BinaryType dataType) {
         return (node, path) -> {
             byte[] value = decodeBase64(node, path, dataType);
@@ -237,6 +242,21 @@ final class JsonToFlussConverters {
             return value.length == dataType.getLength()
                     ? value
                     : Arrays.copyOf(value, dataType.getLength());
+        };
+    }
+
+    private static JsonToFlussConverter bytesConverter(DataType dataType) {
+        return (node, path) -> decodeBase64(node, path, dataType);
+    }
+
+    private static JsonToFlussConverter dateConverter(DataType dataType) {
+        return (node, path) -> {
+            String value = textualValue(node, path, dataType);
+            try {
+                return Math.toIntExact(LocalDate.parse(value).toEpochDay());
+            } catch (DateTimeException | ArithmeticException e) {
+                throw invalid(path, dataType, "invalid ISO-8601 date", e);
+            }
         };
     }
 
@@ -305,7 +325,6 @@ final class JsonToFlussConverters {
         JsonToFlussConverter elementConverter = createValidated(dataType.getElementType());
         return (node, path) -> {
             require(node.isArray(), path, dataType, "expected a JSON array");
-            requireContainerSize(node.size(), path, dataType);
             Object[] elements = new Object[node.size()];
             for (int i = 0; i < elements.length; i++) {
                 elements[i] = elementConverter.convert(node.get(i), JsonPath.index(path, i));
@@ -318,7 +337,6 @@ final class JsonToFlussConverters {
         JsonToFlussConverter valueConverter = createValidated(dataType.getValueType());
         return (node, path) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
-            requireContainerSize(node.size(), path, dataType);
             Map<BinaryString, Object> values = new LinkedHashMap<>();
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
@@ -343,7 +361,6 @@ final class JsonToFlussConverters {
         }
         return (node, path) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
-            requireContainerSize(node.size(), path, dataType);
             GenericRow row = new GenericRow(fieldNames.length);
             for (int i = 0; i < fieldNames.length; i++) {
                 row.setField(
@@ -353,14 +370,6 @@ final class JsonToFlussConverters {
             }
             return row;
         };
-    }
-
-    private static void requireContainerSize(int size, String path, DataType dataType) {
-        require(
-                size <= MAX_CONTAINER_ELEMENTS,
-                path,
-                dataType,
-                "container size exceeds " + MAX_CONTAINER_ELEMENTS);
     }
 
     private static long timestampMillis(
