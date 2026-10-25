@@ -51,9 +51,12 @@ import org.apache.fluss.utils.IOUtils;
 import org.apache.kafka.common.protocol.Errors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -226,6 +229,104 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
         assertThat(replicaManager.getMemorySegmentPool().usedPages()).isZero();
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testJsonPartitionsPreserveAtomicityNullOffsetsAndReleaseMemory(boolean nested)
+            throws Exception {
+        Schema schema =
+                nested
+                        ? Schema.newBuilder()
+                                .column(
+                                        "_kafka_value",
+                                        DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT())))
+                                .build()
+                        : Schema.newBuilder().column("id", DataTypes.INT()).build();
+        createTable(
+                "json",
+                42L,
+                Collections.singletonList(TABLET_SERVER_ID),
+                schema,
+                "parse_json",
+                nested ? "nested" : "flat");
+        GatewayKafkaProduceBackend backend = backend();
+        List<String> invalid =
+                Arrays.asList(
+                        "{",
+                        "{\"id\":\"bad\"}",
+                        "{\"id\":1,\"unknown\":2}",
+                        "{\"id\":1,\"id\":2}",
+                        "{\"id\":1} {}",
+                        "{\"_kafka_metadata\":null}");
+        for (int i = 0; i < invalid.size(); i++) {
+            KafkaProduceResult result =
+                    backend.write(
+                                    command(
+                                            (short) 1,
+                                            topic(
+                                                    "json",
+                                                    new PartitionWrite(
+                                                            0,
+                                                            Arrays.asList(
+                                                                    jsonRecord("{\"id\":0}"),
+                                                                    jsonRecord(invalid.get(i)))),
+                                                    new PartitionWrite(
+                                                            1,
+                                                            Collections.singletonList(
+                                                                    jsonRecord("{\"id\":1}"))))))
+                            .get(10, TimeUnit.SECONDS);
+            assertErrors(result, Errors.INVALID_RECORD, Errors.NONE);
+            assertThat(result.topics().get(0).partitions().get(1).baseOffset()).isEqualTo(i);
+            assertThat(
+                            replicaManager
+                                    .getReplicaOrException(new TableBucket(42L, 0))
+                                    .getLocalLogEndOffset())
+                    .isZero();
+            assertThat(replicaManager.getMemorySegmentPool().usedPages()).isZero();
+        }
+        KafkaProduceResult allNull =
+                backend.write(
+                                command(
+                                        (short) 1,
+                                        topic(
+                                                "kafka.json",
+                                                new PartitionWrite(
+                                                        0,
+                                                        Collections.singletonList(
+                                                                jsonRecord(null))))))
+                        .join();
+        assertErrors(allNull, Errors.NONE);
+        assertThat(allNull.topics().get(0).partitions().get(0).baseOffset()).isZero();
+        KafkaProduceResult mixed =
+                backend.write(
+                                command(
+                                        (short) 1,
+                                        topic(
+                                                "json",
+                                                new PartitionWrite(
+                                                        0,
+                                                        Arrays.asList(
+                                                                jsonRecord("{\"id\":2}"),
+                                                                jsonRecord(null),
+                                                                jsonRecord("{\"id\":3}"))))))
+                        .join();
+        assertErrors(mixed, Errors.NONE);
+        assertThat(mixed.topics().get(0).partitions().get(0).baseOffset()).isEqualTo(1L);
+        assertThat(
+                        replicaManager
+                                .getReplicaOrException(new TableBucket(42L, 0))
+                                .getLocalLogEndOffset())
+                .isEqualTo(4L);
+        assertThat(replicaManager.getMemorySegmentPool().usedPages()).isZero();
+    }
+
+    private static Record jsonRecord(String json) {
+        return new Record(
+                123L,
+                null,
+                json == null ? null : ByteBuffer.wrap(json.getBytes(StandardCharsets.UTF_8)),
+                Collections.emptyList());
+    }
+
     private void acknowledge(TableBucket bucket) throws Exception {
         CompletableFuture<Void> fetched = new CompletableFuture<>();
         replicaManager.fetchLogRecords(
@@ -238,16 +339,31 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
     }
 
     private void createTable(String name, long tableId, List<Integer> replicas) throws Exception {
+        createTable(
+                name,
+                tableId,
+                replicas,
+                Schema.newBuilder().column("_kafka_value", DataTypes.BYTES()).build(),
+                "binary",
+                null);
+    }
+
+    private void createTable(
+            String name,
+            long tableId,
+            List<Integer> replicas,
+            Schema schema,
+            String format,
+            String layout)
+            throws Exception {
         TablePath path = TablePath.of("kafka", name);
         Map<String, String> properties = new HashMap<>();
         properties.put(ConfigOptions.TABLE_KAFKA_ENABLED.key(), "true");
-        properties.put(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), "binary");
-        registerTableInZkClient(
-                path,
-                Schema.newBuilder().column("_kafka_value", DataTypes.BYTES()).build(),
-                tableId,
-                Collections.emptyList(),
-                properties);
+        properties.put(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(), format);
+        if (layout != null) {
+            properties.put(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), layout);
+        }
+        registerTableInZkClient(path, schema, tableId, Collections.emptyList(), properties);
         List<BucketMetadata> buckets = new ArrayList<>();
         for (int bucket = 0; bucket < 3; bucket++) {
             makeLeaderAndFollower(

@@ -33,15 +33,16 @@ import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.DoubleNode;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.FloatNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.util.ByteBufferBackedInputStream;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.RowType;
 
 import javax.annotation.Nullable;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Reader;
+import java.nio.ByteBuffer;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -98,18 +99,29 @@ public final class JsonKafkaFieldDecoder implements KafkaFieldDecoder {
             if (projectedFields.put(name, i) != null) {
                 throw new KafkaTopicSchemaException("Duplicate Kafka JSON field '" + name + "'.");
             }
-            converters[i] = JsonToFlussConverters.create(this.projection.dataTypeAt(i));
+            DataType type = this.projection.dataTypeAt(i);
+            switch (type.getTypeRoot()) {
+                case ARRAY:
+                case MAP:
+                case ROW:
+                    throw new KafkaTopicSchemaException(
+                            "Kafka JSON scalar decoding does not support Fluss type "
+                                    + type.asSummaryString()
+                                    + ".");
+                default:
+                    converters[i] = JsonToFlussConverters.create(type);
+            }
         }
     }
 
     @Override
-    public Object[] decode(@Nullable byte[] bytes) {
+    public Object[] decode(@Nullable ByteBuffer bytes) {
         if (bytes == null) {
             return nullValues();
         }
         try (Reader reader =
                         new InputStreamReader(
-                                new ByteArrayInputStream(bytes),
+                                new ByteBufferBackedInputStream(bytes.duplicate()),
                                 StandardCharsets.UTF_8
                                         .newDecoder()
                                         .onMalformedInput(CodingErrorAction.REPORT)

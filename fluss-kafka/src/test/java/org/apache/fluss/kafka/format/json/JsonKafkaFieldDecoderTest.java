@@ -35,6 +35,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -55,22 +56,22 @@ class JsonKafkaFieldDecoderTest {
                         DataTypes.FIELD("optional", DataTypes.STRING()));
         JsonKafkaFieldDecoder decoder = decoder(rowType);
 
-        assertThatThrownBy(() -> decoder.decode(bytes("[]")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("[]"))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("object root");
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":1,\"id\":2}")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{\"id\":1,\"id\":2}"))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("strict UTF-8 JSON");
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":1} {}")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{\"id\":1} {}"))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("strict UTF-8 JSON");
-        assertThatThrownBy(() -> decoder.decode(bytes("{")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{"))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("strict UTF-8 JSON");
     }
 
     @Test
-    void testRejectsMissingTypeOverflowAndPrecisionLoss() {
+    void testRejectsMissingFieldsAndInvalidScalarValues() {
         assertFailure(
                 DataTypes.ROW(DataTypes.FIELD("id", DataTypes.BIGINT().copy(false))),
                 "{}",
@@ -80,22 +81,57 @@ class JsonKafkaFieldDecoderTest {
                 DataTypes.ROW(DataTypes.FIELD("id", DataTypes.INT())),
                 "{\"id\":2147483648}",
                 "$[\"id\"]",
-                "integer overflow");
+                "value cannot be converted");
         assertFailure(
                 DataTypes.ROW(DataTypes.FIELD("amount", DataTypes.DECIMAL(5, 2))),
-                "{\"amount\":1.234}",
+                "{\"amount\":9999}",
                 "$[\"amount\"]",
-                "scale exceeds");
+                "decimal precision exceeds");
         assertFailure(
                 DataTypes.ROW(DataTypes.FIELD("timestamp", DataTypes.TIMESTAMP_LTZ(3))),
-                "{\"timestamp\":\"2026-07-27T19:30:12.123\"}",
+                "{\"timestamp\":\"invalid\"}",
                 "$[\"timestamp\"]",
-                "offset or Z is required");
+                "timestamp");
         assertFailure(
                 DataTypes.ROW(DataTypes.FIELD("fixed", DataTypes.BINARY(2))),
-                "{\"fixed\":\"AQ==\"}",
+                "{\"fixed\":\"!\"}",
                 "$[\"fixed\"]",
-                "length must equal 2");
+                "Base64");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"heap", "direct", "read-only"})
+    void testBorrowedBufferRangeAndScalarCoercions(String kind) {
+        JsonKafkaFieldDecoder decoder =
+                decoder(
+                        DataTypes.ROW(
+                                DataTypes.FIELD("id", DataTypes.INT()),
+                                DataTypes.FIELD("amount", DataTypes.DECIMAL(5, 2)),
+                                DataTypes.FIELD("fixed", DataTypes.BINARY(2)),
+                                DataTypes.FIELD("negativeZero", DataTypes.FLOAT())));
+        byte[] json =
+                bytes(
+                        "{\"id\":\" 7 \",\"amount\":1.234,\"fixed\":\"AQ==\",\"negativeZero\":\"-0\"}");
+        ByteBuffer storage =
+                kind.equals("direct")
+                        ? ByteBuffer.allocateDirect(json.length + 4)
+                        : ByteBuffer.allocate(json.length + 4);
+        storage.position(2);
+        storage.put(json);
+        storage.position(1);
+        ByteBuffer input = storage.slice();
+        input.position(1);
+        input.limit(1 + json.length);
+        if (kind.equals("read-only")) {
+            input = input.asReadOnlyBuffer();
+        }
+        Object[] values = decoder.decode(input);
+        assertThat(values[0]).isEqualTo(7);
+        assertThat(((Decimal) values[1]).toBigDecimal()).isEqualByComparingTo("1.23");
+        assertThat((byte[]) values[2]).containsExactly((byte) 1, (byte) 0);
+        assertThat(Float.floatToRawIntBits((Float) values[3])).isEqualTo(Integer.MIN_VALUE);
+        assertThat(input.position()).isEqualTo(1);
+        assertThat(input.remaining()).isEqualTo(json.length);
     }
 
     @Test
@@ -116,13 +152,18 @@ class JsonKafkaFieldDecoderTest {
         JsonKafkaFieldDecoder decoder =
                 decoder(DataTypes.ROW(DataTypes.FIELD("amount", DataTypes.DECIMAL(30, 10))));
         Decimal value =
-                (Decimal) decoder.decode(bytes("{\"amount\":12345678901234567890.1234567890}"))[0];
+                (Decimal)
+                        decoder.decode(
+                                        ByteBuffer.wrap(
+                                                bytes(
+                                                        "{\"amount\":12345678901234567890.1234567890}")))[
+                                0];
         assertThat(value.toBigDecimal())
                 .isEqualByComparingTo(new BigDecimal("12345678901234567890.1234567890"));
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"extra\":1}")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{\"extra\":1}"))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("unknown field");
-        assertThat(decoder.decode(bytes("{}"))).containsExactly((Object) null);
+        assertThat(decoder.decode(ByteBuffer.wrap(bytes("{}")))).containsExactly((Object) null);
     }
 
     @ParameterizedTest
@@ -159,13 +200,13 @@ class JsonKafkaFieldDecoderTest {
             }
         }
         JsonKafkaFieldDecoder decoder = decoder(new RowType(fields), nested);
-        Object[] result = decoder.decode(bytes(json + "}"));
+        Object[] result = decoder.decode(ByteBuffer.wrap(bytes(json + "}")));
         assertThat(result)
                 .containsExactly(nested ? new Object[] {GenericRow.of(expected)} : expected);
 
         String excessField = json + ",\"field" + maximumFields + "\":";
         for (String value : new String[] {"0}", "["}) {
-            assertThatThrownBy(() -> decoder.decode(bytes(excessField + value)))
+            assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes(excessField + value))))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasMessageContaining("maximum field count of " + maximumFields);
         }
@@ -181,7 +222,13 @@ class JsonKafkaFieldDecoderTest {
                                 DataTypes.FIELD("doubleValue", DataTypes.DOUBLE())));
         Object[] values =
                 decoder.decode(
-                        bytes("{\"floatValue\":" + number + ",\"doubleValue\":" + number + "}"));
+                        ByteBuffer.wrap(
+                                bytes(
+                                        "{\"floatValue\":"
+                                                + number
+                                                + ",\"doubleValue\":"
+                                                + number
+                                                + "}")));
         float expectedFloat = number.startsWith("-") ? -0.0F : 0.0F;
         double expectedDouble = number.startsWith("-") ? -0.0D : 0.0D;
         assertThat(Float.floatToRawIntBits((Float) values[0]))
@@ -213,14 +260,15 @@ class JsonKafkaFieldDecoderTest {
             for (int i = 0; i < tokens.length; i++) {
                 Object[] decoded =
                         decoder.decode(
-                                bytes(
-                                        "{\"floatValue\":"
-                                                + sign
-                                                + tokens[i][0]
-                                                + ",\"doubleValue\":"
-                                                + sign
-                                                + tokens[i][1]
-                                                + "}"));
+                                ByteBuffer.wrap(
+                                        bytes(
+                                                "{\"floatValue\":"
+                                                        + sign
+                                                        + tokens[i][0]
+                                                        + ",\"doubleValue\":"
+                                                        + sign
+                                                        + tokens[i][1]
+                                                        + "}")));
                 GenericRow row = nested ? (GenericRow) decoded[0] : GenericRow.of(decoded);
                 int magnitude = i == tokens.length - 1 ? 1 : 0;
                 assertThat(Float.floatToRawIntBits(row.getFloat(0)))
@@ -245,15 +293,16 @@ class JsonKafkaFieldDecoderTest {
         String amount = sign + "12345678901234567890.123456789012345678";
         Object[] values =
                 decoder.decode(
-                        bytes(
-                                "{\"floatValue\":"
-                                        + sign
-                                        + "1.0000000596046448,\"doubleValue\":"
-                                        + sign
-                                        + "1.00000000000000011102230246251565404236316680908203126,"
-                                        + "\"amount\":"
-                                        + amount
-                                        + "}"));
+                        ByteBuffer.wrap(
+                                bytes(
+                                        "{\"floatValue\":"
+                                                + sign
+                                                + "1.0000000596046448,\"doubleValue\":"
+                                                + sign
+                                                + "1.00000000000000011102230246251565404236316680908203126,"
+                                                + "\"amount\":"
+                                                + amount
+                                                + "}")));
         float direction = sign.isEmpty() ? 1.0F : -1.0F;
         assertThat(values[0]).isEqualTo(direction * 1.0000001F);
         assertThat(values[1]).isEqualTo(direction * 1.0000000000000002D);
@@ -261,12 +310,13 @@ class JsonKafkaFieldDecoderTest {
 
         assertThat(
                         decoder.decode(
-                                bytes(
-                                        "{\"floatValue\":"
-                                                + sign
-                                                + "1.0000000596046447,\"doubleValue\":"
-                                                + sign
-                                                + "1.00000000000000011102230246251565404236316680908203124}")))
+                                ByteBuffer.wrap(
+                                        bytes(
+                                                "{\"floatValue\":"
+                                                        + sign
+                                                        + "1.0000000596046447,\"doubleValue\":"
+                                                        + sign
+                                                        + "1.00000000000000011102230246251565404236316680908203124}"))))
                 .containsExactly(direction, (double) direction, null);
     }
 
@@ -281,7 +331,14 @@ class JsonKafkaFieldDecoderTest {
         float direction = sign.isEmpty() ? 1.0F : -1.0F;
         String largestFloat = sign + "340282356779733661637539395458142568447";
         for (String suffix : new String[] {"", ".0"}) {
-            assertThat(decoder.decode(bytes("{\"floatValue\":" + largestFloat + suffix + "}")))
+            assertThat(
+                            decoder.decode(
+                                    ByteBuffer.wrap(
+                                            bytes(
+                                                    "{\"floatValue\":"
+                                                            + largestFloat
+                                                            + suffix
+                                                            + "}"))))
                     .containsExactly(direction * Float.MAX_VALUE, null);
             assertFailure(
                     rowType,
@@ -293,7 +350,13 @@ class JsonKafkaFieldDecoderTest {
                     "$[\"floatValue\"]",
                     "overflowing number");
         }
-        assertThat(decoder.decode(bytes("{\"doubleValue\":" + sign + "1.7976931348623157e308}")))
+        assertThat(
+                        decoder.decode(
+                                ByteBuffer.wrap(
+                                        bytes(
+                                                "{\"doubleValue\":"
+                                                        + sign
+                                                        + "1.7976931348623157e308}"))))
                 .containsExactly(null, direction * Double.MAX_VALUE);
         assertFailure(
                 rowType,
@@ -319,7 +382,11 @@ class JsonKafkaFieldDecoderTest {
         }
         number.append('1');
         for (String field : new String[] {"floatValue", "doubleValue"}) {
-            assertThatThrownBy(() -> decoder.decode(bytes("{\"" + field + "\":" + number + "}")))
+            assertThatThrownBy(
+                            () ->
+                                    decoder.decode(
+                                            ByteBuffer.wrap(
+                                                    bytes("{\"" + field + "\":" + number + "}"))))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasRootCauseInstanceOf(StreamConstraintsException.class);
         }
@@ -337,16 +404,17 @@ class JsonKafkaFieldDecoderTest {
                                 DataTypes.FIELD("optional", DataTypes.INT())));
         Object[] values =
                 decoder.decode(
-                        bytes(
-                                "{\"floatValue\":-0.0,\"text\":\"hello\",\"amount\":12.34,"
-                                        + "\"doubleValue\":2.5,\"optional\":null}"));
+                        ByteBuffer.wrap(
+                                bytes(
+                                        "{\"floatValue\":-0.0,\"text\":\"hello\",\"amount\":12.34,"
+                                                + "\"doubleValue\":2.5,\"optional\":null}")));
         assertThat(values[0].toString()).isEqualTo("hello");
         assertThat(((Decimal) values[1]).toBigDecimal()).isEqualTo(new BigDecimal("12.34"));
         assertThat(Float.floatToRawIntBits((Float) values[2]))
                 .isEqualTo(Float.floatToRawIntBits(-0.0F));
         assertThat(values[3]).isEqualTo(2.5D);
         assertThat(values[4]).isNull();
-        assertThat(decoder.decode(bytes("{\"doubleValue\":2.5}")))
+        assertThat(decoder.decode(ByteBuffer.wrap(bytes("{\"doubleValue\":2.5}"))))
                 .containsExactly(null, null, null, 2.5D, null);
     }
 
@@ -366,7 +434,7 @@ class JsonKafkaFieldDecoderTest {
                     "{\"value\":1f}",
                     "{\"value\":1}null"
                 }) {
-            assertThatThrownBy(() -> decoder.decode(bytes(json)))
+            assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes(json))))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasMessageContaining("strict UTF-8 JSON");
         }
@@ -380,7 +448,7 @@ class JsonKafkaFieldDecoderTest {
         byte[] input = Arrays.copyOf(json, json.length + 32_768);
         Arrays.fill(input, json.length, input.length - 1, (byte) ' ');
         input[input.length - 1] = (byte) 0xff;
-        assertThatThrownBy(() -> decoder.decode(input))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(input)))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("strict UTF-8 JSON");
     }
@@ -393,14 +461,14 @@ class JsonKafkaFieldDecoderTest {
                 new byte[][] {
                     new byte[] {(byte) 0xff}, "{\"value\":\"ok\"}".getBytes(StandardCharsets.UTF_16)
                 }) {
-            assertThatThrownBy(() -> decoder.decode(input))
+            assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(input)))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasMessageContaining("strict UTF-8 JSON");
         }
     }
 
     private static void assertFailure(RowType rowType, String json, String path, String reason) {
-        assertThatThrownBy(() -> decoder(rowType).decode(bytes(json)))
+        assertThatThrownBy(() -> decoder(rowType).decode(ByteBuffer.wrap(bytes(json))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining(path)
                 .hasMessageContaining(reason);
@@ -442,7 +510,7 @@ class JsonKafkaFieldDecoderTest {
                     "_kafka_rescue",
                     "_kafka_value"
                 }) {
-            assertThatThrownBy(() -> decoder.decode(bytes("{\"" + name + "\":[")))
+            assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{\"" + name + "\":["))))
                     .isInstanceOf(KafkaRecordEncodingException.class)
                     .hasMessageContaining("reserved field");
             assertThatThrownBy(
@@ -453,10 +521,10 @@ class JsonKafkaFieldDecoderTest {
                     .isInstanceOf(KafkaTopicSchemaException.class)
                     .hasMessageContaining("Reserved name");
         }
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"unknown\":[")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{\"unknown\":["))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("unknown field");
-        assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":[")))
+        assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(bytes("{\"id\":["))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("expected a JSON scalar");
         for (byte[] invalid :
@@ -468,10 +536,10 @@ class JsonKafkaFieldDecoderTest {
                     bytes("{\"id\":1} {}"),
                     {(byte) 0xff}
                 }) {
-            assertThatThrownBy(() -> decoder.decode(invalid))
+            assertThatThrownBy(() -> decoder.decode(ByteBuffer.wrap(invalid)))
                     .isInstanceOf(KafkaRecordEncodingException.class);
         }
-        Object[] result = decoder.decode(bytes("{\"optional\":null,\"id\":7}"));
+        Object[] result = decoder.decode(ByteBuffer.wrap(bytes("{\"optional\":null,\"id\":7}")));
         assertThat(result)
                 .containsExactly(
                         nested ? new Object[] {GenericRow.of(7, null)} : new Object[] {7, null});
@@ -488,8 +556,9 @@ class JsonKafkaFieldDecoderTest {
         GenericRow row =
                 (GenericRow)
                         decoder.decode(
-                                        bytes(
-                                                "{\"amount\":1234567890123456789012345678.1234567890,\"d\":-0.0,\"f\":-0.0}"))[
+                                        ByteBuffer.wrap(
+                                                bytes(
+                                                        "{\"amount\":1234567890123456789012345678.1234567890,\"d\":-0.0,\"f\":-0.0}")))[
                                 0];
         assertThat(Float.floatToRawIntBits(row.getFloat(0)))
                 .isEqualTo(Float.floatToRawIntBits(-0.0F));

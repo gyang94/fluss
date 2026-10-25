@@ -37,7 +37,7 @@ import java.util.Arrays;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Tests JSON table admission shared by Metadata and Produce. */
+/** Tests JSON schema resolution against the installed decoder support. */
 class KafkaJsonSchemaTest {
     private final KafkaTopicSchemaResolver resolver = new KafkaTopicSchemaResolver();
 

@@ -120,6 +120,8 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
             EncodedRecords result = new EncodedRecords(builder.build(), builder);
             ownershipTransferred = true;
             return result;
+        } catch (KafkaRecordEncodingException e) {
+            throw e;
         } catch (Exception e) {
             throw new FlussRuntimeException(
                     "Kafka transcode Arrow memory limit exceeded (allocator limit "

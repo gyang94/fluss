@@ -21,6 +21,7 @@ import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
+import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
@@ -38,6 +39,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -169,7 +171,8 @@ class KafkaFormatFactoryRegistryTest {
                         nested
                                 ? KafkaValueConversionLayout.NESTED
                                 : KafkaValueConversionLayout.FLAT);
-        Object[] values = decoder.decode("{\"id\":7}".getBytes(StandardCharsets.UTF_8));
+        Object[] values =
+                decoder.decode(ByteBuffer.wrap("{\"id\":7}".getBytes(StandardCharsets.UTF_8)));
         assertThat(values).hasSize(1);
         if (nested) {
             assertThat(((InternalRow) values[0]).getInt(0)).isEqualTo(7);
@@ -186,8 +189,9 @@ class KafkaFormatFactoryRegistryTest {
         assertThatThrownBy(
                         () ->
                                 decoder.decode(
-                                        "{\"_kafka_value\":{\"id\":7}}"
-                                                .getBytes(StandardCharsets.UTF_8)))
+                                        ByteBuffer.wrap(
+                                                "{\"_kafka_value\":{\"id\":7}}"
+                                                        .getBytes(StandardCharsets.UTF_8))))
                 .isInstanceOf(KafkaRecordEncodingException.class)
                 .hasMessageContaining("reserved field");
     }

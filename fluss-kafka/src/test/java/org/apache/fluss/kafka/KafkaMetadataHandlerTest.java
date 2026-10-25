@@ -366,7 +366,7 @@ public class KafkaMetadataHandlerTest {
     }
 
     @Test
-    public void testJsonAdmissionReflectsAuthoritativeSchemaAndProperties() {
+    public void testJsonMetadataReflectsEnabledFlagAndTableIdentity() {
         TestingMetadataGatewayService service = new TestingMetadataGatewayService();
         TableDescriptor flat =
                 TableDescriptor.builder(defaultDescriptor())
@@ -381,15 +381,20 @@ public class KafkaMetadataHandlerTest {
                                 .find("json_topic")
                                 .errorCode())
                 .isEqualTo(Errors.NONE.code());
-        // Changing the layout without moving business columns invalidates the same table ID.
+        // Metadata trusts enabled descriptors; DDL owns schema validation.
         service.putTable(
                 "fluss.json_topic",
                 140L,
                 TableDescriptor.builder(flat)
                         .property(ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(), "nested")
                         .build());
-        assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
-                .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+        assertThat(
+                        handle(service, namedTopicRequest("json_topic"), (short) 11)
+                                .data()
+                                .topics()
+                                .find("json_topic")
+                                .errorCode())
+                .isEqualTo(Errors.NONE.code());
         service.putTable(
                 "fluss.json_topic",
                 140L,
@@ -399,8 +404,13 @@ public class KafkaMetadataHandlerTest {
                                         .column("items", DataTypes.ARRAY(DataTypes.INT()))
                                         .build())
                         .build());
-        assertThat(handle(service, namedTopicRequest("json_topic"), (short) 11).errors())
-                .containsEntry("json_topic", Errors.INVALID_TOPIC_EXCEPTION);
+        assertThat(
+                        handle(service, namedTopicRequest("json_topic"), (short) 11)
+                                .data()
+                                .topics()
+                                .find("json_topic")
+                                .errorCode())
+                .isEqualTo(Errors.NONE.code());
         service.putTable(
                 "fluss.json_topic",
                 140L,

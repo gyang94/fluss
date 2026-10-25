@@ -27,6 +27,7 @@ import org.apache.fluss.exception.InvalidTableException;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
+import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.memory.LazyMemorySegmentPool;
 import org.apache.fluss.memory.MemorySegment;
 import org.apache.fluss.metadata.KafkaTableSchema;
@@ -344,12 +345,12 @@ class ArrowKafkaRecordTranscoderTest {
     }
 
     @Test
-    void testRejectsUnsupportedFormatEvenForNull() {
+    void testRejectsUnsupportedJsonContainersEvenForNull() {
         TableInfo table =
                 table(
                         descriptor(
                                         Schema.newBuilder()
-                                                .column("body", DataTypes.STRING())
+                                                .column("body", DataTypes.ARRAY(DataTypes.INT()))
                                                 .build(),
                                         true)
                                 .property(
@@ -357,8 +358,8 @@ class ArrowKafkaRecordTranscoderTest {
                                         KafkaValueConversionType.PARSE_JSON)
                                 .build());
         assertThatThrownBy(() -> transcode(table, (byte[]) null))
-                .isInstanceOf(KafkaRecordEncodingException.class)
-                .hasMessageContaining("PARSE_JSON");
+                .isInstanceOf(KafkaTopicSchemaException.class)
+                .hasMessageContaining("ARRAY");
     }
 
     @Test

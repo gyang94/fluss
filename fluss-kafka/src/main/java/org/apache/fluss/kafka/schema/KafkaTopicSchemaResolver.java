@@ -42,7 +42,7 @@ public final class KafkaTopicSchemaResolver {
         try {
             KafkaTableSchema schema = KafkaTableSchema.resolve(table);
             if (schema.valueConversionType() == KafkaValueConversionType.PARSE_JSON) {
-                // Metadata and Produce must reject schemas beyond the installed decoder support.
+                // Explicit schema resolution also validates the installed decoder support.
                 new JsonKafkaFieldDecoder(schema.valueProjection(), schema.valueConversionLayout());
             }
             return schema;
