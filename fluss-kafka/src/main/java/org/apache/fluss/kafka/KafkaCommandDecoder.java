@@ -17,8 +17,13 @@
 
 package org.apache.fluss.kafka;
 
+import org.apache.fluss.kafka.security.KafkaSaslConnection;
 import org.apache.fluss.rpc.netty.server.RequestChannel;
+import org.apache.fluss.security.auth.ServerAuthenticator;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
+import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelFuture;
+import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelFutureListener;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
 import org.apache.fluss.shaded.netty4.io.netty.channel.SimpleChannelInboundHandler;
 import org.apache.fluss.shaded.netty4.io.netty.handler.timeout.IdleState;
@@ -38,11 +43,14 @@ import org.apache.kafka.common.requests.RequestHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
+
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import static org.apache.kafka.common.protocol.ApiKeys.API_VERSIONS;
 import static org.apache.kafka.common.protocol.ApiKeys.PRODUCE;
@@ -57,6 +65,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     private final RequestChannel[] requestChannels;
     private final int numChannels;
     private final String listenerName;
+    private final KafkaSaslConnection saslConnection;
 
     // Need to use a Queue to store the inflight responses, because Kafka clients require the
     // responses to be sent in order.
@@ -67,22 +76,61 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     protected volatile ChannelHandlerContext ctx;
     protected SocketAddress remoteAddress;
 
+    /** Creates a decoder for a PLAINTEXT Kafka connection. */
     public KafkaCommandDecoder(RequestChannel[] requestChannels, String listenerName) {
+        this(requestChannels, listenerName, null);
+    }
+
+    /** Creates a decoder that requires SASL when an authenticator supplier is provided. */
+    public KafkaCommandDecoder(
+            RequestChannel[] requestChannels,
+            String listenerName,
+            @Nullable Supplier<ServerAuthenticator> authenticatorSupplier) {
         super(false);
         this.requestChannels = requestChannels;
         this.numChannels = requestChannels.length;
         this.listenerName = listenerName;
+        this.saslConnection =
+                authenticatorSupplier == null
+                        ? KafkaSaslConnection.plaintext()
+                        : KafkaSaslConnection.sasl(authenticatorSupplier);
     }
 
     @Override
     public void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
         CompletableFuture<AbstractResponse> future = new CompletableFuture<>();
+        KafkaRequest request = null;
+        boolean handedToProcessor = false;
         try {
-            KafkaRequest request = parseRequest(ctx, future, buffer, listenerName);
+            if (saslConnection.isAuthenticatingWithRawTokens()) {
+                // Handshake v0 tokens have only the length prefix removed by the frame decoder;
+                // their contents must never be parsed as a Kafka request header.
+                authenticateRawToken(ctx, buffer);
+                return;
+            }
+            ByteBuffer nioBuffer = buffer.nioBuffer();
+            RequestHeader header = RequestHeader.parse(nioBuffer);
+            if (!saslConnection.isRequestAllowed(header.apiKey())) {
+                LOG.warn(
+                        "Rejecting Kafka API {} before authentication completes on listener {}",
+                        header.apiKey(),
+                        listenerName);
+                close();
+                return;
+            }
+            request =
+                    parseRequest(
+                            ctx, future, buffer, listenerName, saslConnection, header, nioBuffer);
             inflightResponses.addLast(request);
             future.whenCompleteAsync((r, t) -> sendResponse(ctx), ctx.executor());
             int channelIndex =
                     MathUtils.murmurHash(ctx.channel().id().asLongText().hashCode()) % numChannels;
+            // The worker owns the input until synchronous conversion finishes; responses do not
+            // retain record bytes while waiting for an asynchronous native append.
+            // RequestChannel enqueues before reconciling backpressure. Once handed over, the
+            // worker may already own this reference even if backpressure notification throws.
+            request.transferBufferToProcessor();
+            handedToProcessor = true;
             requestChannels[channelIndex].putRequest(request);
 
             if (!isActive.get()) {
@@ -90,13 +138,31 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 request.fail(new LeaderNotAvailableException("Channel is inactive"));
             }
         } catch (Throwable t) {
+            if (request != null && !handedToProcessor) {
+                request.releaseBuffer();
+            }
             LOG.error("Error handling request", t);
-            future.completeExceptionally(t);
+            close();
         } finally {
-            // KafkaRequest retains the buffer to transfer ownership to request processing. Release
-            // the decoder's ownership on every path. KafkaRequest.releaseBuffer() is idempotent
-            // because worker cleanup and response completion can both release that ownership.
+            // The worker retains the request input until synchronous conversion has consumed it.
+            // Release the decoder's reference on every path, including SASL rejection.
             ReferenceCountUtil.release(buffer);
+        }
+    }
+
+    private void authenticateRawToken(ChannelHandlerContext ctx, ByteBuf buffer) {
+        byte[] token = new byte[buffer.readableBytes()];
+        buffer.getBytes(buffer.readerIndex(), token);
+        try {
+            byte[] challenge = saslConnection.authenticate(token);
+            // PLAIN completes with an empty challenge. Legacy clients still expect its length
+            // prefix, but no Kafka response header or SaslAuthenticate response fields.
+            ctx.writeAndFlush(Unpooled.wrappedBuffer(challenge))
+                    .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+        } catch (RuntimeException e) {
+            // The raw token protocol has no error response. Do not log token-derived details.
+            LOG.warn("SASL authentication failed on Kafka listener {}", listenerName);
+            close();
         }
     }
 
@@ -112,8 +178,9 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-        super.channelInactive(ctx);
         LOG.info("Connection closed from {}", ctx.channel().remoteAddress());
+        deactivate();
+        super.channelInactive(ctx);
         // TODO Channel metrics
     }
 
@@ -129,6 +196,17 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     }
 
     private void sendResponse(ChannelHandlerContext ctx) {
+        try {
+            writeCompletedResponses(ctx);
+        } catch (Throwable failure) {
+            // This runs in a future callback, outside Netty's exceptionCaught propagation.
+            // Closing cancels queued responses without releasing a worker's input.
+            LOG.error("Error sending Kafka response on listener {}", listenerName, failure);
+            close();
+        }
+    }
+
+    private void writeCompletedResponses(ChannelHandlerContext ctx) {
         KafkaRequest request;
         while ((request = inflightResponses.peekFirst()) != null) {
             CompletableFuture<AbstractResponse> f = request.future();
@@ -141,40 +219,65 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 if (produceRequest.acks() == 0 && isDone) {
                     // if acks=0, we don't need to wait for the response to be sent
                     inflightResponses.pollFirst();
-                    request.releaseBuffer();
+                    request.releaseResponseBuffer();
                     continue;
                 }
+            }
+
+            if (cancelled) {
+                inflightResponses.pollFirst();
+                request.releaseResponseBuffer();
+                continue;
             }
 
             if (!isDone) {
                 break;
             }
 
-            if (cancelled) {
-                inflightResponses.pollFirst();
-                request.releaseBuffer();
-                continue;
-            }
-
             inflightResponses.pollFirst();
             if (isActive.get()) {
                 ByteBuf buffer = request.responseBuffer();
-                ctx.writeAndFlush(buffer);
+                ChannelFuture responseFuture =
+                        ctx.writeAndFlush(buffer)
+                                .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
+                if (request.shouldCloseConnectionAfterResponse()) {
+                    isActive.set(false);
+                    saslConnection.close();
+                    responseFuture.addListener(
+                            ignored -> {
+                                releasePendingRequests();
+                                ctx.close();
+                            });
+                    break;
+                }
             } else {
-                request.releaseBuffer();
+                request.releaseResponseBuffer();
             }
         }
     }
 
     protected void close() {
-        isActive.set(false);
-        ctx.close();
+        deactivate();
+        if (ctx != null) {
+            ctx.close();
+        }
         LOG.warn(
                 "Close channel {} with {} pending requests.",
                 remoteAddress,
                 inflightResponses.size());
-        for (KafkaRequest request : inflightResponses) {
+    }
+
+    private void deactivate() {
+        isActive.set(false);
+        saslConnection.close();
+        releasePendingRequests();
+    }
+
+    private void releasePendingRequests() {
+        KafkaRequest request;
+        while ((request = inflightResponses.pollFirst()) != null) {
             request.cancel();
+            request.releaseResponseBuffer();
         }
     }
 
@@ -188,9 +291,10 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             ChannelHandlerContext ctx,
             CompletableFuture<AbstractResponse> future,
             ByteBuf buffer,
-            String listenerName) {
-        ByteBuffer nioBuffer = buffer.nioBuffer();
-        RequestHeader header = RequestHeader.parse(nioBuffer);
+            String listenerName,
+            KafkaSaslConnection saslConnection,
+            RequestHeader header,
+            ByteBuffer nioBuffer) {
         if (isUnsupportedApiVersionRequest(header)) {
             ApiVersionsRequest request =
                     new ApiVersionsRequest(
@@ -203,6 +307,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                     header,
                     request,
                     listenerName,
+                    saslConnection,
                     buffer,
                     ctx,
                     future);
@@ -215,6 +320,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 header,
                 request.request,
                 listenerName,
+                saslConnection,
                 buffer,
                 ctx,
                 future);

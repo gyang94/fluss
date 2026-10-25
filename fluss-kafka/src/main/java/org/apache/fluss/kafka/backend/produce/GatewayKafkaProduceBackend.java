@@ -86,7 +86,8 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
         setCurrentSession(command);
         List<CompletableFuture<TopicResult>> topics = new ArrayList<>();
-        try (AppendBatch batch = new AppendBatch(command.timeoutMs(), command.acks())) {
+        try (AppendBatch batch =
+                new AppendBatch(command.timeoutMs(), command.acks(), command.principal())) {
             for (TopicWrite topic : command.topics()) {
                 List<CompletableFuture<PartitionResult>> partitions = new ArrayList<>();
                 for (PartitionWrite partition : topic.partitions()) {
@@ -152,7 +153,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         command.listenerName(),
                         false,
                         command.clientAddress(),
-                        FlussPrincipal.ANONYMOUS));
+                        command.principal()));
     }
 
     /** Closes cached writers; shared memory remains owned by the TabletServer. */
@@ -164,14 +165,16 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     private final class AppendBatch implements AutoCloseable {
         private final int timeoutMs;
         private final short acks;
+        private final FlussPrincipal principal;
         private final Map<TableBucket, MemoryLogRecords> entriesPerBucket = new HashMap<>();
         private final Map<TableBucket, CompletableFuture<PartitionResult>> results =
                 new HashMap<>();
         private final List<EncodedRecords> convertedRecords = new ArrayList<>();
 
-        private AppendBatch(int timeoutMs, short acks) {
+        private AppendBatch(int timeoutMs, short acks, FlussPrincipal principal) {
             this.timeoutMs = timeoutMs;
             this.acks = acks;
+            this.principal = principal;
         }
 
         private void appendLogs() {
@@ -186,7 +189,7 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         timeoutMs,
                         acks,
                         entriesPerBucket,
-                        new UserContext(FlussPrincipal.ANONYMOUS),
+                        new UserContext(principal),
                         responses -> completeResults(pending, responses));
             } catch (Exception failure) {
                 pending.forEach(

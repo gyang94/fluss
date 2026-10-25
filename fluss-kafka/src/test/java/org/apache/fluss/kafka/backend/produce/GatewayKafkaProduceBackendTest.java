@@ -33,6 +33,7 @@ import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.rpc.netty.server.Session;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.security.acl.OperationType;
 import org.apache.fluss.security.acl.Resource;
 import org.apache.fluss.server.authorizer.AuthorizationPlugin;
@@ -126,6 +127,7 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
     void testRevokedWritePermissionIsCheckedForEveryRequest() throws Exception {
         createTable("topic", 42L, Collections.singletonList(TABLET_SERVER_ID));
         boolean[] allowed = {true};
+        FlussPrincipal principal = new FlussPrincipal("writer", "User");
         DefaultAuthorizer authorizer =
                 new DefaultAuthorizer(
                         new AuthorizationPlugin.Context() {
@@ -142,6 +144,7 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
                     @Override
                     public void authorize(
                             Session session, OperationType operation, Resource resource) {
+                        assertThat(session.getPrincipal()).isEqualTo(principal);
                         assertThat(session.getListenerName()).isEqualTo("KAFKA");
                         assertThat(session.getInetAddress())
                                 .isEqualTo(InetAddress.getLoopbackAddress());
@@ -155,7 +158,14 @@ class GatewayKafkaProduceBackendTest extends KafkaServerTestBase {
                 new GatewayKafkaProduceBackend(createTabletService(authorizer), mapper());
         backends.add(backend);
         try {
-            KafkaProduceCommand command = command((short) 1, topic("topic", good(0)));
+            KafkaProduceCommand command =
+                    new KafkaProduceCommand(
+                            (short) 1,
+                            5000,
+                            Collections.singletonList(topic("topic", good(0))),
+                            "KAFKA",
+                            InetAddress.getLoopbackAddress(),
+                            principal);
             assertErrors(backend.write(command).join(), Errors.NONE);
             allowed[0] = false;
             assertErrors(backend.write(command).join(), Errors.TOPIC_AUTHORIZATION_FAILED);
