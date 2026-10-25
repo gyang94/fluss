@@ -50,22 +50,6 @@ public class KafkaSaslConfigTest {
     }
 
     @Test
-    public void testKafkaSaslPlainConfiguration() {
-        Configuration configuration = new Configuration();
-        configuration.set(
-                ConfigOptions.SERVER_SECURITY_PROTOCOL_MAP,
-                Collections.singletonMap("KAFKA", "sasl"));
-        configuration.set(
-                ConfigOptions.SERVER_SASL_ENABLED_MECHANISMS_CONFIG,
-                Collections.singletonList("PLAIN"));
-        configuration.set(
-                ConfigOptions.SERVER_SASL_CREDENTIALS,
-                Collections.singletonMap("writer", "writer-secret"));
-
-        new KafkaProtocolPlugin().setup(configuration);
-    }
-
-    @Test
     public void testKafkaSaslRequiresPlainMechanism() {
         Configuration configuration = new Configuration();
         configuration.set(

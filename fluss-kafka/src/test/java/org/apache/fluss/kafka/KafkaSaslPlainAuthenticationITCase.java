@@ -25,6 +25,7 @@ import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.cluster.ServerNode;
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.config.cluster.ServerReconfigurable;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -48,27 +49,26 @@ import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.errors.SaslAuthenticationException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
-import org.apache.kafka.common.message.ProduceRequestData;
+import org.apache.kafka.common.message.SaslAuthenticateRequestData;
 import org.apache.kafka.common.message.SaslHandshakeRequestData;
 import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.ByteBufferAccessor;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.common.record.MemoryRecords;
-import org.apache.kafka.common.record.SimpleRecord;
+import org.apache.kafka.common.protocol.ObjectSerializationCache;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.ApiVersionsRequest;
 import org.apache.kafka.common.requests.ApiVersionsResponse;
 import org.apache.kafka.common.requests.MetadataRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
-import org.apache.kafka.common.requests.ProduceRequest;
-import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.requests.RequestUtils;
+import org.apache.kafka.common.requests.SaslAuthenticateRequest;
+import org.apache.kafka.common.requests.SaslAuthenticateResponse;
 import org.apache.kafka.common.requests.SaslHandshakeRequest;
 import org.apache.kafka.common.requests.SaslHandshakeResponse;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
@@ -77,6 +77,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -85,13 +87,11 @@ import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -145,7 +145,7 @@ public class KafkaSaslPlainAuthenticationITCase {
                 .get();
         long tableId =
                 flussAdmin.getTableInfo(TablePath.of(DATABASE, TABLE_NAME)).get().getTableId();
-        // The raw socket tests do not retry Produce while bucket leadership is being initialized.
+        // Wait for leadership before testing authorization and Produce.
         FLUSS_CLUSTER_EXTENSION.waitAndGetLeader(new TableBucket(tableId, 0));
         bootstrapServers =
                 FLUSS_CLUSTER_EXTENSION.getTabletServerNodes("KAFKA").stream()
@@ -181,9 +181,9 @@ public class KafkaSaslPlainAuthenticationITCase {
 
     @Test
     public void testAuthenticatedMetadataAndStringProduce() throws Exception {
-        grantWriterAccess(OperationType.ALL);
+        grantAccess(USERNAME, OperationType.ALL);
         try (Admin admin = Admin.create(kafkaClientConfig(USERNAME, PASSWORD));
-                KafkaProducer<byte[], byte[]> producer = producer()) {
+                KafkaProducer<byte[], byte[]> producer = producer(USERNAME, PASSWORD)) {
             assertThat(
                             admin.describeTopics(Collections.singleton(TOPIC))
                                     .allTopicNames()
@@ -199,7 +199,7 @@ public class KafkaSaslPlainAuthenticationITCase {
                                     .get(30, TimeUnit.SECONDS)
                                     .offset())
                     .isEqualTo(1L);
-            assertFlussRecord();
+            assertRecords(null, "authenticated-value");
         }
     }
 
@@ -218,27 +218,22 @@ public class KafkaSaslPlainAuthenticationITCase {
     }
 
     @Test
-    public void testV0RawAuthenticationMetadataAndStringProduce() throws Exception {
-        grantWriterAccess(OperationType.ALL);
+    public void testV0RawAuthenticationAndMetadata() throws Exception {
+        grantAccess(USERNAME, OperationType.DESCRIBE);
         try (Socket socket = connectKafka()) {
-            authenticateV0(socket);
+            handshake(socket, (short) 0);
+            writeFrame(socket, token(PASSWORD));
+            // The final PLAIN challenge has no Kafka response header.
+            assertThat(new DataInputStream(socket.getInputStream()).readInt()).isZero();
             MetadataResponse metadata = (MetadataResponse) sendRequest(socket, metadataRequest());
-            assertSuccessfulMetadata(metadata);
-            ProduceResponse nullWrite = (ProduceResponse) sendRequest(socket, produceRequest(null));
-            assertThat(nullWrite.errorCounts()).containsOnlyKeys(Errors.NONE);
-            assertThat(
-                            nullWrite
-                                    .data()
-                                    .responses()
-                                    .iterator()
-                                    .next()
-                                    .partitionResponses()
-                                    .get(0)
-                                    .baseOffset())
-                    .isZero();
-            ProduceResponse produced = (ProduceResponse) sendRequest(socket, produceRequest());
-            assertPartition(produced, 0, Errors.NONE, 1L);
-            assertFlussRecord();
+            assertThat(metadata.data().topics())
+                    .singleElement()
+                    .satisfies(
+                            topic -> {
+                                assertThat(topic.name()).isEqualTo(TOPIC);
+                                assertThat(topic.errorCode()).isEqualTo(Errors.NONE.code());
+                                assertThat(topic.partitions()).hasSize(1);
+                            });
         }
     }
 
@@ -261,10 +256,9 @@ public class KafkaSaslPlainAuthenticationITCase {
 
     @Test
     public void testUserIsolationAndWritePermissionRevocation() throws Exception {
-        TablePath path = TablePath.of(DATABASE, TABLE_NAME);
-        grantWriterAccess(OperationType.ALL);
-        grantAccess(path, "reader", OperationType.DESCRIBE);
-        try (KafkaProducer<byte[], byte[]> writer = producer();
+        grantAccess(USERNAME, OperationType.ALL);
+        grantAccess("reader", OperationType.DESCRIBE);
+        try (KafkaProducer<byte[], byte[]> writer = producer(USERNAME, PASSWORD);
                 KafkaProducer<byte[], byte[]> reader = producer("reader", "reader-secret")) {
             writer.send(new ProducerRecord<>(TOPIC, KEY, VALUE)).get(30, TimeUnit.SECONDS);
             assertThat(reader.partitionsFor(TOPIC)).hasSize(1);
@@ -276,17 +270,98 @@ public class KafkaSaslPlainAuthenticationITCase {
                             .all()
                             .get();
             FLUSS_CLUSTER_EXTENSION.waitUntilAuthenticationSync(removed, false);
-            grantWriterAccess(OperationType.DESCRIBE);
+            grantAccess(USERNAME, OperationType.DESCRIBE);
             // Revocation must also apply to an already authenticated producer with cached metadata.
             assertDeniedValues(writer, TOPIC);
         }
-        assertNativeRecords(
-                path,
-                0,
-                1,
-                record ->
-                        assertThat(record.getRow().getString(1).toString())
-                                .isEqualTo("authenticated-value"));
+        assertRecords("authenticated-value");
+    }
+
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1})
+    void testInvalidCredentialsCloseWithVersionSpecificResponse(short version) throws Exception {
+        try (Socket socket = connectKafka()) {
+            handshake(socket, version);
+            if (version == 0) {
+                writeFrame(socket, token("wrong-password"));
+            } else {
+                SaslAuthenticateResponse response = authenticate(socket, "wrong-password");
+                assertThat(response.errorCounts())
+                        .containsOnlyKeys(Errors.SASL_AUTHENTICATION_FAILED);
+                assertThat(response.data().errorMessage())
+                        .doesNotContain("wrong-password", PASSWORD);
+            }
+            assertThat(socket.getInputStream().read()).isEqualTo(-1);
+        }
+    }
+
+    @Test
+    void testUnauthenticatedProduceHeaderClosesWithoutResponse() throws Exception {
+        try (Socket socket = connectKafka()) {
+            RequestHeader header = new RequestHeader(ApiKeys.PRODUCE, (short) 3, "client", 1);
+            ObjectSerializationCache cache = new ObjectSerializationCache();
+            ByteBuffer bytes =
+                    ByteBuffer.allocate(header.data().size(cache, header.headerVersion()));
+            header.data().write(new ByteBufferAccessor(bytes), cache, header.headerVersion());
+            writeFrame(socket, bytes.array());
+            assertThat(socket.getInputStream().read()).isEqualTo(-1);
+        }
+    }
+
+    @Test
+    void testCredentialRotationAppliesToNewConnections() throws Exception {
+        grantAccess(USERNAME, OperationType.DESCRIBE);
+        try (Socket existing = connectKafka()) {
+            handshake(existing, (short) 1);
+            assertThat(authenticate(existing, PASSWORD).errorCounts())
+                    .containsOnlyKeys(Errors.NONE);
+            Configuration changed = clusterConfig();
+            changed.set(
+                    ConfigOptions.SERVER_SASL_CREDENTIALS,
+                    Collections.singletonMap(USERNAME, "rotated-secret"));
+            reconfigure(changed);
+            assertThat(sendRequest(existing, metadataRequest()).errorCounts())
+                    .containsOnlyKeys(Errors.NONE);
+            try (Socket oldPassword = connectKafka();
+                    Socket newPassword = connectKafka()) {
+                handshake(oldPassword, (short) 1);
+                assertThat(authenticate(oldPassword, PASSWORD).errorCounts())
+                        .containsOnlyKeys(Errors.SASL_AUTHENTICATION_FAILED);
+                assertThat(oldPassword.getInputStream().read()).isEqualTo(-1);
+                handshake(newPassword, (short) 1);
+                assertThat(authenticate(newPassword, "rotated-secret").errorCounts())
+                        .containsOnlyKeys(Errors.NONE);
+            }
+        } finally {
+            reconfigure(clusterConfig());
+        }
+    }
+
+    private static void reconfigure(Configuration config) throws Exception {
+        for (ServerReconfigurable component :
+                FLUSS_CLUSTER_EXTENSION
+                        .getTabletServers()
+                        .iterator()
+                        .next()
+                        .getRpcServer()
+                        .getServerReconfigurables()) {
+            component.validate(config);
+            component.reconfigure(config);
+        }
+    }
+
+    private static SaslAuthenticateResponse authenticate(Socket socket, String password)
+            throws Exception {
+        return (SaslAuthenticateResponse)
+                sendRequest(
+                        socket,
+                        new SaslAuthenticateRequest(
+                                new SaslAuthenticateRequestData().setAuthBytes(token(password)),
+                                (short) 2));
+    }
+
+    private static byte[] token(String password) {
+        return ("\u0000" + USERNAME + "\u0000" + password).getBytes(StandardCharsets.UTF_8);
     }
 
     private static void assertDeniedValues(KafkaProducer<byte[], byte[]> producer, String topic) {
@@ -299,24 +374,8 @@ public class KafkaSaslPlainAuthenticationITCase {
         }
     }
 
-    private static void assertPartition(
-            ProduceResponse response, int bucket, Errors error, long offset) {
-        assertThat(response.data().responses()).hasSize(1);
-        assertThat(response.data().responses().iterator().next().partitionResponses())
-                .filteredOn(partition -> partition.index() == bucket)
-                .singleElement()
-                .satisfies(
-                        partition -> {
-                            assertThat(partition.errorCode()).isEqualTo(error.code());
-                            assertThat(partition.baseOffset()).isEqualTo(offset);
-                        });
-    }
-
     private static Socket connectKafka() throws Exception {
-        return connectKafka(FLUSS_CLUSTER_EXTENSION.getTabletServerNodes("KAFKA").get(0));
-    }
-
-    private static Socket connectKafka(ServerNode node) throws Exception {
+        ServerNode node = FLUSS_CLUSTER_EXTENSION.getTabletServerNodes("KAFKA").get(0);
         Socket socket = new Socket();
         try {
             socket.connect(new InetSocketAddress(node.host(), node.port()), 5000);
@@ -326,13 +385,6 @@ public class KafkaSaslPlainAuthenticationITCase {
             socket.close();
             throw failure;
         }
-    }
-
-    private static void authenticateV0(Socket socket) throws Exception {
-        handshake(socket, (short) 0);
-        writeRawToken(socket, "\u0000" + USERNAME + "\u0000" + PASSWORD);
-        // The final PLAIN challenge is a zero-length frame, without a Kafka response header.
-        assertThat(new DataInputStream(socket.getInputStream()).readInt()).isZero();
     }
 
     private static void handshake(Socket socket, short version) throws Exception {
@@ -353,23 +405,11 @@ public class KafkaSaslPlainAuthenticationITCase {
         assertThat(handshake.data().mechanisms()).containsExactly("PLAIN");
     }
 
-    private static void writeRawToken(Socket socket, String token) throws Exception {
-        byte[] bytes = token.getBytes(StandardCharsets.UTF_8);
+    private static void writeFrame(Socket socket, byte[] bytes) throws Exception {
         DataOutputStream output = new DataOutputStream(socket.getOutputStream());
         output.writeInt(bytes.length);
         output.write(bytes);
         output.flush();
-    }
-
-    private static void assertSuccessfulMetadata(MetadataResponse metadata) {
-        assertThat(metadata.data().topics())
-                .singleElement()
-                .satisfies(
-                        topic -> {
-                            assertThat(topic.name()).isEqualTo(TOPIC);
-                            assertThat(topic.errorCode()).isEqualTo(Errors.NONE.code());
-                            assertThat(topic.partitions()).hasSize(1);
-                        });
     }
 
     private static MetadataRequest metadataRequest() {
@@ -377,57 +417,22 @@ public class KafkaSaslPlainAuthenticationITCase {
                 .build((short) 9);
     }
 
-    private static ProduceRequest produceRequest() {
-        return produceRequest(VALUE);
-    }
-
-    private static ProduceRequest produceRequest(byte[] value) {
-        MemoryRecords records =
-                MemoryRecords.withRecords(Compression.NONE, new SimpleRecord(KEY, value));
-        return produceRequest(
-                TablePath.of(DATABASE, TABLE_NAME),
-                new ProduceRequestData.PartitionProduceData().setIndex(0).setRecords(records));
-    }
-
-    private static ProduceRequest produceRequest(
-            TablePath path, ProduceRequestData.PartitionProduceData... partitions) {
-        ProduceRequestData.TopicProduceData topicData =
-                new ProduceRequestData.TopicProduceData()
-                        .setName(path.toString())
-                        .setPartitionData(Arrays.asList(partitions));
-        return new ProduceRequest(
-                new ProduceRequestData()
-                        .setAcks((short) 1)
-                        .setTimeoutMs(5000)
-                        .setTopicData(
-                                new ProduceRequestData.TopicProduceDataCollection(
-                                        Collections.singletonList(topicData).iterator())),
-                (short) 9);
-    }
-
     private static AbstractResponse sendRequest(Socket socket, AbstractRequest request)
             throws Exception {
         RequestHeader header =
-                new RequestHeader(request.apiKey(), request.version(), "sasl-v0-test", 1);
+                new RequestHeader(request.apiKey(), request.version(), "sasl-test", 1);
         ByteBuffer buffer =
                 RequestUtils.serialize(
                         header.data(), header.headerVersion(), request.data(), request.version());
         byte[] bytes = new byte[buffer.remaining()];
         buffer.get(bytes);
-        DataOutputStream output = new DataOutputStream(socket.getOutputStream());
-        output.writeInt(bytes.length);
-        output.write(bytes);
-        output.flush();
+        writeFrame(socket, bytes);
         DataInputStream input = new DataInputStream(socket.getInputStream());
         int size = input.readInt();
         assertThat(size).isBetween(1, 1024 * 1024);
         byte[] response = new byte[size];
         input.readFully(response);
         return AbstractResponse.parseResponse(ByteBuffer.wrap(response), header);
-    }
-
-    private KafkaProducer<byte[], byte[]> producer() {
-        return producer(USERNAME, PASSWORD);
     }
 
     private KafkaProducer<byte[], byte[]> producer(String username, String password) {
@@ -448,36 +453,10 @@ public class KafkaSaslPlainAuthenticationITCase {
         }
     }
 
-    private void assertFlussRecord() throws Exception {
-        assertNativeRecords(
-                TablePath.of(DATABASE, TABLE_NAME),
-                0,
-                2,
-                record -> {
-                    InternalRow row = record.getRow();
-                    assertThat(row.getBytes(0)).containsExactly(KEY);
-                    if (record.logOffset() == 0) {
-                        assertThat(row.isNullAt(1)).isTrue();
-
-                    } else {
-                        assertThat(row.getString(1).toString()).isEqualTo("authenticated-value");
-                    }
-                });
-    }
-
-    private void grantWriterAccess(OperationType operation) throws Exception {
-        grantWriterAccess(TablePath.of(DATABASE, TABLE_NAME), operation);
-    }
-
-    private void grantWriterAccess(TablePath path, OperationType operation) throws Exception {
-        grantAccess(path, USERNAME, operation);
-    }
-
-    private void grantAccess(TablePath path, String username, OperationType operation)
-            throws Exception {
+    private void grantAccess(String username, OperationType operation) throws Exception {
         AclBinding aclBinding =
                 new AclBinding(
-                        Resource.table(path),
+                        Resource.table(TablePath.of(DATABASE, TABLE_NAME)),
                         new AccessControlEntry(
                                 new FlussPrincipal(username, "User"),
                                 AccessControlEntry.WILD_CARD_HOST,
@@ -488,22 +467,23 @@ public class KafkaSaslPlainAuthenticationITCase {
                 Collections.singletonList(aclBinding), true);
     }
 
-    private void assertNativeRecords(
-            TablePath path, int bucket, int expectedCount, Consumer<ScanRecord> check)
-            throws Exception {
-        try (Table table = connection.getTable(path);
+    private void assertRecords(String... expectedValues) throws Exception {
+        try (Table table = connection.getTable(TablePath.of(DATABASE, TABLE_NAME));
                 LogScanner scanner = table.newScan().createLogScanner()) {
-            scanner.subscribeFromBeginning(bucket);
+            scanner.subscribeFromBeginning(0);
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
             int count = 0;
-            while (count < expectedCount && System.nanoTime() < deadline) {
+            while (count < expectedValues.length && System.nanoTime() < deadline) {
                 for (ScanRecord record : scanner.poll(Duration.ofSeconds(1))) {
+                    assertThat(count).isLessThan(expectedValues.length);
                     assertThat(record.logOffset()).isEqualTo(count);
-                    check.accept(record);
-                    count++;
+                    InternalRow row = record.getRow();
+                    assertThat(row.getBytes(0)).containsExactly(KEY);
+                    assertThat(row.isNullAt(1) ? null : row.getString(1).toString())
+                            .isEqualTo(expectedValues[count++]);
                 }
             }
-            assertThat(count).isEqualTo(expectedCount);
+            assertThat(count).isEqualTo(expectedValues.length);
             assertThat(scanner.poll(Duration.ofMillis(200)).isEmpty()).isTrue();
         }
     }

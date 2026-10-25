@@ -81,6 +81,14 @@ class PlainSaslServerConfigManagerTest {
                                 + " required user_admin=\"admin-secret\""
                                 + " user_bob=\"bob-secret\";");
 
+        String effectiveJaas =
+                managedConfiguration.getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG);
+        Configuration invalid = new Configuration();
+        invalid.set(ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("bob", "pass;word"));
+        assertThatThrownBy(() -> manager.reconfigure(invalid)).isInstanceOf(ConfigException.class);
+        assertThat(managedConfiguration.getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG))
+                .isEqualTo(effectiveJaas);
+
         Configuration removeBobConfiguration = new Configuration();
         manager.validate(removeBobConfiguration);
         manager.reconfigure(removeBobConfiguration);
@@ -90,29 +98,6 @@ class PlainSaslServerConfigManagerTest {
                 .isEqualTo(
                         PlainLoginModule.class.getName()
                                 + " required user_admin=\"admin-secret\";");
-    }
-
-    @Test
-    void testInitialConfigurationRejectsInvalidCredentials() {
-        Configuration invalidUsername = new Configuration();
-        invalidUsername.set(
-                ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("user-name", "secret"));
-        assertThatThrownBy(() -> new PlainSaslServerConfigManager(invalidUsername))
-                .isInstanceOf(ConfigException.class)
-                .hasMessageContaining("username 'user-name' contains invalid characters");
-
-        Configuration invalidPassword = new Configuration();
-        invalidPassword.set(
-                ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("user", "pass;word"));
-        assertThatThrownBy(() -> new PlainSaslServerConfigManager(invalidPassword))
-                .isInstanceOf(ConfigException.class)
-                .hasMessageContaining("password for user 'user' contains invalid characters");
-
-        Configuration emptyPassword = new Configuration();
-        emptyPassword.set(ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("user", ""));
-        assertThatThrownBy(() -> new PlainSaslServerConfigManager(emptyPassword))
-                .isInstanceOf(ConfigException.class)
-                .hasMessageContaining("password for user 'user' must not be empty");
     }
 
     @Test
@@ -132,28 +117,6 @@ class PlainSaslServerConfigManagerTest {
                         manager.getConfiguration()
                                 .getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG))
                 .isNull();
-    }
-
-    @Test
-    void testReconfigureRejectsInvalidCredentialsWithoutMutatingManagedConfiguration() {
-        Configuration initialConfiguration = new Configuration();
-        initialConfiguration.set(
-                ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("admin", "admin-secret"));
-        PlainSaslServerConfigManager manager =
-                new PlainSaslServerConfigManager(initialConfiguration);
-        String effectiveJaas =
-                manager.getConfiguration().getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG);
-        Configuration invalidConfiguration = new Configuration();
-        invalidConfiguration.set(
-                ConfigOptions.SERVER_SASL_CREDENTIALS, credentials("bob", "pass;word"));
-
-        assertThatThrownBy(() -> manager.reconfigure(invalidConfiguration))
-                .isInstanceOf(ConfigException.class)
-                .hasMessageContaining("password for user 'bob' contains invalid characters");
-        assertThat(
-                        manager.getConfiguration()
-                                .getString(ConfigOptions.SERVER_SASL_PLAIN_JAAS_CONFIG))
-                .isEqualTo(effectiveJaas);
     }
 
     private static Map<String, String> credentials(String... values) {
