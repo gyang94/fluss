@@ -31,12 +31,14 @@ import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.InternalArray;
 import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
+import org.apache.fluss.server.replica.Replica;
 import org.apache.fluss.server.testutils.FlussClusterExtension;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
@@ -60,6 +62,7 @@ import org.apache.kafka.common.requests.ProduceRequest;
 import org.apache.kafka.common.requests.ProduceResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -78,6 +81,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 
+import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Verifies DDL-discovered JSON writes and native Arrow readback. */
@@ -279,6 +283,101 @@ class KafkaJsonProduceITCase {
                                 assertThat(valueId(row, layout)).isEqualTo(index == 0 ? 7 : 8);
                             }
                         });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
+    void testSameProducerWritesRescuedFieldsIntoAddedColumns() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_added_value_columns");
+        byte[] value = bytes("{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":\"five\"}");
+        String rescued = "{\"d\":4,\"e\":\"five\"}";
+        TableDescriptor descriptor =
+                TableDescriptor.builder(descriptor("flat", true))
+                        .schema(
+                                Schema.newBuilder()
+                                        .column("a", DataTypes.INT())
+                                        .column("b", DataTypes.INT())
+                                        .column("c", DataTypes.INT())
+                                        .column(KafkaTableSchema.RESCUE_COLUMN, DataTypes.STRING())
+                                        .build())
+                        .distributedBy(1)
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                TableInfo before = admin.getTableInfo(path).get();
+                Replica replica =
+                        CLUSTER.waitAndGetLeaderReplica(new TableBucket(before.getTableId(), 0));
+                assertThat(
+                                producer.send(new ProducerRecord<>(path.toString(), 0, KEY, value))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isZero();
+                read(
+                        connection,
+                        path,
+                        0,
+                        1,
+                        (row, index) -> {
+                            assertThat(row.getFieldCount()).isEqualTo(4);
+                            assertThat(row.getString(3).toString()).isEqualTo(rescued);
+                        });
+
+                admin.alterTable(
+                                path,
+                                Arrays.asList(
+                                        TableChange.addColumn(
+                                                "d",
+                                                DataTypes.INT(),
+                                                null,
+                                                TableChange.ColumnPosition.last()),
+                                        TableChange.addColumn(
+                                                "e",
+                                                DataTypes.STRING(),
+                                                null,
+                                                TableChange.ColumnPosition.last())),
+                                false)
+                        .get();
+                int schemaId = admin.getTableInfo(path).get().getSchemaId();
+                assertThat(schemaId).isGreaterThan(before.getSchemaId());
+                // ALTER acknowledgement precedes propagation to the replica used by Produce.
+                retry(
+                        Duration.ofSeconds(30),
+                        () -> assertThat(replica.getTableInfo().getSchemaId()).isEqualTo(schemaId));
+                assertThat(
+                                producer.send(new ProducerRecord<>(path.toString(), 0, KEY, value))
+                                        .get(30, TimeUnit.SECONDS)
+                                        .offset())
+                        .isEqualTo(1L);
+
+                // Read both batches with the new schema, not the earlier cached table handle.
+                try (Connection reader =
+                        ConnectionFactory.createConnection(CLUSTER.getClientConfig())) {
+                    read(
+                            reader,
+                            path,
+                            0,
+                            2,
+                            (row, index) -> {
+                                assertThat(row.getFieldCount()).isEqualTo(6);
+                                assertThat(row.getInt(0)).isEqualTo(1);
+                                assertThat(row.getInt(1)).isEqualTo(2);
+                                assertThat(row.getInt(2)).isEqualTo(3);
+                                if (index == 0) {
+                                    assertThat(row.getString(3).toString()).isEqualTo(rescued);
+                                    assertThat(row.isNullAt(4)).isTrue();
+                                    assertThat(row.isNullAt(5)).isTrue();
+                                } else {
+                                    assertThat(row.isNullAt(3)).isTrue();
+                                    assertThat(row.getInt(4)).isEqualTo(4);
+                                    assertThat(row.getString(5).toString()).isEqualTo("five");
+                                }
+                            });
+                }
             } finally {
                 admin.dropTable(path, true).get();
             }
