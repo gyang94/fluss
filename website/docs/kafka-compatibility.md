@@ -74,8 +74,9 @@ Requests without a legal error response, including Produce with `acks=0` and Met
 explicit topics, close the connection after earlier responses. `kafka.service.drain-timeout`
 (default `30 s`, positive, startup-only) bounds that wait; disconnecting does not roll back writes.
 
-Deploy `fluss-kafka` and `fluss-server` from the same build. The Kafka JAR bundles `kafka-clients`
-and uses the compression libraries provided by the server JAR.
+The binary distribution includes `fluss-kafka` and `fluss-server` in `lib/`. Keep both JARs from
+the same build when upgrading. The Kafka JAR bundles `kafka-clients` and uses the compression
+libraries provided by the server JAR.
 
 ## Topic-to-table mapping
 
