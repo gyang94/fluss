@@ -290,6 +290,52 @@ class KafkaJsonProduceITCase {
     }
 
     @Test
+    void testNestedBusinessKeyIsDistinctFromKafkaRecordKey() throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_nested_business_key");
+        TableDescriptor descriptor =
+                TableDescriptor.builder(descriptor("nested", true))
+                        .schema(
+                                Schema.newBuilder()
+                                        .column(KafkaTableSchema.KEY_COLUMN, DataTypes.BYTES())
+                                        .column(
+                                                KafkaTableSchema.VALUE_COLUMN,
+                                                DataTypes.ROW(
+                                                        DataTypes.FIELD(
+                                                                KafkaTableSchema.KEY_COLUMN,
+                                                                DataTypes.STRING())))
+                                        .column(KafkaTableSchema.RESCUE_COLUMN, DataTypes.STRING())
+                                        .build())
+                        .distributedBy(1)
+                        .build();
+        try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
+                Admin admin = connection.getAdmin()) {
+            create(admin, path, descriptor);
+            try (KafkaProducer<byte[], byte[]> producer = producer()) {
+                producer.send(
+                                new ProducerRecord<>(
+                                        path.toString(),
+                                        0,
+                                        KEY,
+                                        bytes("{\"_kafka_key\":\"business\",\"extra\":1}")))
+                        .get(30, TimeUnit.SECONDS);
+                read(
+                        connection,
+                        path,
+                        0,
+                        1,
+                        (row, index) -> {
+                            assertThat(row.getBytes(0)).isEqualTo(KEY);
+                            assertThat(row.getRow(1, 1).getString(0).toString())
+                                    .isEqualTo("business");
+                            assertThat(row.getString(2).toString()).isEqualTo("{\"extra\":1}");
+                        });
+            } finally {
+                admin.dropTable(path, true).get();
+            }
+        }
+    }
+
+    @Test
     void testSameProducerWritesRescuedFieldsIntoAddedColumns() throws Exception {
         TablePath path = TablePath.of(DATABASE, "json_added_value_columns");
         byte[] value = bytes("{\"a\":1,\"b\":2,\"c\":3,\"d\":4,\"e\":\"five\"}");

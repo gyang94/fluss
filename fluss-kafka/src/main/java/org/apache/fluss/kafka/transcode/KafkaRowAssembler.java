@@ -18,10 +18,10 @@
 package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.Record;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.RecordHeader;
 import org.apache.fluss.kafka.backend.produce.KafkaProduceCommand.TimestampType;
+import org.apache.fluss.kafka.format.KafkaDecodedValue;
 import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
@@ -59,14 +59,13 @@ public final class KafkaRowAssembler {
      * header value arrays for immediate encoding; consumers must not modify them or retain the row
      * after conversion.
      */
-    public GenericRow assemble(Object[] valueValues, Record record, int partitionId) {
+    public GenericRow assemble(KafkaDecodedValue value, Record record, int partitionId) {
         GenericRow row = new GenericRow(topicSchema.rowType().getFieldCount());
-        boolean withRescue =
-                topicSchema.valueConversionType() == KafkaValueConversionType.PARSE_JSON
-                        && topicSchema.rescuePosition() >= 0;
-        setProjectedFields(row, topicSchema.valueProjection(), valueValues, withRescue);
-        if (withRescue) {
-            row.setField(topicSchema.rescuePosition(), valueValues[valueValues.length - 1]);
+        setProjectedFields(row, topicSchema.valueProjection(), value.valueFields());
+        if (topicSchema.rescuePosition() >= 0) {
+            row.setField(
+                    topicSchema.rescuePosition(),
+                    value.rescue() == null ? null : BinaryString.fromString(value.rescue()));
         }
         if (topicSchema.keyPosition() >= 0) {
             int position = topicSchema.keyPosition();
@@ -88,7 +87,6 @@ public final class KafkaRowAssembler {
                             timestampTypeId(record.timestampType()),
                             partitionId));
         }
-        // A declared _kafka_rescue stays null for binary/string; omitted columns do not exist.
         return row;
     }
 
@@ -117,13 +115,13 @@ public final class KafkaRowAssembler {
     }
 
     private static void setProjectedFields(
-            GenericRow row, KafkaFieldProjection projection, Object[] values, boolean withRescue) {
-        int expected = projection.size() + (withRescue ? 1 : 0);
+            GenericRow row, KafkaFieldProjection projection, Object[] values) {
+        int expected = projection.size();
         if (values.length != expected) {
             throw new IllegalArgumentException(
                     "Kafka decoder returned "
                             + values.length
-                            + " fields but the value/rescue contract requires "
+                            + " fields but the value projection requires "
                             + expected
                             + ".");
         }

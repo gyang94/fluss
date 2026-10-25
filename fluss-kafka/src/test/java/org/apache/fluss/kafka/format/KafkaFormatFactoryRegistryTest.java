@@ -19,8 +19,6 @@ package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.KafkaValueConversionType;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -35,10 +33,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Tests value decoders against the shared fixed-column table contract. */
 class KafkaFormatFactoryRegistryTest {
@@ -46,21 +42,17 @@ class KafkaFormatFactoryRegistryTest {
 
     @Test
     void testBinaryDecoderPreservesOpaqueBytesAndNull() {
-        KafkaFieldDecoder decoder =
-                formats.createDecoder(
-                        KafkaValueConversionType.BINARY, projection(DataTypes.BYTES()));
+        KafkaFieldDecoder decoder = formats.createDecoder(schema(false));
         byte[] opaque = new byte[] {(byte) 0xff, 0};
-        assertThat((byte[]) decoder.decode(ByteBuffer.wrap(opaque))[0])
+        assertThat((byte[]) decoder.decode(ByteBuffer.wrap(opaque)).valueFields()[0])
                 .containsExactly((byte) 0xff, (byte) 0);
-        assertThat(decoder.decode(null)).containsExactly((Object) null);
+        assertThat(decoder.decode(null).valueFields()).containsExactly((Object) null);
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"heap", "direct", "read-only"})
     void testStringDecoderPreservesBufferRangeAndBorrowing(String kind) {
-        KafkaFieldDecoder decoder =
-                formats.createDecoder(
-                        KafkaValueConversionType.STRING, projection(DataTypes.STRING()));
+        KafkaFieldDecoder decoder = formats.createDecoder(schema(true));
         byte[] expected = "消息-😀".getBytes(StandardCharsets.UTF_8);
         ByteBuffer storage =
                 kind.equals("direct")
@@ -73,7 +65,7 @@ class KafkaFormatFactoryRegistryTest {
         slice.position(1);
         slice.limit(1 + expected.length);
         ByteBuffer input = kind.equals("read-only") ? slice.asReadOnlyBuffer() : slice;
-        BinaryString decoded = (BinaryString) decoder.decode(input)[0];
+        BinaryString decoded = (BinaryString) decoder.decode(input).valueFields()[0];
         assertThat(decoded.toBytes()).isEqualTo(expected);
         assertThat(input.position()).isEqualTo(1);
         assertThat(input.remaining()).isEqualTo(expected.length);
@@ -88,6 +80,17 @@ class KafkaFormatFactoryRegistryTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testFactoriesUseThePublicValueProjection(boolean string) {
+        KafkaTableSchema schema = schema(string);
+        assertThat(schema.valueProjection().positions()).containsExactly(1);
+        KafkaFieldDecoder decoder = formats.createDecoder(schema);
+        byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
+        KafkaDecodedValue decoded = decoder.decode(ByteBuffer.wrap(payload));
+        assertThat(decoded.valueFields())
+                .containsExactly(string ? BinaryString.fromString("payload") : payload);
+        assertThat(decoded.rescue()).isNull();
+    }
+
+    private static KafkaTableSchema schema(boolean string) {
         DataType type = string ? DataTypes.STRING() : DataTypes.BYTES();
         TableDescriptor table =
                 TableDescriptor.builder()
@@ -110,32 +113,6 @@ class KafkaFormatFactoryRegistryTest {
                                         ? KafkaValueConversionType.STRING
                                         : KafkaValueConversionType.BINARY)
                         .build();
-        KafkaTableSchema schema = KafkaTableSchema.resolve(table);
-        assertThat(schema.valueProjection().positions()).containsExactly(1);
-        KafkaFieldDecoder decoder = formats.createDecoder(schema);
-        byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
-        assertThat(decoder.decode(ByteBuffer.wrap(payload)))
-                .containsExactly(string ? BinaryString.fromString("payload") : payload);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testFactoriesRejectMismatchedValueTypes(boolean string) {
-        assertThatThrownBy(
-                        () ->
-                                formats.createDecoder(
-                                        string
-                                                ? KafkaValueConversionType.STRING
-                                                : KafkaValueConversionType.BINARY,
-                                        projection(
-                                                string ? DataTypes.BYTES() : DataTypes.STRING())))
-                .isInstanceOf(KafkaTopicSchemaException.class)
-                .hasMessageContaining(string ? "STRING" : "BYTES");
-    }
-
-    private static KafkaFieldProjection projection(DataType type) {
-        return new KafkaFieldProjection(
-                DataTypes.ROW(DataTypes.FIELD(KafkaTableSchema.VALUE_COLUMN, type)),
-                Collections.singletonList(0));
+        return KafkaTableSchema.resolve(table);
     }
 }

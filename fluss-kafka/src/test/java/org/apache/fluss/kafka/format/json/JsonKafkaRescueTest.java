@@ -18,6 +18,7 @@
 package org.apache.fluss.kafka.format.json;
 
 import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.kafka.format.KafkaDecodedValue;
 import org.apache.fluss.kafka.format.KafkaFieldDecoder;
 import org.apache.fluss.kafka.format.KafkaFormatFactoryRegistry;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
@@ -43,6 +44,7 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -63,25 +65,26 @@ class JsonKafkaRescueTest {
                                     DataTypes.FIELD("label", DataTypes.STRING()))),
                     DataTypes.FIELD("items", DataTypes.ARRAY(ITEM_TYPE)),
                     DataTypes.FIELD("attributes", DataTypes.MAP(DataTypes.STRING(), ITEM_TYPE)),
-                    DataTypes.FIELD("ratio", DataTypes.DOUBLE()));
+                    DataTypes.FIELD("ratio", DataTypes.FLOAT()));
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testRescuesUnknownAndInvalidFieldsAcrossNestedContainers(boolean nested) throws Exception {
         KafkaFieldDecoder decoder = decoder(nested, true);
         String extra = "{\"text\":\"\\uD83D\\uDE00\",\"number\":12345678901234567890.123456789}";
-        Object[] values =
+        KafkaDecodedValue decoded =
                 decoder.decode(
                         bytes(
                                 "{\"id\":\"bad\",\"details\":{\"known\":\"bad\",\"label\":{\"k\":1},"
                                         + "\"extra\":[1,null]},\"items\":[null,{\"known\":\"2\"},"
                                         + "{\"known\":\"bad\",\"extra\":true},\"wrong shape\"],"
                                         + "\"attributes\":{\"k\":{\"known\":\"bad\",\"extra\":null},"
-                                        + "\"good\":{\"known\":4}},\"ratio\":1e400,"
+                                        + "\"good\":{\"known\":4}},\"ratio\":1e40,"
                                         + "\"_kafka_key\":42,\"_kafka_rescue\":{\"origin\":true},\"extra\":"
                                         + extra
                                         + "}"));
-        assertThat(values).hasSize(nested ? 2 : VALUE_TYPE.getFieldCount() + 1);
+        Object[] values = decoded.valueFields();
+        assertThat(values).hasSize(nested ? 1 : VALUE_TYPE.getFieldCount());
         GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
         assertThat(row.isNullAt(0)).isTrue();
         assertThat(row.getRow(1, 2).isNullAt(0)).isTrue();
@@ -97,24 +100,25 @@ class JsonKafkaRescueTest {
         assertThat(row.isNullAt(4)).isTrue();
         ObjectMapper mapper =
                 new ObjectMapper().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
-        assertThat(mapper.readValue(values[values.length - 1].toString(), Map.class))
+        assertThat(mapper.readValue(decoded.rescue(), Map.class))
                 .isEqualTo(
                         mapper.readValue(
                                 "{\"_kafka_key\":42,\"_kafka_rescue\":{\"origin\":true},\"extra\":"
                                         + extra
                                         + ",\"id\":\"bad\",\"details\":{\"known\":\"bad\",\"extra\":[1,null]},"
                                         + "\"items\":[null,null,{\"known\":\"bad\",\"extra\":true},\"wrong shape\"],"
-                                        + "\"attributes\":{\"k\":{\"known\":\"bad\",\"extra\":null}},\"ratio\":1e400}",
+                                        + "\"attributes\":{\"k\":{\"known\":\"bad\",\"extra\":null}},\"ratio\":1e40}",
                                 Map.class));
-        assertThat(decoder.decode(bytes("{\"id\":9}"))[values.length - 1]).isNull();
-        assertThat(decoder.decode(null)).containsOnlyNulls();
+        assertThat(decoder.decode(bytes("{\"id\":9}")).rescue()).isNull();
+        assertThat(decoder.decode(null).valueFields()).containsOnlyNulls();
+        assertThat(decoder.decode(null).rescue()).isNull();
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void testRescueRequiresTheFixedSystemColumn(boolean nested) {
         KafkaFieldDecoder decoder = decoder(nested, false);
-        assertThat(decoder.decode(bytes("{\"id\":7}")))
+        assertThat(decoder.decode(bytes("{\"id\":7}")).valueFields())
                 .hasSize(nested ? 1 : VALUE_TYPE.getFieldCount());
         assertThatThrownBy(() -> decoder.decode(bytes("{\"id\":7,\"extra\":1}")))
                 .isInstanceOf(KafkaRecordEncodingException.class)
@@ -142,11 +146,41 @@ class JsonKafkaRescueTest {
                         "{\"extra\":[",
                         "{\"extra\":1,\"extra\":2}",
                         "{\"extra\":\"\\uD800\"}",
-                        "[]")) {
+                        "[]",
+                        "{} {}",
+                        "{\"extra\":[{\"k\":1,\"k\":2}]}",
+                        "{\"extra\":" + String.join("", Collections.nCopies(1001, "1")) + "}",
+                        "{\"extra\":"
+                                + String.join(
+                                        "",
+                                        Collections.nCopies(
+                                                JsonKafkaFieldDecoder.MAX_JSON_NESTING_DEPTH, "["))
+                                + "0"
+                                + String.join(
+                                        "",
+                                        Collections.nCopies(
+                                                JsonKafkaFieldDecoder.MAX_JSON_NESTING_DEPTH, "]"))
+                                + "}")) {
             assertThatThrownBy(() -> decoder.decode(bytes(json)))
                     .as("invalid JSON: %s", json)
                     .isInstanceOf(KafkaRecordEncodingException.class);
         }
+        assertThatThrownBy(
+                        () ->
+                                decoder.decode(
+                                        ByteBuffer.wrap(
+                                                new byte[] {
+                                                    '{',
+                                                    '"',
+                                                    'x',
+                                                    '"',
+                                                    ':',
+                                                    '"',
+                                                    (byte) 0xff,
+                                                    '"',
+                                                    '}'
+                                                })))
+                .isInstanceOf(KafkaRecordEncodingException.class);
     }
 
     @Test

@@ -19,10 +19,7 @@ package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.config.KafkaValueConversionType;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
-import org.apache.fluss.types.BytesType;
 
 import javax.annotation.Nullable;
 
@@ -38,14 +35,8 @@ public final class BinaryKafkaFormatFactory implements KafkaFormatFactory {
     }
 
     @Override
-    public KafkaFieldDecoder createDecoder(KafkaFieldProjection projection) {
-        if (projection.size() != 1
-                || !KafkaTableSchema.VALUE_COLUMN.equals(projection.nameAt(0))
-                || !(projection.dataTypeAt(0) instanceof BytesType)) {
-            throw new KafkaTopicSchemaException(
-                    "Kafka binary format requires exactly one _kafka_value BYTES field.");
-        }
-        return bytes -> new Object[] {copyBytes(bytes)};
+    public KafkaFieldDecoder createDecoder(KafkaTableSchema schema) {
+        return bytes -> new KafkaDecodedValue(new Object[] {copyBytes(bytes)}, null);
     }
 
     private static @Nullable byte[] copyBytes(@Nullable ByteBuffer bytes) {

@@ -18,9 +18,7 @@
 package org.apache.fluss.kafka.schema;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.exception.InvalidTableException;
-import org.apache.fluss.kafka.format.json.JsonKafkaFieldDecoder;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.TableDescriptor;
 
@@ -40,12 +38,7 @@ public final class KafkaTopicSchemaResolver {
     /** Resolves one enabled table's contract; invalid enabled tables remain visible as errors. */
     public KafkaTableSchema resolve(TableDescriptor table) {
         try {
-            KafkaTableSchema schema = KafkaTableSchema.resolve(table);
-            if (schema.valueConversionType() == KafkaValueConversionType.PARSE_JSON) {
-                // Explicit schema resolution also validates the installed decoder support.
-                new JsonKafkaFieldDecoder(schema);
-            }
-            return schema;
+            return KafkaTableSchema.resolve(table);
         } catch (InvalidTableException | IllegalArgumentException e) {
             throw new KafkaTopicSchemaException(e.getMessage());
         }

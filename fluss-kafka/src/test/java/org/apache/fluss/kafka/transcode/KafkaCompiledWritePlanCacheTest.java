@@ -19,6 +19,8 @@ package org.apache.fluss.kafka.transcode;
 
 import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.config.KafkaValueConversionType;
+import org.apache.fluss.kafka.format.KafkaDecodedValue;
+import org.apache.fluss.kafka.format.KafkaFormatFactoryRegistry;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.metadata.LogFormat;
 import org.apache.fluss.metadata.Schema;
@@ -29,6 +31,8 @@ import org.apache.fluss.types.DataTypes;
 
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -76,6 +80,8 @@ class KafkaCompiledWritePlanCacheTest {
                 cache.getOrCompile(recreated, () -> compile(recreated, compileCount));
 
         assertThat(propertyPlan).isSameAs(first);
+        assertThat(propertyPlan.valueDecoder()).isSameAs(first.valueDecoder());
+        assertThat(schemaPlan.valueDecoder()).isNotSameAs(first.valueDecoder());
         assertThat(schemaPlan).isNotSameAs(propertyPlan);
         assertThat(recreatedPlan).isNotSameAs(schemaPlan);
         assertThat(cache.getIfPresent(propertyChange)).isSameAs(propertyPlan);
@@ -129,7 +135,7 @@ class KafkaCompiledWritePlanCacheTest {
     }
 
     @Test
-    void testConcurrentColdCompileIsSingleFlight() throws Exception {
+    void testConcurrentColdCompileReusesDecoderWithoutSharingRecordState() throws Exception {
         KafkaCompiledWritePlanCache cache = new KafkaCompiledWritePlanCache(10);
         TableInfo tableInfo = tableInfo("orders", 1L, 1, "v1");
         AtomicInteger compileCount = new AtomicInteger();
@@ -139,17 +145,32 @@ class KafkaCompiledWritePlanCacheTest {
         try {
             List<Future<KafkaTopicWritePlan>> futures = new ArrayList<>();
             for (int i = 0; i < 8; i++) {
+                int id = i;
                 futures.add(
                         executor.submit(
-                                () ->
-                                        cache.getOrCompile(
-                                                tableInfo,
-                                                () -> {
-                                                    compileCount.incrementAndGet();
-                                                    compilerStarted.countDown();
-                                                    await(releaseCompiler);
-                                                    return compile(tableInfo);
-                                                })));
+                                () -> {
+                                    KafkaTopicWritePlan plan =
+                                            cache.getOrCompile(
+                                                    tableInfo,
+                                                    () -> {
+                                                        compileCount.incrementAndGet();
+                                                        compilerStarted.countDown();
+                                                        await(releaseCompiler);
+                                                        return compile(tableInfo);
+                                                    });
+                                    String json = "{\"id\":" + id + ",\"extra\":" + id + "}";
+                                    KafkaDecodedValue decoded =
+                                            plan.valueDecoder()
+                                                    .decode(
+                                                            ByteBuffer.wrap(
+                                                                    json.getBytes(
+                                                                            StandardCharsets
+                                                                                    .UTF_8)));
+                                    assertThat(decoded.valueFields()).containsExactly(id);
+                                    assertThat(decoded.rescue())
+                                            .isEqualTo("{\"extra\":" + id + "}");
+                                    return plan;
+                                }));
             }
             assertThat(compilerStarted.await(10, TimeUnit.SECONDS)).isTrue();
             releaseCompiler.countDown();
@@ -203,7 +224,7 @@ class KafkaCompiledWritePlanCacheTest {
 
     private static KafkaTopicWritePlan compile(TableInfo tableInfo) {
         KafkaTableSchema schema = KafkaTableSchema.resolve(tableInfo.toTableDescriptor());
-        return new KafkaTopicWritePlan(schema);
+        return new KafkaTopicWritePlan(schema, new KafkaFormatFactoryRegistry());
     }
 
     private static TableInfo tableInfo(
@@ -212,7 +233,8 @@ class KafkaCompiledWritePlanCacheTest {
                 TableDescriptor.builder()
                         .schema(
                                 Schema.newBuilder()
-                                        .column("_kafka_value", DataTypes.BYTES())
+                                        .column("id", DataTypes.INT())
+                                        .column("_kafka_rescue", DataTypes.STRING())
                                         .column("_kafka_key", DataTypes.BYTES())
                                         .build())
                         .distributedBy(1)
@@ -220,7 +242,7 @@ class KafkaCompiledWritePlanCacheTest {
                         .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
                         .property(
                                 ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE,
-                                KafkaValueConversionType.BINARY)
+                                KafkaValueConversionType.PARSE_JSON)
                         .property(
                                 ConfigOptions.TABLE_KAFKA_CONVERT_KEY_TYPE.key(),
                                 propertyValue.equals("v1") ? "binary" : "BINARY")

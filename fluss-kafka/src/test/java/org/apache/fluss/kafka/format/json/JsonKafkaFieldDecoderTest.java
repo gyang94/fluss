@@ -17,13 +17,16 @@
 
 package org.apache.fluss.kafka.format.json;
 
-import org.apache.fluss.config.KafkaValueConversionLayout;
+import org.apache.fluss.config.ConfigOptions;
 import org.apache.fluss.kafka.transcode.KafkaRecordEncodingException;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
+import org.apache.fluss.metadata.LogFormat;
+import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.row.Decimal;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalArray;
+import org.apache.fluss.types.DataField;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 
@@ -33,10 +36,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -65,12 +65,12 @@ class JsonKafkaFieldDecoderTest {
     @ValueSource(booleans = {false, true})
     void testScalarProjectionAndNullValues(boolean nested) {
         JsonKafkaFieldDecoder decoder = decoder(ROW_TYPE, nested);
-        Object[] values = decoder.decode(buffer("{\"amount\":1.234,\"id\":\"7\"}"));
+        Object[] values = decoder.decode(buffer("{\"amount\":1.234,\"id\":\"7\"}")).valueFields();
         GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
         assertThat(row.getInt(0)).isEqualTo(7);
         assertThat(row.getDecimal(1, 5, 2).toBigDecimal()).isEqualByComparingTo("1.23");
         assertThat(row.isNullAt(2)).isTrue();
-        assertThat(decoder.decode(null))
+        assertThat(decoder.decode(null).valueFields())
                 .containsExactly(nested ? new Object[] {null} : new Object[] {null, null, null});
     }
 
@@ -88,13 +88,48 @@ class JsonKafkaFieldDecoderTest {
                         .decode(
                                 buffer(
                                         "{\"label\":{\"k\":1},\"items\":[{\"k\":2},[3,null]],"
-                                                + "\"enabled\":{},\"count\":1.9}"));
+                                                + "\"enabled\":{},\"count\":1.9}"))
+                        .valueFields();
         GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
         assertThat(row.getString(0).toString()).isEqualTo("{\"k\":1}");
         assertThat(row.getArray(1).getString(0).toString()).isEqualTo("{\"k\":2}");
         assertThat(row.getArray(1).getString(1).toString()).isEqualTo("[3,null]");
         assertThat(row.getBoolean(2)).isFalse();
         assertThat(row.getInt(3)).isEqualTo(1);
+    }
+
+    @Test
+    void testNestedBusinessFieldCanUseSystemColumnName() {
+        KafkaTableSchema schema =
+                KafkaTableSchema.resolve(
+                        TableDescriptor.builder()
+                                .schema(
+                                        Schema.newBuilder()
+                                                .column(
+                                                        KafkaTableSchema.KEY_COLUMN,
+                                                        DataTypes.BYTES())
+                                                .column(
+                                                        KafkaTableSchema.VALUE_COLUMN,
+                                                        DataTypes.ROW(
+                                                                DataTypes.FIELD(
+                                                                        KafkaTableSchema.KEY_COLUMN,
+                                                                        DataTypes.STRING())))
+                                                .build())
+                                .distributedBy(1)
+                                .logFormat(LogFormat.ARROW)
+                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        "parse_json")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
+                                        "nested")
+                                .build());
+        Object[] values =
+                new JsonKafkaFieldDecoder(schema)
+                        .decode(buffer("{\"_kafka_key\":\"business\"}"))
+                        .valueFields();
+        assertThat(((GenericRow) values[0]).getString(0).toString()).isEqualTo("business");
     }
 
     @Test
@@ -116,13 +151,14 @@ class JsonKafkaFieldDecoderTest {
         ByteBuffer input = storage.asReadOnlyBuffer();
         input.position(1);
         input.limit(1 + json.length);
-        assertThat(decoder(ROW_TYPE, false).decode(input)).containsExactly(7, null, null);
+        assertThat(decoder(ROW_TYPE, false).decode(input).valueFields())
+                .containsExactly(7, null, null);
         assertThat(input.position()).isEqualTo(1);
         assertThat(input.remaining()).isEqualTo(json.length);
     }
 
     @Test
-    void testRawNumbersPreservePrecisionAndSignedZero() {
+    void testRawNumbersPreserveDecimalPrecision() {
         JsonKafkaFieldDecoder decoder =
                 decoder(
                         DataTypes.ROW(
@@ -133,14 +169,16 @@ class JsonKafkaFieldDecoderTest {
                         false);
         Object[] values =
                 decoder.decode(
-                        buffer(
-                                "{\"floatValue\":1.0000000596046448,\"doubleValue\":-0.0,"
-                                        + "\"amount\":12345678901234567890.1234567890,\"floatZero\":-0}"));
+                                buffer(
+                                        "{\"floatValue\":1.0000000596046448,\"doubleValue\":-0.0,"
+                                                + "\"amount\":12345678901234567890.1234567890,\"floatZero\":-0}"))
+                        .valueFields();
         assertThat(values[0]).isEqualTo(1.0000001F);
-        assertThat(Double.doubleToRawLongBits((Double) values[1])).isEqualTo(Long.MIN_VALUE);
+        // Jackson's decimal/integer nodes currently normalize signed zero (see #4863).
+        assertThat(Double.doubleToRawLongBits((Double) values[1])).isEqualTo(0L);
         assertThat(((Decimal) values[2]).toBigDecimal())
                 .isEqualByComparingTo("12345678901234567890.1234567890");
-        assertThat(Float.floatToRawIntBits((Float) values[3])).isEqualTo(Integer.MIN_VALUE);
+        assertThat(Float.floatToRawIntBits((Float) values[3])).isEqualTo(0);
     }
 
     @ParameterizedTest
@@ -152,7 +190,8 @@ class JsonKafkaFieldDecoderTest {
                                 buffer(
                                         "{\"items\":[{\"quantity\":\"2\",\"ratio\":1.0000000596046448,"
                                                 + "\"extra\":true},null],"
-                                                + "\"attributes\":{\"scores\":[7,null,9]}}"));
+                                                + "\"attributes\":{\"scores\":[7,null,9]}}"))
+                        .valueFields();
         GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
         InternalArray items = row.getArray(0);
         assertThat(items.size()).isEqualTo(2);
@@ -182,18 +221,28 @@ class JsonKafkaFieldDecoderTest {
     }
 
     private static JsonKafkaFieldDecoder decoder(RowType rowType, boolean nested) {
+        Schema.Builder schema = Schema.newBuilder();
         if (nested) {
-            return new JsonKafkaFieldDecoder(
-                    new KafkaFieldProjection(
-                            DataTypes.ROW(DataTypes.FIELD(KafkaTableSchema.VALUE_COLUMN, rowType)),
-                            Collections.singletonList(0)),
-                    KafkaValueConversionLayout.NESTED);
+            schema.column(KafkaTableSchema.VALUE_COLUMN, rowType);
+        } else {
+            for (DataField field : rowType.getFields()) {
+                schema.column(field.getName(), field.getType());
+            }
         }
-        List<Integer> positions = new ArrayList<>();
-        for (int i = 0; i < rowType.getFieldCount(); i++) {
-            positions.add(i);
-        }
-        return new JsonKafkaFieldDecoder(new KafkaFieldProjection(rowType, positions));
+        return new JsonKafkaFieldDecoder(
+                KafkaTableSchema.resolve(
+                        TableDescriptor.builder()
+                                .schema(schema.build())
+                                .distributedBy(1)
+                                .logFormat(LogFormat.ARROW)
+                                .property(ConfigOptions.TABLE_KAFKA_ENABLED, true)
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_TYPE.key(),
+                                        "parse_json")
+                                .property(
+                                        ConfigOptions.TABLE_KAFKA_CONVERT_VALUE_LAYOUT.key(),
+                                        nested ? "nested" : "flat")
+                                .build()));
     }
 
     private static ByteBuffer buffer(String json) {

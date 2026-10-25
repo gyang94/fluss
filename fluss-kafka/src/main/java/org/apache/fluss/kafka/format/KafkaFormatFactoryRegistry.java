@@ -18,14 +18,10 @@
 package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.format.json.JsonKafkaFormatFactory;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
-
-import javax.annotation.Nullable;
 
 import java.util.EnumMap;
 import java.util.Map;
@@ -42,20 +38,6 @@ public final class KafkaFormatFactoryRegistry {
         register(new BinaryKafkaFormatFactory());
         register(new StringKafkaFormatFactory());
         register(new JsonKafkaFormatFactory());
-    }
-
-    /** Creates a decoder for the requested format and projection. */
-    public KafkaFieldDecoder createDecoder(
-            KafkaValueConversionType format, KafkaFieldProjection projection) {
-        return createDecoder(format, projection, null);
-    }
-
-    /** Creates and validates a decoder using the table's physical projection and value layout. */
-    public KafkaFieldDecoder createDecoder(
-            KafkaValueConversionType format,
-            KafkaFieldProjection projection,
-            @Nullable KafkaValueConversionLayout layout) {
-        return factory(format).createDecoder(projection, layout);
     }
 
     /** Creates a decoder with fixed rescue-column support from the validated table schema. */

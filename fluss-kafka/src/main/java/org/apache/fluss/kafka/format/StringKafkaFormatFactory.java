@@ -19,12 +19,9 @@ package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
 import org.apache.fluss.config.KafkaValueConversionType;
-import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.memory.MemorySegment;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
 import org.apache.fluss.row.BinaryString;
-import org.apache.fluss.types.StringType;
 
 import javax.annotation.Nullable;
 
@@ -40,14 +37,8 @@ public final class StringKafkaFormatFactory implements KafkaFormatFactory {
     }
 
     @Override
-    public KafkaFieldDecoder createDecoder(KafkaFieldProjection projection) {
-        if (projection.size() != 1
-                || !KafkaTableSchema.VALUE_COLUMN.equals(projection.nameAt(0))
-                || !(projection.dataTypeAt(0) instanceof StringType)) {
-            throw new KafkaTopicSchemaException(
-                    "Kafka string format requires exactly one _kafka_value STRING field.");
-        }
-        return bytes -> new Object[] {decode(bytes)};
+    public KafkaFieldDecoder createDecoder(KafkaTableSchema schema) {
+        return bytes -> new KafkaDecodedValue(new Object[] {decode(bytes)}, null);
     }
 
     private static @Nullable BinaryString decode(@Nullable ByteBuffer bytes) {

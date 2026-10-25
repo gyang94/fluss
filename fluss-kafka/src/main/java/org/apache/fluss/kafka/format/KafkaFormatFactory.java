@@ -18,12 +18,8 @@
 package org.apache.fluss.kafka.format;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.config.KafkaValueConversionLayout;
 import org.apache.fluss.config.KafkaValueConversionType;
-import org.apache.fluss.metadata.KafkaFieldProjection;
 import org.apache.fluss.metadata.KafkaTableSchema;
-
-import javax.annotation.Nullable;
 
 /** Creates a decoder for one Kafka value format and Fluss field projection. */
 @Internal
@@ -32,17 +28,6 @@ public interface KafkaFormatFactory {
     /** Returns the format implemented by this factory. */
     KafkaValueConversionType format();
 
-    /** Creates and validates a decoder for the projection. */
-    KafkaFieldDecoder createDecoder(KafkaFieldProjection projection);
-
     /** Creates a decoder from the validated fixed-column contract. */
-    default KafkaFieldDecoder createDecoder(KafkaTableSchema schema) {
-        return createDecoder(schema.valueProjection(), schema.valueConversionLayout());
-    }
-
-    /** Creates a decoder with the JSON layout, or no layout for binary/string values. */
-    default KafkaFieldDecoder createDecoder(
-            KafkaFieldProjection projection, @Nullable KafkaValueConversionLayout layout) {
-        return createDecoder(projection);
-    }
+    KafkaFieldDecoder createDecoder(KafkaTableSchema schema);
 }
