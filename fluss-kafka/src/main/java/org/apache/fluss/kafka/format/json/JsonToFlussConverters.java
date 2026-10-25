@@ -29,6 +29,9 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.TimestampLtz;
 import org.apache.fluss.row.TimestampNtz;
 import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ArrayNode;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import org.apache.fluss.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.fluss.types.ArrayType;
 import org.apache.fluss.types.BinaryType;
 import org.apache.fluss.types.DataField;
@@ -54,10 +57,13 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Consumer;
 
 import static org.apache.fluss.utils.DateTimeUtils.timestampToMicros;
 import static org.apache.fluss.utils.DateTimeUtils.timestampToNanos;
@@ -90,19 +96,28 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter createValidated(DataType dataType) {
         final JsonToFlussConverter notNullConverter = createNotNull(dataType);
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             if (node == null || node.isNull() || node.isMissingNode()) {
                 if (!dataType.isNullable()) {
-                    throw invalid(path, dataType, "field is missing or null");
+                    throw invalid(path, dataType, "field is missing or null").recordException();
                 }
                 return null;
             }
             try {
-                return notNullConverter.convert(node, path);
+                return notNullConverter.convert(node, path, rescue);
             } catch (KafkaRecordEncodingException e) {
                 throw e;
+            } catch (ConversionException | NumberFormatException e) {
+                if (rescue != null && dataType.isNullable()) {
+                    rescue.accept(node);
+                    return null;
+                }
+                throw e instanceof ConversionException
+                        ? ((ConversionException) e).recordException()
+                        : invalid(path, dataType, "value cannot be converted", e).recordException();
             } catch (RuntimeException e) {
-                throw invalid(path, dataType, "value cannot be converted", e);
+                // Internal errors must not silently turn valid data into null.
+                throw invalid(path, dataType, "value cannot be converted", e).recordException();
             }
         };
     }
@@ -156,31 +171,31 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter booleanConverter() {
         // parseBoolean treats every non-true string as false.
-        return (node, path) ->
+        return (node, path, rescue) ->
                 node.isBoolean() ? node.booleanValue() : Boolean.parseBoolean(node.asText().trim());
     }
 
     private static JsonToFlussConverter tinyIntConverter() {
-        return (node, path) -> Byte.parseByte(node.asText().trim());
+        return (node, path, rescue) -> Byte.parseByte(node.asText().trim());
     }
 
     private static JsonToFlussConverter smallIntConverter() {
-        return (node, path) -> Short.parseShort(node.asText().trim());
+        return (node, path, rescue) -> Short.parseShort(node.asText().trim());
     }
 
     private static JsonToFlussConverter intConverter() {
         // Flink truncates fractional numeric nodes, but parses text as an exact integer.
-        return (node, path) ->
+        return (node, path, rescue) ->
                 node.canConvertToInt() ? node.asInt() : Integer.parseInt(node.asText().trim());
     }
 
     private static JsonToFlussConverter bigIntConverter() {
-        return (node, path) ->
+        return (node, path, rescue) ->
                 node.canConvertToLong() ? node.asLong() : Long.parseLong(node.asText().trim());
     }
 
     private static JsonToFlussConverter floatConverter(DataType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             // Parse decimal text directly to float to avoid an intermediate double rounding.
             float value =
                     node.isDouble()
@@ -192,7 +207,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter doubleConverter(DataType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             double value =
                     node.isDouble() ? node.asDouble() : Double.parseDouble(node.asText().trim());
             require(Double.isFinite(value), path, dataType, "non-finite or overflowing number");
@@ -201,7 +216,7 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter decimalConverter(DecimalType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             BigDecimal value =
                     node.isBigDecimal() ? node.decimalValue() : new BigDecimal(node.asText());
             if (value.signum() == 0) {
@@ -231,12 +246,12 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter stringConverter() {
-        return (node, path) ->
+        return (node, path, rescue) ->
                 BinaryString.fromString(node.isContainerNode() ? node.toString() : node.asText());
     }
 
     private static JsonToFlussConverter binaryConverter(BinaryType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             byte[] value = decodeBase64(node, path, dataType);
             // Arrow uses FixedSizeBinaryVector: zero-pad short values and truncate long ones.
             return value.length == dataType.getLength()
@@ -246,11 +261,11 @@ final class JsonToFlussConverters {
     }
 
     private static JsonToFlussConverter bytesConverter(DataType dataType) {
-        return (node, path) -> decodeBase64(node, path, dataType);
+        return (node, path, rescue) -> decodeBase64(node, path, dataType);
     }
 
     private static JsonToFlussConverter dateConverter(DataType dataType) {
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType);
             try {
                 return Math.toIntExact(LocalDate.parse(value).toEpochDay());
@@ -262,7 +277,7 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter timeConverter(TimeType dataType) {
         final int nanosPerUnit = nanosPerUnit(Math.min(dataType.getPrecision(), 3));
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType);
             final LocalTime time;
             try {
@@ -277,7 +292,7 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter timestampConverter(TimestampType dataType) {
         final int nanosPerUnit = nanosPerUnit(dataType.getPrecision());
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType).replace(' ', 'T');
             final LocalDateTime timestamp;
             try {
@@ -300,7 +315,7 @@ final class JsonToFlussConverters {
     private static JsonToFlussConverter timestampLtzConverter(LocalZonedTimestampType dataType) {
         final int nanosPerUnit = nanosPerUnit(dataType.getPrecision());
         final ZoneId localZone = ZoneId.systemDefault();
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             String value = textualValue(node, path, dataType).replace(' ', 'T');
             Instant timestamp;
             try {
@@ -323,11 +338,19 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter arrayConverter(ArrayType dataType) {
         JsonToFlussConverter elementConverter = createValidated(dataType.getElementType());
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             require(node.isArray(), path, dataType, "expected a JSON array");
+            RescueCollector collector = rescue == null ? null : new RescueCollector(rescue);
             Object[] elements = new Object[node.size()];
             for (int i = 0; i < elements.length; i++) {
-                elements[i] = elementConverter.convert(node.get(i), JsonPath.index(path, i));
+                elements[i] =
+                        elementConverter.convert(
+                                node.get(i),
+                                JsonPath.index(path, i),
+                                collector == null ? null : collector.element(i, elements.length));
+            }
+            if (collector != null) {
+                collector.finish();
             }
             return new GenericArray(elements);
         };
@@ -335,8 +358,9 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter mapConverter(MapType dataType) {
         JsonToFlussConverter valueConverter = createValidated(dataType.getValueType());
-        return (node, path) -> {
+        return (node, path, rescue) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
+            RescueCollector collector = rescue == null ? null : new RescueCollector(rescue);
             Map<BinaryString, Object> values = new LinkedHashMap<>();
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
@@ -344,7 +368,12 @@ final class JsonToFlussConverters {
                 values.put(
                         BinaryString.fromString(field.getKey()),
                         valueConverter.convert(
-                                field.getValue(), JsonPath.field(path, field.getKey())));
+                                field.getValue(),
+                                JsonPath.field(path, field.getKey()),
+                                collector == null ? null : collector.field(field.getKey())));
+            }
+            if (collector != null) {
+                collector.finish();
             }
             return new GenericMap(values);
         };
@@ -359,17 +388,74 @@ final class JsonToFlussConverters {
             fieldNames[i] = field.getName();
             fieldConverters[i] = createValidated(field.getType());
         }
-        return (node, path) -> {
+        Set<String> knownFields = new HashSet<>(Arrays.asList(fieldNames));
+        return (node, path, rescue) -> {
             require(node.isObject(), path, dataType, "expected a JSON object");
+            RescueCollector collector = rescue == null ? null : new RescueCollector(rescue);
+            if (collector != null) {
+                Iterator<Map.Entry<String, JsonNode>> members = node.fields();
+                while (members.hasNext()) {
+                    Map.Entry<String, JsonNode> member = members.next();
+                    if (!knownFields.contains(member.getKey())) {
+                        collector.addField(member.getKey(), member.getValue());
+                    }
+                }
+            }
             GenericRow row = new GenericRow(fieldNames.length);
             for (int i = 0; i < fieldNames.length; i++) {
                 row.setField(
                         i,
                         fieldConverters[i].convert(
-                                node.get(fieldNames[i]), JsonPath.field(path, fieldNames[i])));
+                                node.get(fieldNames[i]),
+                                JsonPath.field(path, fieldNames[i]),
+                                collector == null ? null : collector.field(fieldNames[i])));
+            }
+            if (collector != null) {
+                collector.finish();
             }
             return row;
         };
+    }
+
+    /** Collects a container's unknown members and failed values without changing the input tree. */
+    private static final class RescueCollector {
+        private final Consumer<JsonNode> sink;
+        @Nullable private JsonNode rescued;
+
+        private RescueCollector(Consumer<JsonNode> sink) {
+            this.sink = sink;
+        }
+
+        private Consumer<JsonNode> field(String name) {
+            return value -> addField(name, value);
+        }
+
+        private void addField(String name, JsonNode value) {
+            if (rescued == null) {
+                rescued = JsonNodeFactory.instance.objectNode();
+            }
+            ((ObjectNode) rescued).set(name, value);
+        }
+
+        private Consumer<JsonNode> element(int index, int size) {
+            return value -> {
+                if (rescued == null) {
+                    ArrayNode array = JsonNodeFactory.instance.arrayNode(size);
+                    // Keep original indices so rescued values can be matched to array elements.
+                    for (int i = 0; i < size; i++) {
+                        array.addNull();
+                    }
+                    rescued = array;
+                }
+                ((ArrayNode) rescued).set(index, value);
+            };
+        }
+
+        private void finish() {
+            if (rescued != null) {
+                sink.accept(rescued);
+            }
+        }
     }
 
     private static long timestampMillis(
@@ -422,21 +508,13 @@ final class JsonToFlussConverters {
         }
     }
 
-    private static KafkaRecordEncodingException invalid(
-            String path, DataType dataType, String reason) {
-        return new KafkaRecordEncodingException(
-                "Invalid Kafka record value at "
-                        + path
-                        + " for "
-                        + dataType.asSummaryString()
-                        + ": "
-                        + reason
-                        + ".");
+    private static ConversionException invalid(String path, DataType dataType, String reason) {
+        return invalid(path, dataType, reason, null);
     }
 
-    private static KafkaRecordEncodingException invalid(
+    private static ConversionException invalid(
             String path, DataType dataType, String reason, @Nullable Throwable cause) {
-        return new KafkaRecordEncodingException(
+        return new ConversionException(
                 "Invalid Kafka record value at "
                         + path
                         + " for "
@@ -445,5 +523,18 @@ final class JsonToFlussConverters {
                         + reason
                         + ".",
                 cause);
+    }
+
+    /** Distinguishes expected data conversion failures from internal errors. */
+    private static final class ConversionException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+
+        private ConversionException(String message, @Nullable Throwable cause) {
+            super(message, cause);
+        }
+
+        private KafkaRecordEncodingException recordException() {
+            return new KafkaRecordEncodingException(getMessage(), getCause());
+        }
     }
 }

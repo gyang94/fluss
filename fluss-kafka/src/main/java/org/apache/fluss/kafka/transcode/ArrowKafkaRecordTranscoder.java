@@ -90,11 +90,7 @@ public final class ArrowKafkaRecordTranscoder implements KafkaRecordTranscoder {
                                 new KafkaTopicWritePlan(
                                         KafkaTableSchema.resolve(tableInfo.toTableDescriptor())));
         KafkaTableSchema schema = plan.topicSchema();
-        KafkaFieldDecoder valueDecoder =
-                formats.createDecoder(
-                        schema.valueConversionType(),
-                        schema.valueProjection(),
-                        schema.valueConversionLayout());
+        KafkaFieldDecoder valueDecoder = formats.createDecoder(schema);
         KafkaRowAssembler assembler = plan.rowAssembler();
         ArrowWriter writer = null;
         long epoch = 0;

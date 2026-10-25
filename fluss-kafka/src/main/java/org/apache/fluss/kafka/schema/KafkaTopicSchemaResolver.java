@@ -43,7 +43,7 @@ public final class KafkaTopicSchemaResolver {
             KafkaTableSchema schema = KafkaTableSchema.resolve(table);
             if (schema.valueConversionType() == KafkaValueConversionType.PARSE_JSON) {
                 // Explicit schema resolution also validates the installed decoder support.
-                new JsonKafkaFieldDecoder(schema.valueProjection(), schema.valueConversionLayout());
+                new JsonKafkaFieldDecoder(schema);
             }
             return schema;
         } catch (InvalidTableException | IllegalArgumentException e) {

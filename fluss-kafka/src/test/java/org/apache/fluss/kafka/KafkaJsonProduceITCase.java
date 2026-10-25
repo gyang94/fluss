@@ -62,7 +62,7 @@ import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -110,17 +110,17 @@ class KafkaJsonProduceITCase {
                     .build();
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testScalarComplexAndNullValuesRoundTripThroughBothTopicNames(String layout)
+    @CsvSource({"flat,false", "flat,true", "nested,false", "nested,true"})
+    void testScalarComplexAndNullValuesRoundTripThroughBothTopicNames(String layout, boolean rescue)
             throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_round_trip_" + layout);
+        TablePath path = TablePath.of(DATABASE, "json_round_trip_" + layout + "_" + rescue);
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(layout));
+            create(admin, path, descriptor(layout, rescue));
             try (KafkaProducer<byte[], byte[]> producer = producer()) {
                 for (int i = 0; i < 3; i++) {
                     String topic = i == 0 ? path.toString() : path.getTableName();
-                    byte[] value = i == 1 ? null : bytes(json(i));
+                    byte[] value = i == 1 ? null : bytes(json(i, rescue && i == 0));
                     assertThat(
                                     producer.send(
                                                     new ProducerRecord<>(
@@ -155,17 +155,25 @@ class KafkaJsonProduceITCase {
                                                 : row;
                                 int start = layout.equals("nested") ? 0 : 1;
                                 assertThat(value.getInt(start)).isEqualTo(index);
-                                assertThat(value.getDecimal(start + 1, 10, 2).toBigDecimal())
-                                        .isEqualByComparingTo("12.34");
+                                if (rescue && index == 0) {
+                                    assertThat(value.isNullAt(start + 1)).isTrue();
+                                } else {
+                                    assertThat(value.getDecimal(start + 1, 10, 2).toBigDecimal())
+                                            .isEqualByComparingTo("12.34");
+                                }
                                 assertThat(value.getTimestampNtz(start + 2, 3).toLocalDateTime())
                                         .isEqualTo(LocalDateTime.parse("2026-01-02T03:04:05.123"));
                                 assertThat(value.getString(start + 3).toString())
-                                        .isEqualTo("hello");
+                                        .isEqualTo("{\"message\":\"hello\"}");
                                 InternalArray items = value.getArray(start + 4);
                                 assertThat(items.size()).isEqualTo(2);
                                 assertThat(items.getRow(0, 2).getString(0).toString())
-                                        .isEqualTo("A");
-                                assertThat(items.getRow(0, 2).getInt(1)).isEqualTo(2);
+                                        .isEqualTo("[\"A\",\"B\"]");
+                                if (rescue && index == 0) {
+                                    assertThat(items.getRow(0, 2).isNullAt(1)).isTrue();
+                                } else {
+                                    assertThat(items.getRow(0, 2).getInt(1)).isEqualTo(2);
+                                }
                                 assertThat(items.isNullAt(1)).isTrue();
                                 InternalMap attributes = value.getMap(start + 5);
                                 assertThat(attributes.keyArray().getString(0).toString())
@@ -179,6 +187,18 @@ class KafkaJsonProduceITCase {
                             assertThat(row.getBytes(0)).isEqualTo(KEY);
                             int headersPosition =
                                     layout.equals("nested") ? 2 : 1 + VALUE_TYPE.getFieldCount();
+                            if (rescue) {
+                                if (index == 0) {
+                                    assertThat(row.getString(headersPosition).toString())
+                                            .isEqualTo(
+                                                    "{\"extra\":null,\"_kafka_key\":42,"
+                                                            + "\"amount\":\"bad\","
+                                                            + "\"items\":[{\"extra\":[1,null,2],\"quantity\":\"bad\"},null]}");
+                                } else {
+                                    assertThat(row.isNullAt(headersPosition)).isTrue();
+                                }
+                                headersPosition++;
+                            }
                             InternalMap headers = row.getMap(headersPosition);
                             assertThat(headers.size()).isEqualTo(1);
                             assertThat(headers.keyArray().getString(0).toString())
@@ -197,12 +217,13 @@ class KafkaJsonProduceITCase {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"flat", "nested"})
-    void testInvalidBatchIsAtomicAndOtherPartitionsStillAppend(String layout) throws Exception {
-        TablePath path = TablePath.of(DATABASE, "json_atomicity_" + layout);
+    @CsvSource({"flat,false", "flat,true", "nested,false", "nested,true"})
+    void testInvalidBatchIsAtomicAndOtherPartitionsStillAppend(String layout, boolean rescue)
+            throws Exception {
+        TablePath path = TablePath.of(DATABASE, "json_atomicity_" + layout + "_" + rescue);
         try (Connection connection = ConnectionFactory.createConnection(CLUSTER.getClientConfig());
                 Admin admin = connection.getAdmin()) {
-            create(admin, path, descriptor(layout));
+            create(admin, path, descriptor(layout, rescue));
             ServerNode node = CLUSTER.getTabletServerNodes("KAFKA").get(0);
             try (Socket socket = new Socket(node.host(), node.port());
                     KafkaProducer<byte[], byte[]> producer = producer()) {
@@ -213,7 +234,10 @@ class KafkaJsonProduceITCase {
                                 MemoryRecords.withRecords(
                                         Compression.NONE,
                                         record(json(1000)),
-                                        record("{\"items\":[{\"quantity\":\"bad\"}]}")),
+                                        record(
+                                                rescue
+                                                        ? "{\"extra\":["
+                                                        : "{\"items\":[{\"quantity\":\"bad\"}]}")),
                                 MemoryRecords.withRecords(
                                         Compression.NONE,
                                         record(json(7)),
@@ -268,15 +292,24 @@ class KafkaJsonProduceITCase {
     }
 
     private static String json(int id) {
-        return "{\"id\":"
-                + id
-                + ",\"amount\":12.34,"
-                + "\"created_at\":\"2026-01-02T03:04:05.123\",\"label\":\"hello\","
-                + "\"items\":[{\"sku\":\"A\",\"quantity\":2},null],"
-                + "\"attributes\":{\"scores\":[7,null,9]}}";
+        return json(id, false);
     }
 
-    private static TableDescriptor descriptor(String layout) {
+    private static String json(int id, boolean rescueValues) {
+        return "{\"id\":"
+                + id
+                + ",\"amount\":"
+                + (rescueValues ? "\"bad\"" : "12.34")
+                + ","
+                + "\"created_at\":\"2026-01-02T03:04:05.123\",\"label\":{\"message\":\"hello\"},"
+                + "\"items\":[{\"sku\":[\"A\",\"B\"],\"quantity\":"
+                + (rescueValues ? "\"bad\",\"extra\":[1,null,2]" : "\"2\"")
+                + "},null],\"attributes\":{\"scores\":[7,null,9]}"
+                + (rescueValues ? ",\"extra\":null,\"_kafka_key\":42" : "")
+                + "}";
+    }
+
+    private static TableDescriptor descriptor(String layout, boolean rescue) {
         Schema.Builder schema =
                 Schema.newBuilder().column(KafkaTableSchema.KEY_COLUMN, DataTypes.BYTES());
         if (layout.equals("nested")) {
@@ -285,6 +318,9 @@ class KafkaJsonProduceITCase {
             for (int i = 0; i < VALUE_TYPE.getFieldCount(); i++) {
                 schema.column(VALUE_TYPE.getFieldNames().get(i), VALUE_TYPE.getTypeAt(i));
             }
+        }
+        if (rescue) {
+            schema.column(KafkaTableSchema.RESCUE_COLUMN, DataTypes.STRING());
         }
         schema.column(
                 KafkaTableSchema.HEADERS_COLUMN,

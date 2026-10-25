@@ -74,6 +74,29 @@ class JsonKafkaFieldDecoderTest {
                 .containsExactly(nested ? new Object[] {null} : new Object[] {null, null, null});
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testConvertsJsonTokensUsingSchema(boolean nested) {
+        RowType type =
+                DataTypes.ROW(
+                        DataTypes.FIELD("label", DataTypes.STRING()),
+                        DataTypes.FIELD("items", DataTypes.ARRAY(DataTypes.STRING())),
+                        DataTypes.FIELD("enabled", DataTypes.BOOLEAN()),
+                        DataTypes.FIELD("count", DataTypes.INT()));
+        Object[] values =
+                decoder(type, nested)
+                        .decode(
+                                buffer(
+                                        "{\"label\":{\"k\":1},\"items\":[{\"k\":2},[3,null]],"
+                                                + "\"enabled\":{},\"count\":1.9}"));
+        GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
+        assertThat(row.getString(0).toString()).isEqualTo("{\"k\":1}");
+        assertThat(row.getArray(1).getString(0).toString()).isEqualTo("{\"k\":2}");
+        assertThat(row.getArray(1).getString(1).toString()).isEqualTo("[3,null]");
+        assertThat(row.getBoolean(2)).isFalse();
+        assertThat(row.getInt(3)).isEqualTo(1);
+    }
+
     @Test
     void testRejectsInvalidRecords() {
         JsonKafkaFieldDecoder decoder = decoder(ROW_TYPE, false);
@@ -105,17 +128,19 @@ class JsonKafkaFieldDecoderTest {
                         DataTypes.ROW(
                                 DataTypes.FIELD("floatValue", DataTypes.FLOAT()),
                                 DataTypes.FIELD("doubleValue", DataTypes.DOUBLE()),
-                                DataTypes.FIELD("amount", DataTypes.DECIMAL(30, 10))),
+                                DataTypes.FIELD("amount", DataTypes.DECIMAL(30, 10)),
+                                DataTypes.FIELD("floatZero", DataTypes.FLOAT())),
                         false);
         Object[] values =
                 decoder.decode(
                         buffer(
                                 "{\"floatValue\":1.0000000596046448,\"doubleValue\":-0.0,"
-                                        + "\"amount\":12345678901234567890.1234567890}"));
+                                        + "\"amount\":12345678901234567890.1234567890,\"floatZero\":-0}"));
         assertThat(values[0]).isEqualTo(1.0000001F);
         assertThat(Double.doubleToRawLongBits((Double) values[1])).isEqualTo(Long.MIN_VALUE);
         assertThat(((Decimal) values[2]).toBigDecimal())
                 .isEqualByComparingTo("12345678901234567890.1234567890");
+        assertThat(Float.floatToRawIntBits((Float) values[3])).isEqualTo(Integer.MIN_VALUE);
     }
 
     @ParameterizedTest
@@ -125,7 +150,8 @@ class JsonKafkaFieldDecoderTest {
                 decoder(COMPLEX_TYPE, nested)
                         .decode(
                                 buffer(
-                                        "{\"items\":[{\"quantity\":2,\"ratio\":1.0000000596046448},null],"
+                                        "{\"items\":[{\"quantity\":\"2\",\"ratio\":1.0000000596046448,"
+                                                + "\"extra\":true},null],"
                                                 + "\"attributes\":{\"scores\":[7,null,9]}}"));
         GenericRow row = nested ? (GenericRow) values[0] : GenericRow.of(values);
         InternalArray items = row.getArray(0);
@@ -146,7 +172,6 @@ class JsonKafkaFieldDecoderTest {
         JsonKafkaFieldDecoder decoder = decoder(COMPLEX_TYPE, false);
         String[][] invalid = {
             {"{\"items\":[{\"quantity\":\"bad\"}]}", "$[\"items\"][0][\"quantity\"]"},
-            {"{\"items\":[{\"unknown\":1}]}", "$[\"items\"][0][\"unknown\"]"},
             {"{\"attributes\":{\"scores\":{}}}", "$[\"attributes\"][\"scores\"]"}
         };
         for (String[] record : invalid) {

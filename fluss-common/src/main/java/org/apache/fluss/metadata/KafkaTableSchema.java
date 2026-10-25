@@ -406,7 +406,8 @@ public final class KafkaTableSchema {
 
     /**
      * Returns the rescue column position, or -1 when absent. JSON decoders collect unknown and
-     * reserved members here; binary/string decoders write null to this optional column.
+     * reserved members and values that fail conversion here; binary/string decoders write null to
+     * this optional column.
      */
     public int rescuePosition() {
         return rescuePosition;

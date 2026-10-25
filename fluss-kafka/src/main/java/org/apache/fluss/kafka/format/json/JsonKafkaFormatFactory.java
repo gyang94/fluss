@@ -23,6 +23,7 @@ import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.format.KafkaFieldDecoder;
 import org.apache.fluss.kafka.format.KafkaFormatFactory;
 import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
 
 import javax.annotation.Nullable;
 
@@ -38,6 +39,11 @@ public final class JsonKafkaFormatFactory implements KafkaFormatFactory {
     @Override
     public KafkaFieldDecoder createDecoder(KafkaFieldProjection projection) {
         return new JsonKafkaFieldDecoder(projection);
+    }
+
+    @Override
+    public KafkaFieldDecoder createDecoder(KafkaTableSchema schema) {
+        return new JsonKafkaFieldDecoder(schema);
     }
 
     @Override

@@ -23,6 +23,7 @@ import org.apache.fluss.config.KafkaValueConversionType;
 import org.apache.fluss.kafka.format.json.JsonKafkaFormatFactory;
 import org.apache.fluss.kafka.schema.KafkaTopicSchemaException;
 import org.apache.fluss.metadata.KafkaFieldProjection;
+import org.apache.fluss.metadata.KafkaTableSchema;
 
 import javax.annotation.Nullable;
 
@@ -54,12 +55,21 @@ public final class KafkaFormatFactoryRegistry {
             KafkaValueConversionType format,
             KafkaFieldProjection projection,
             @Nullable KafkaValueConversionLayout layout) {
+        return factory(format).createDecoder(projection, layout);
+    }
+
+    /** Creates a decoder with fixed rescue-column support from the validated table schema. */
+    public KafkaFieldDecoder createDecoder(KafkaTableSchema schema) {
+        return factory(schema.valueConversionType()).createDecoder(schema);
+    }
+
+    private KafkaFormatFactory factory(KafkaValueConversionType format) {
         KafkaFormatFactory factory = factories.get(format);
         if (factory == null) {
             throw new KafkaTopicSchemaException(
                     "No Kafka format factory is registered for '" + format + "'.");
         }
-        return factory.createDecoder(projection, layout);
+        return factory;
     }
 
     private void register(KafkaFormatFactory factory) {

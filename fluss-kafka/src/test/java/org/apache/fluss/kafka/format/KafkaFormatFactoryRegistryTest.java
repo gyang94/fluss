@@ -112,8 +112,7 @@ class KafkaFormatFactoryRegistryTest {
                         .build();
         KafkaTableSchema schema = KafkaTableSchema.resolve(table);
         assertThat(schema.valueProjection().positions()).containsExactly(1);
-        KafkaFieldDecoder decoder =
-                formats.createDecoder(schema.valueConversionType(), schema.valueProjection());
+        KafkaFieldDecoder decoder = formats.createDecoder(schema);
         byte[] payload = "payload".getBytes(StandardCharsets.UTF_8);
         assertThat(decoder.decode(ByteBuffer.wrap(payload)))
                 .containsExactly(string ? BinaryString.fromString("payload") : payload);
