@@ -42,6 +42,7 @@ import org.apache.fluss.types.TimestampType;
 
 import javax.annotation.Nullable;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.DateTimeException;
 import java.time.Instant;
@@ -53,7 +54,6 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
 import java.util.Arrays;
-import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -65,9 +65,11 @@ import static org.apache.fluss.utils.DateTimeUtils.timestampToNanos;
 /**
  * JSON-to-Fluss converter construction.
  *
- * <p>Recursive ARRAY, MAP, and ROW conversion follows Apache Flink's {@code
+ * <p>Scalar coercion and recursive conversion follow Apache Flink 1.20's {@code
  * JsonToRowDataConverters}, adapted to Fluss internal values, schema nullability, and bounded
- * containers.
+ * containers. Fluss additionally normalizes temporal precision and fixed binary widths, supports
+ * timestamp offsets and local timestamps, and reports numeric overflow instead of storing
+ * non-finite numbers or a null decimal.
  */
 final class JsonToFlussConverters {
 
@@ -110,46 +112,34 @@ final class JsonToFlussConverters {
     private static JsonToFlussConverter createNotNull(DataType dataType) {
         switch (dataType.getTypeRoot()) {
             case BOOLEAN:
-                return (node, path) -> {
-                    require(node.isBoolean(), path, dataType, "expected a JSON boolean");
-                    return node.booleanValue();
-                };
+                // Like Flink, parseBoolean treats every non-true string as false.
+                return (node, path) ->
+                        node.isBoolean()
+                                ? node.booleanValue()
+                                : Boolean.parseBoolean(node.asText().trim());
             case TINYINT:
-                return (node, path) -> {
-                    long value = integralValue(node, path, dataType);
-                    require(
-                            value >= Byte.MIN_VALUE && value <= Byte.MAX_VALUE,
-                            path,
-                            dataType,
-                            "integer overflow");
-                    return (byte) value;
-                };
+                return (node, path) -> Byte.parseByte(node.asText().trim());
             case SMALLINT:
-                return (node, path) -> {
-                    long value = integralValue(node, path, dataType);
-                    require(
-                            value >= Short.MIN_VALUE && value <= Short.MAX_VALUE,
-                            path,
-                            dataType,
-                            "integer overflow");
-                    return (short) value;
-                };
+                return (node, path) -> Short.parseShort(node.asText().trim());
             case INTEGER:
-                return (node, path) -> {
-                    long value = integralValue(node, path, dataType);
-                    require(
-                            value >= Integer.MIN_VALUE && value <= Integer.MAX_VALUE,
-                            path,
-                            dataType,
-                            "integer overflow");
-                    return (int) value;
-                };
+                // Flink truncates fractional numeric nodes, but parses text as an exact integer.
+                return (node, path) ->
+                        node.canConvertToInt()
+                                ? node.asInt()
+                                : Integer.parseInt(node.asText().trim());
             case BIGINT:
-                return (node, path) -> integralValue(node, path, dataType);
+                return (node, path) ->
+                        node.canConvertToLong()
+                                ? node.asLong()
+                                : Long.parseLong(node.asText().trim());
             case FLOAT:
                 return (node, path) -> {
-                    require(node.isNumber(), path, dataType, "expected a JSON number");
-                    float value = node.floatValue();
+                    // Parse decimal text directly to float to avoid an intermediate double
+                    // rounding.
+                    float value =
+                            node.isDouble()
+                                    ? (float) node.asDouble()
+                                    : Float.parseFloat(node.asText().trim());
                     require(
                             Float.isFinite(value),
                             path,
@@ -159,8 +149,10 @@ final class JsonToFlussConverters {
                 };
             case DOUBLE:
                 return (node, path) -> {
-                    require(node.isNumber(), path, dataType, "expected a JSON number");
-                    double value = node.doubleValue();
+                    double value =
+                            node.isDouble()
+                                    ? node.asDouble()
+                                    : Double.parseDouble(node.asText().trim());
                     require(
                             Double.isFinite(value),
                             path,
@@ -210,8 +202,8 @@ final class JsonToFlussConverters {
 
     private static JsonToFlussConverter decimalConverter(DecimalType dataType) {
         return (node, path) -> {
-            require(node.isNumber(), path, dataType, "expected a JSON number");
-            BigDecimal value = node.decimalValue();
+            BigDecimal value =
+                    node.isBigDecimal() ? node.decimalValue() : new BigDecimal(node.asText());
             if (value.signum() == 0) {
                 return Decimal.zero(dataType.getPrecision(), dataType.getScale());
             }
@@ -389,22 +381,20 @@ final class JsonToFlussConverters {
         }
     }
 
-    private static long integralValue(JsonNode node, String path, DataType dataType) {
-        require(node.isIntegralNumber(), path, dataType, "expected a JSON integer");
-        require(node.canConvertToLong(), path, dataType, "integer overflow");
-        return node.longValue();
-    }
-
     private static String textualValue(JsonNode node, String path, DataType dataType) {
         require(node.isTextual(), path, dataType, "expected a JSON string");
         return node.textValue();
     }
 
     private static byte[] decodeBase64(JsonNode node, String path, DataType dataType) {
-        String value = textualValue(node, path, dataType);
+        require(
+                node.isTextual() || node.isBinary(),
+                path,
+                dataType,
+                "expected a Base64 string or binary node");
         try {
-            return Base64.getDecoder().decode(value);
-        } catch (IllegalArgumentException e) {
+            return node.binaryValue();
+        } catch (IOException e) {
             throw invalid(path, dataType, "invalid Base64 string", e);
         }
     }

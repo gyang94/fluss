@@ -140,8 +140,8 @@ class JsonToFlussConvertersTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"A", "AQ===", "AQ==x", "A Q==", "AQ==\n", "_w=="})
-    void testBase64RejectsInvalidPaddingAlphabetAndWhitespace(String value) {
+    @ValueSource(strings = {"A", "AQ", "AQI", "AQ===", "AQ==x", "A Q==", "_w=="})
+    void testBase64RejectsInvalidPaddingAlphabetAndEmbeddedWhitespace(String value) {
         for (DataType type : new DataType[] {DataTypes.BYTES(), DataTypes.BINARY(1)}) {
             assertThatThrownBy(
                             () ->
@@ -482,9 +482,6 @@ class JsonToFlussConvertersTest {
 
     private static Stream<Arguments> invalidScalars() {
         return Stream.of(
-                Arguments.of(DataTypes.BOOLEAN(), "1"),
-                Arguments.of(DataTypes.INT(), "\"1\""),
-                Arguments.of(DataTypes.INT(), "1.0"),
                 Arguments.of(DataTypes.INT(), "2147483648"),
                 Arguments.of(DataTypes.TINYINT(), "128"),
                 Arguments.of(DataTypes.SMALLINT(), "-32769"),
