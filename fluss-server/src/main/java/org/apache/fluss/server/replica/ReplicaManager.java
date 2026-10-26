@@ -112,8 +112,6 @@ import org.apache.fluss.server.metrics.UserMetrics;
 import org.apache.fluss.server.metrics.group.BucketMetricGroup;
 import org.apache.fluss.server.metrics.group.TableMetricGroup;
 import org.apache.fluss.server.metrics.group.TabletServerMetricGroup;
-import org.apache.fluss.server.replica.delay.ActionQueue;
-import org.apache.fluss.server.replica.delay.DelayedActionQueue;
 import org.apache.fluss.server.replica.delay.DelayedFetchLog;
 import org.apache.fluss.server.replica.delay.DelayedFetchLog.FetchBucketStatus;
 import org.apache.fluss.server.replica.delay.DelayedOperationManager;
@@ -223,8 +221,6 @@ public class ReplicaManager implements ServerReconfigurable {
      * is up.
      */
     private final DelayedOperationManager<DelayedFetchLog> delayedFetchLogManager;
-
-    private final ActionQueue actionQueue;
 
     private final ReplicaFetcherManager replicaFetcherManager;
     // The manager used to manager the replica alter, especially the isr expand and shrink.
@@ -353,7 +349,6 @@ public class ReplicaManager implements ServerReconfigurable {
                         "delay fetch log",
                         serverId,
                         conf.getInt(ConfigOptions.LOG_REPLICA_FETCH_OPERATION_PURGE_NUMBER));
-        this.actionQueue = new DelayedActionQueue();
         this.internalListenerName = conf.get(ConfigOptions.INTERNAL_LISTENER_NAME);
 
         this.replicaFetcherManager =
@@ -726,13 +721,11 @@ public class ReplicaManager implements ServerReconfigurable {
                 appendToLocalLog(entriesPerBucket, requiredAcks, userContext);
         LOG.debug("Append records to local log in {} ms", System.currentTimeMillis() - startTime);
 
-        // Queue fetch completion before registering a delayed write. The request handler drains
-        // the actions only after both steps have returned.
-        enqueueDelayedFetchCompletions(appendResult);
-
-        // maybe do delay write operation.
+        // Register any delayed write before waking followers. The append has already released
+        // the replica locks, so completion checks can run directly here.
         maybeAddDelayedWrite(
                 timeoutMs, requiredAcks, entriesPerBucket.size(), appendResult, responseCallback);
+        completeDelayedFetches(appendResult);
     }
 
     /** Appends historical log batches while preserving each original partition in the response. */
@@ -2245,22 +2238,21 @@ public class ReplicaManager implements ServerReconfigurable {
                 || error == Errors.UNKNOWN_TABLE_OR_BUCKET_EXCEPTION;
     }
 
-    private void enqueueDelayedFetchCompletions(
-            Map<TableBucket, ProduceLogResultForBucket> appendResults) {
+    private void completeDelayedFetches(Map<TableBucket, ProduceLogResultForBucket> appendResults) {
         appendResults.forEach(
                 (tableBucket, appendResult) -> {
                     if (appendResult.succeeded()) {
-                        actionQueue.add(
-                                () ->
-                                        delayedFetchLogManager.checkAndComplete(
-                                                new DelayedTableBucketKey(tableBucket)));
+                        try {
+                            delayedFetchLogManager.checkAndComplete(
+                                    new DelayedTableBucketKey(tableBucket));
+                        } catch (Exception e) {
+                            LOG.error(
+                                    "Failed to complete delayed fetches for bucket {}.",
+                                    tableBucket,
+                                    e);
+                        }
                     }
                 });
-    }
-
-    /** Tries to complete actions deferred by log appends. */
-    public void tryCompleteActions() {
-        actionQueue.tryCompleteActions();
     }
 
     private void completeDelayedOperations(TableBucket tableBucket) {
