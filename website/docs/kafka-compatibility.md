@@ -33,6 +33,23 @@ For distributed deployments, configure reachable `bind.listeners` and `advertise
 The coordinator and all TabletServers must use the same `kafka.default.database`; see the
 [server configuration reference](maintenance/configuration.md#common).
 
+### Enable or disable Kafka access
+
+Use [`set_cluster_configs`](engine-flink/procedures.md#set_cluster_configs) to change
+`kafka.enabled` without restarting the servers:
+
+- Set it to `false` to stop accepting new Kafka writes. Writes already submitted may still
+  complete, and native Fluss access remains available.
+- Set it to `true` to resume Kafka access. Kafka clients must reconnect before sending new requests.
+
+While Kafka access is disabled, new writes fail with `INVALID_REQUEST`, which Kafka producers do
+not automatically retry. If a request cannot receive an error response, such as Produce with
+`acks=0`, the server closes the connection instead.
+
+Before closing a connection, the server waits up to `kafka.service.drain-timeout` (default `30 s`)
+to send responses to earlier requests. To change this timeout, set a positive duration in
+`server.yaml` before starting the server. Closing the connection does not cancel submitted writes.
+
 ## SASL/PLAIN authentication
 
 Kafka listeners support `PLAINTEXT` and `SASL_PLAINTEXT` with the `PLAIN` mechanism.
@@ -64,19 +81,6 @@ After authentication, Kafka requests use the authenticated user's identity for F
 When authorization is enabled, the user must also have the required permissions on the target tables.
 SASL handshake versions 0–1 and SaslAuthenticate versions 0–2 are supported. Ordinary requests are
 rejected until authentication completes.
-
-`kafka.enabled` can be updated through the dynamic cluster configuration API. Disabling it
-keeps configured Kafka listeners bound and leaves native Fluss access available. New writes are
-rejected with the non-retryable `INVALID_REQUEST` error; writes already submitted may complete.
-Clients must reconnect after re-enabling the service because existing connections remain retired.
-
-Requests without a legal error response, including Produce with `acks=0` and Metadata with no
-explicit topics, close the connection after earlier responses. `kafka.service.drain-timeout`
-(default `30 s`, positive, startup-only) bounds that wait; disconnecting does not roll back writes.
-
-The binary distribution includes `fluss-kafka` and `fluss-server` in `lib/`. Keep both JARs from
-the same build when upgrading. The Kafka JAR bundles `kafka-clients` and uses the compression
-libraries provided by the server JAR.
 
 ## Topic-to-table mapping
 
