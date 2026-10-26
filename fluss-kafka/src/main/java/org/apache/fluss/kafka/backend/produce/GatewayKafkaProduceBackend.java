@@ -121,7 +121,6 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
                         continue;
                     }
                     try {
-                        command.ensureServiceAvailable();
                         service.authorizeTable(WRITE, path);
                         EncodedRecords converted =
                                 transcoder.transcode(

@@ -99,7 +99,6 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
     @Override
     public CompletableFuture<? extends AbstractResponse> handle(
             KafkaRequestContext context, ProduceRequest request) {
-        context.serviceGuard().ensureAvailable();
         validateRequest(request);
         List<TopicWrite> topics = new ArrayList<>();
         Map<TopicPartition, PartitionResult> failures = new HashMap<>();
@@ -107,7 +106,6 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
             List<PartitionWrite> partitions = new ArrayList<>();
             for (PartitionProduceData partition : topic.partitionData()) {
                 try {
-                    context.serviceGuard().ensureAvailable();
                     if (!Topic.isValid(topic.name())) {
                         throw new InvalidTopicException("Invalid Kafka topic name " + topic.name());
                     }
@@ -128,7 +126,6 @@ public final class ProduceHandler implements KafkaApiHandler<ProduceRequest> {
                 topics.add(new TopicWrite(topic.name(), partitions));
             }
         }
-        context.serviceGuard().ensureAvailable();
         KafkaProduceCommand command =
                 new KafkaProduceCommand(
                         request.acks(),
