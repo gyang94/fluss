@@ -38,8 +38,8 @@ The coordinator and all TabletServers must use the same `kafka.default.database`
 Use [`set_cluster_configs`](engine-flink/procedures.md#set_cluster_configs) to change
 `kafka.enabled` without restarting the servers:
 
-- Set it to `false` to stop accepting new Kafka writes. Writes already submitted may still
-  complete, and native Fluss access remains available.
+- Set it to `false` to stop accepting new Kafka requests. Requests already being processed may
+  still write data and complete after the setting changes. Native Fluss access remains available.
 - Set it to `true` to resume Kafka access. Kafka clients must reconnect before sending new requests.
 
 While Kafka access is disabled, new writes fail with `INVALID_REQUEST`, which Kafka producers do

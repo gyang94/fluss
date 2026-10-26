@@ -58,21 +58,6 @@ public final class KafkaRequestContext {
         return new KafkaRequestContext(request);
     }
 
-    /** Whether the request can still begin work on its original connection generation. */
-    public boolean serviceAvailable() {
-        return request.serviceAvailable();
-    }
-
-    /** Returns the service guard for native submission. */
-    public KafkaServiceGuard serviceGuard() {
-        return request.serviceGuard();
-    }
-
-    /** Closes this request in FIFO order without a Kafka response. */
-    public void closeWithoutResponse() {
-        request.closeWithoutResponse();
-    }
-
     /** Returns the request correlation ID. */
     public int correlationId() {
         return correlationId;

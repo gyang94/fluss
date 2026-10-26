@@ -18,7 +18,6 @@
 package org.apache.fluss.kafka.backend.produce;
 
 import org.apache.fluss.annotation.Internal;
-import org.apache.fluss.kafka.KafkaServiceGuard;
 import org.apache.fluss.security.acl.FlussPrincipal;
 
 import javax.annotation.Nullable;
@@ -28,7 +27,6 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkNotNull;
 
@@ -47,7 +45,6 @@ public final class KafkaProduceCommand {
     private final String listenerName;
     private final @Nullable InetAddress clientAddress;
     private final FlussPrincipal principal;
-    private final KafkaServiceGuard serviceGuard;
 
     /** Creates a Kafka write command for the authenticated Kafka principal. */
     public KafkaProduceCommand(
@@ -57,42 +54,12 @@ public final class KafkaProduceCommand {
             String listenerName,
             @Nullable InetAddress clientAddress,
             FlussPrincipal principal) {
-        this(
-                acks,
-                timeoutMs,
-                topics,
-                listenerName,
-                clientAddress,
-                principal,
-                new KafkaServiceGuard(() -> true));
-    }
-
-    /** Creates a command sharing admission with its originating service controller. */
-    public KafkaProduceCommand(
-            short acks,
-            int timeoutMs,
-            List<TopicWrite> topics,
-            String listenerName,
-            @Nullable InetAddress clientAddress,
-            FlussPrincipal principal,
-            KafkaServiceGuard serviceGuard) {
-        this.serviceGuard = checkNotNull(serviceGuard);
         this.acks = acks;
         this.timeoutMs = timeoutMs;
         this.topics = immutableCopy(topics);
         this.listenerName = checkNotNull(listenerName);
         this.clientAddress = clientAddress;
         this.principal = checkNotNull(principal);
-    }
-
-    /** Rejects queued or converting work after its connection stops serving requests. */
-    public void ensureServiceAvailable() {
-        serviceGuard.ensureAvailable();
-    }
-
-    /** Submits native work atomically with respect to service disable. */
-    public <T> T submitIfServiceAvailable(Supplier<T> submission) {
-        return serviceGuard.execute(submission);
     }
 
     /** Returns Kafka required acknowledgements. */

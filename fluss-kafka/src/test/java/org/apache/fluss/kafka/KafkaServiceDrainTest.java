@@ -56,30 +56,46 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Service drains wait for actual network completion without cancelling submitted native writes. */
 class KafkaServiceDrainTest {
-    @Test
-    void testSubmittedAcksZero() {
+    @ParameterizedTest
+    @ValueSource(shorts = {0, 1, -1})
+    void testDisableDuringProduce(short acks) {
         KafkaServiceController controller =
                 new KafkaServiceController(true, Duration.ofSeconds(30));
         RequestChannel requests = new RequestChannel(10);
-        PendingService service = new PendingService();
+        PendingService service =
+                new PendingService() {
+                    @Override
+                    public CompletableFuture<KafkaProduceResult> write(
+                            KafkaProduceCommand command) {
+                        controller.setEnabled(false);
+                        return super.write(command);
+                    }
+                };
         EmbeddedChannel channel =
                 new EmbeddedChannel(
                         controller.newConnection(), new KafkaCommandDecoder(requests, "KAFKA"));
         try {
-            ByteBuf buffer = produce((short) 0);
+            ByteBuf buffer = produce(acks);
             channel.writeInbound(buffer);
             KafkaRequest request = (KafkaRequest) requests.pollRequest(1000);
             handler(service).processRequest(request);
             request.releaseBuffer();
-            controller.setEnabled(false);
+            assertThat(controller.isEnabled()).isFalse();
+            assertThat(service.calls).isOne();
+            assertThat(service.append).isEqualTo("value".getBytes(StandardCharsets.UTF_8));
+            assertThat(request.future()).isNotDone();
             channel.runPendingTasks();
             assertThat(channel.isActive()).isTrue();
             service.result.complete(success());
             channel.runPendingTasks();
+            assertThat(request.future().join().errorCounts()).containsOnlyKeys(Errors.NONE);
             assertThat(channel.isActive()).isTrue();
             assertThat(buffer.refCnt()).isZero();
-            Object response = channel.readOutbound();
-            assertThat(response).isNull();
+            if (acks == 0) {
+                assertThat(channel.outboundMessages()).isEmpty();
+            } else {
+                assertThat(channel.outboundMessages()).hasSize(1);
+            }
         } finally {
             channel.finishAndReleaseAll();
             controller.close();
@@ -355,21 +371,11 @@ class KafkaServiceDrainTest {
 
         @Override
         public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
-            return command.submitIfServiceAvailable(
-                    () -> {
-                        calls++;
-                        ByteBuffer value =
-                                command.topics()
-                                        .get(0)
-                                        .partitions()
-                                        .get(0)
-                                        .records()
-                                        .get(0)
-                                        .value();
-                        append = new byte[value.remaining()];
-                        value.get(append);
-                        return result;
-                    });
+            calls++;
+            ByteBuffer value = command.topics().get(0).partitions().get(0).records().get(0).value();
+            append = new byte[value.remaining()];
+            value.get(append);
+            return result;
         }
     }
 

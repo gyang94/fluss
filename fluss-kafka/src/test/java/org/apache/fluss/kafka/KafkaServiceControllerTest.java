@@ -24,15 +24,10 @@ import org.apache.fluss.shaded.netty4.io.netty.channel.embedded.EmbeddedChannel;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
-import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/** Service switching preserves submitted ownership and permanently retires old connections. */
+/** Tests Kafka service switching and connection retirement. */
 class KafkaServiceControllerTest {
     @Test
     void testRetiredConnections() {
@@ -67,61 +62,5 @@ class KafkaServiceControllerTest {
             controller.close();
         }
         assertThat(controller.retiredConnections()).isZero();
-    }
-
-    @Test
-    void testDisableWaitsForSubmission() throws Exception {
-        KafkaServiceController controller =
-                new KafkaServiceController(true, Duration.ofSeconds(30));
-        EmbeddedChannel channel = new EmbeddedChannel(controller.newConnection());
-        KafkaServiceGuard guard = KafkaServiceController.connection(channel).guard(() -> true);
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch resume = new CountDownLatch(1);
-        CompletableFuture<Void> acknowledgement = new CompletableFuture<>();
-        CompletableFuture<Void> submission =
-                CompletableFuture.runAsync(
-                        () ->
-                                assertThat(
-                                                guard.execute(
-                                                        () -> {
-                                                            entered.countDown();
-                                                            try {
-                                                                assertThat(
-                                                                                resume.await(
-                                                                                        10,
-                                                                                        TimeUnit
-                                                                                                .SECONDS))
-                                                                        .isTrue();
-                                                            } catch (InterruptedException e) {
-                                                                Thread.currentThread().interrupt();
-                                                                throw new AssertionError(e);
-                                                            }
-                                                            return acknowledgement;
-                                                        }))
-                                        .isSameAs(acknowledgement));
-        Thread disable = new Thread(() -> controller.setEnabled(false));
-        try {
-            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
-            disable.start();
-            retry(
-                    Duration.ofSeconds(10),
-                    () -> assertThat(disable.getState()).isEqualTo(Thread.State.WAITING));
-            assertThat(controller.isEnabled()).isTrue();
-            resume.countDown();
-            submission.get(10, TimeUnit.SECONDS);
-            disable.join(10_000);
-            assertThat(disable.isAlive()).isFalse();
-            assertThat(controller.isEnabled()).isFalse();
-            assertThat(acknowledgement).isNotDone();
-            controller.setEnabled(true);
-            assertThatThrownBy(() -> guard.execute(() -> null))
-                    .isInstanceOf(KafkaServiceUnavailableException.class);
-        } finally {
-            resume.countDown();
-            submission.get(10, TimeUnit.SECONDS);
-            disable.join(10_000);
-            channel.finishAndReleaseAll();
-            controller.close();
-        }
     }
 }

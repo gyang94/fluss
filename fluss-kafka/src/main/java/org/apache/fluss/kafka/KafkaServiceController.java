@@ -36,8 +36,6 @@ import java.util.Set;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-import java.util.function.BooleanSupplier;
 
 /** Controls Kafka service admission without changing listeners or shared transport resources. */
 @ThreadSafe
@@ -47,9 +45,6 @@ final class KafkaServiceController implements AutoCloseable {
             AttributeKey.valueOf("fluss.kafka.service.connection");
 
     private final Object lock = new Object();
-    // Concurrent submissions hold read admission only through their synchronous native call;
-    // disable takes write admission, so it cannot pass an in-progress submission boundary.
-    private final ReentrantReadWriteLock submissionLock = new ReentrantReadWriteLock();
     private final Set<Connection> connections = new HashSet<>();
     private final Duration drainTimeout;
     private volatile boolean enabled;
@@ -71,24 +66,19 @@ final class KafkaServiceController implements AutoCloseable {
     }
 
     void setEnabled(boolean newEnabled) {
-        List<Connection> draining;
-        submissionLock.writeLock().lock();
-        try {
-            synchronized (lock) {
-                if (closed || enabled == newEnabled) {
-                    return;
-                }
-                enabled = newEnabled;
-                draining = newEnabled ? new ArrayList<>() : new ArrayList<>(connections);
-                draining.forEach(connection -> connection.accepting = false);
+        int retired;
+        synchronized (lock) {
+            if (closed || enabled == newEnabled) {
+                return;
             }
-        } finally {
-            submissionLock.writeLock().unlock();
+            enabled = newEnabled;
+            retired = newEnabled ? 0 : connections.size();
+            if (!newEnabled) {
+                connections.forEach(connection -> connection.accepting = false);
+            }
         }
         LOG.info(
-                "Kafka service enabled={}, retiring {} existing connections.",
-                newEnabled,
-                draining.size());
+                "Kafka service enabled={}, retiring {} existing connections.", newEnabled, retired);
     }
 
     ChannelInboundHandlerAdapter newConnection() {
@@ -102,16 +92,11 @@ final class KafkaServiceController implements AutoCloseable {
     @Override
     public void close() {
         List<Connection> snapshot;
-        submissionLock.writeLock().lock();
-        try {
-            synchronized (lock) {
-                closed = true;
-                enabled = false;
-                snapshot = new ArrayList<>(connections);
-                snapshot.forEach(connection -> connection.accepting = false);
-            }
-        } finally {
-            submissionLock.writeLock().unlock();
+        synchronized (lock) {
+            closed = true;
+            enabled = false;
+            snapshot = new ArrayList<>(connections);
+            snapshot.forEach(connection -> connection.accepting = false);
         }
         snapshot.forEach(connection -> connection.channel.close());
     }
@@ -155,11 +140,6 @@ final class KafkaServiceController implements AutoCloseable {
 
         void finishRequest() {
             requests.decrementAndGet();
-        }
-
-        KafkaServiceGuard guard(BooleanSupplier requestActive) {
-            return new KafkaServiceGuard(
-                    submissionLock.readLock(), () -> isServing() && requestActive.getAsBoolean());
         }
 
         // A protocol request which has no legal error response closes in FIFO order. Bound the

@@ -79,6 +79,7 @@ public final class KafkaRequestDispatcher {
                                     spec.maxVersion())));
         }
 
+        // Requests admitted here may finish even if Kafka is disabled during processing.
         if (!request.serviceAvailable()) {
             return disabledResponse(request);
         }
@@ -89,8 +90,6 @@ public final class KafkaRequestDispatcher {
             if (responseFuture == null) {
                 throw new NullPointerException("Kafka API handler returned a null future.");
             }
-        } catch (KafkaServiceUnavailableException disabled) {
-            return disabledResponse(request);
         } catch (Throwable t) {
             return completedErrorResponse(abstractRequest, t);
         }
