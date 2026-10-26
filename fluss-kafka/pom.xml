@@ -137,6 +137,17 @@
                                     <include>org.apache.kafka:kafka-clients</include>
                                 </includes>
                             </artifactSet>
+                            <filters>
+                                <filter>
+                                    <artifact>org.apache.kafka:kafka-clients</artifact>
+                                    <excludes>
+                                        <!-- Apache 2.0 is in META-INF/LICENSE; retain Kafka's
+                                             NOTICE in META-INF/licenses/NOTICE.kafka-clients. -->
+                                        <exclude>LICENSE</exclude>
+                                        <exclude>NOTICE</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
                             <!-- Retain Kafka classes loaded reflectively. -->
                             <minimizeJar>false</minimizeJar>
                             <shadedArtifactAttached>false</shadedArtifactAttached>
