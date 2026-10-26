@@ -42,6 +42,7 @@ import org.apache.fluss.server.replica.Replica;
 import org.apache.fluss.server.replica.ReplicaTestBase;
 import org.apache.fluss.server.replica.delay.DelayedFetchLog.FetchBucketStatus;
 import org.apache.fluss.server.tablet.TabletService;
+import org.apache.fluss.server.tablet.consumer.group.GroupManager;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
 
 import org.junit.jupiter.api.Test;
@@ -288,7 +289,8 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
                             executor,
                             scannerManager,
                             testCoordinatorGateway,
-                            "CLIENT");
+                            "CLIENT",
+                            GroupManager.from(conf));
             ProduceLogRequest produceRequest =
                     newProduceLogRequest(
                             tableBucket.getTableId(),
@@ -430,7 +432,7 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
     private CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> watchDelayedFetch(
             TableBucket tableBucket) {
         FetchLogResultForBucket previousResult =
-                new FetchLogResultForBucket(tableBucket, MemoryLogRecords.EMPTY, 0L);
+                FetchLogResultForBucket.records(tableBucket, MemoryLogRecords.EMPTY, 0L, -1L, -1L);
         CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> response =
                 new CompletableFuture<>();
         DelayedFetchLog delayedFetchLog =
