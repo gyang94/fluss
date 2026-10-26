@@ -25,7 +25,6 @@ import org.apache.fluss.rpc.netty.server.RequestHandler;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandler;
 
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 /** A network protocol plugin that provides the server side implementation of a network protocol. */
 public interface NetworkProtocolPlugin extends Plugin {
@@ -53,9 +52,4 @@ public interface NetworkProtocolPlugin extends Plugin {
      * protocol.
      */
     RequestHandler<?> createRequestHandler(RpcGatewayService service);
-
-    /** Releases resources owned by this protocol when the server shuts down. */
-    default CompletableFuture<Void> closeAsync() {
-        return CompletableFuture.completedFuture(null);
-    }
 }

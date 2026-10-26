@@ -33,23 +33,6 @@ For distributed deployments, configure reachable `bind.listeners` and `advertise
 The coordinator and all TabletServers must use the same `kafka.default.database`; see the
 [server configuration reference](maintenance/configuration.md#common).
 
-### Enable or disable Kafka access
-
-Use [`set_cluster_configs`](engine-flink/procedures.md#set_cluster_configs) to change
-`kafka.enabled` without restarting the servers:
-
-- Set it to `false` to stop accepting new Kafka requests. Requests already being processed may
-  still write data and complete after the setting changes. Native Fluss access remains available.
-- Set it to `true` to resume Kafka access. Kafka clients must reconnect before sending new requests.
-
-While Kafka access is disabled, new writes fail with `INVALID_REQUEST`, which Kafka producers do
-not automatically retry. If a request cannot receive an error response, such as Produce with
-`acks=0`, the server closes the connection instead.
-
-Before closing a connection, the server waits up to `kafka.service.drain-timeout` (default `30 s`)
-to send responses to earlier requests. To change this timeout, set a positive duration in
-`server.yaml` before starting the server. Closing the connection does not cancel submitted writes.
-
 ## SASL/PLAIN authentication
 
 Kafka listeners support `PLAINTEXT` and `SASL_PLAINTEXT` with the `PLAIN` mechanism.

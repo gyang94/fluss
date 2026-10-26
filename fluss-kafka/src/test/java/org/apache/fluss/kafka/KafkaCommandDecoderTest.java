@@ -100,7 +100,7 @@ public class KafkaCommandDecoderTest extends KafkaServerTestBase {
     }
 
     @Test
-    public void testDisconnectPreservesWorkerBuffer() {
+    public void testDisconnectReleasesQueuedRequestBuffer() {
         RequestChannel requestChannel = new RequestChannel(100);
         EmbeddedChannel channel =
                 new EmbeddedChannel(new KafkaCommandDecoder(requestChannel, "KAFKA"));
@@ -122,7 +122,7 @@ public class KafkaCommandDecoderTest extends KafkaServerTestBase {
             channel.runPendingTasks();
 
             assertThat(queuedRequest.cancelled()).isTrue();
-            assertThat(requestBuffer.refCnt()).isOne();
+            assertThat(requestBuffer.refCnt()).isZero();
             queuedRequest.releaseBuffer();
             assertThat(requestBuffer.refCnt()).isZero();
         } finally {

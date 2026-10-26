@@ -63,16 +63,14 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     private static final Logger LOG = LoggerFactory.getLogger(KafkaCommandDecoder.class);
 
     private final RequestChannel requestChannel;
-    private final KafkaSaslConnection saslConnection;
     private final String listenerName;
-    private @Nullable KafkaServiceController.Connection serviceConnection;
+    private final KafkaSaslConnection saslConnection;
 
     // Need to use a Queue to store the inflight responses, because Kafka clients require the
     // responses to be sent in order.
     // See: org.apache.kafka.clients.InFlightRequests#completeNext
     private final ConcurrentLinkedDeque<KafkaRequest> inflightResponses =
             new ConcurrentLinkedDeque<>();
-    private boolean sendingResponses;
     protected final AtomicBoolean isActive = new AtomicBoolean(true);
     protected volatile ChannelHandlerContext ctx;
     protected SocketAddress remoteAddress;
@@ -99,23 +97,12 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
 
     @Override
     public void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
-        boolean serviceRequestOwned = false;
-        if (serviceConnection != null) {
-            if (!serviceConnection.startRequest()) {
-                ReferenceCountUtil.release(buffer);
-                return;
-            }
-            serviceRequestOwned = true;
-        }
         CompletableFuture<AbstractResponse> future = new CompletableFuture<>();
         KafkaRequest request = null;
-        boolean handedToProcessor = false;
         try {
             if (saslConnection.isAuthenticatingWithRawTokens()) {
-                if (serviceConnection != null && !serviceConnection.isServing()) {
-                    close();
-                    return;
-                }
+                // Handshake v0 tokens have only the length prefix removed by the frame decoder;
+                // their contents must never be parsed as a Kafka request header.
                 authenticateRawToken(ctx, buffer);
                 return;
             }
@@ -132,15 +119,8 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             request =
                     parseRequest(
                             ctx, future, buffer, listenerName, saslConnection, header, nioBuffer);
-            if (serviceRequestOwned) {
-                request.attachServiceConnection(serviceConnection);
-                serviceRequestOwned = false;
-            }
             inflightResponses.addLast(request);
             future.whenCompleteAsync((r, t) -> sendResponse(ctx), ctx.executor());
-            // RequestChannel enqueues before reconciling backpressure. Once handed over, the
-            // worker may already own this reference even if backpressure notification throws.
-            handedToProcessor = true;
             requestChannel.putRequest(request);
 
             if (!isActive.get()) {
@@ -148,18 +128,15 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 request.fail(new LeaderNotAvailableException("Channel is inactive"));
             }
         } catch (Throwable t) {
-            if (request != null && !handedToProcessor) {
+            if (request != null) {
                 request.releaseBuffer();
-                request.markNetworkCompleted();
             }
             LOG.error("Error handling request", t);
             close();
         } finally {
-            if (serviceRequestOwned) {
-                serviceConnection.finishRequest();
-            }
-            // The worker owns the retained reference until synchronous processing returns.
-            // Closing the connection must not release memory while a worker still uses it.
+            // KafkaRequest retains the buffer to transfer ownership to request processing. Release
+            // the decoder's ownership on every path. KafkaRequest.releaseBuffer() is idempotent
+            // because worker cleanup and response completion can both release that ownership.
             ReferenceCountUtil.release(buffer);
         }
     }
@@ -184,7 +161,6 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         super.channelActive(ctx);
         this.ctx = ctx;
-        this.serviceConnection = KafkaServiceController.connection(ctx.channel());
         this.remoteAddress = ctx.channel().remoteAddress();
         isActive.set(true);
         LOG.info("New connection from {}", ctx.channel().remoteAddress());
@@ -211,27 +187,17 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
     }
 
     private void sendResponse(ChannelHandlerContext ctx) {
-        // Writes may complete inline and run another completion callback. Never interleave the
-        // length prefix/body of this response with a later response on that reentrant path.
-        if (sendingResponses) {
-            return;
-        }
-        sendingResponses = true;
         try {
-            try {
-                sendReadyResponses(ctx);
-            } catch (Throwable failure) {
-                // This runs in a future callback, outside Netty's exceptionCaught propagation.
-                // Closing also releases response ownership for requests still waiting in order.
-                LOG.error("Error sending Kafka response on listener {}", listenerName, failure);
-                close();
-            }
-        } finally {
-            sendingResponses = false;
+            writeCompletedResponses(ctx);
+        } catch (Throwable failure) {
+            // This runs in a future callback, outside Netty's exceptionCaught propagation.
+            // Closing cancels queued responses without releasing a worker's input.
+            LOG.error("Error sending Kafka response on listener {}", listenerName, failure);
+            close();
         }
     }
 
-    private void sendReadyResponses(ChannelHandlerContext ctx) {
+    private void writeCompletedResponses(ChannelHandlerContext ctx) {
         KafkaRequest request;
         while ((request = inflightResponses.peekFirst()) != null) {
             CompletableFuture<AbstractResponse> f = request.future();
@@ -239,33 +205,19 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
             boolean isDone = f.isDone();
             boolean cancelled = request.cancelled();
 
-            if (isDone && request.suppressResponse()) {
-                inflightResponses.pollFirst();
-                request.releaseBuffer();
-                request.markNetworkCompleted();
-                isActive.set(false);
-                // An empty flush is ordered after earlier response writes, including writes
-                // whose promises have not completed yet.
-                ctx.pipeline()
-                        .firstContext()
-                        .writeAndFlush(Unpooled.EMPTY_BUFFER)
-                        .addListener(ChannelFutureListener.CLOSE);
-                break;
-            }
-
             if (apiKey.equals(PRODUCE)) {
                 ProduceRequest produceRequest = request.request();
                 if (produceRequest.acks() == 0 && isDone) {
                     // if acks=0, we don't need to wait for the response to be sent
                     inflightResponses.pollFirst();
                     request.releaseBuffer();
-                    request.markNetworkCompleted();
                     continue;
                 }
             }
 
             if (cancelled) {
                 inflightResponses.pollFirst();
+                request.releaseBuffer();
                 continue;
             }
 
@@ -279,8 +231,6 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 ChannelFuture responseFuture =
                         ctx.writeAndFlush(buffer)
                                 .addListener(ChannelFutureListener.CLOSE_ON_FAILURE);
-                KafkaRequest completedRequest = request;
-                responseFuture.addListener(ignored -> completedRequest.markNetworkCompleted());
                 if (request.shouldCloseConnectionAfterResponse()) {
                     isActive.set(false);
                     saslConnection.close();
@@ -293,7 +243,6 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
                 }
             } else {
                 request.releaseBuffer();
-                request.markNetworkCompleted();
             }
         }
     }
@@ -319,7 +268,7 @@ public class KafkaCommandDecoder extends SimpleChannelInboundHandler<ByteBuf> {
         KafkaRequest request;
         while ((request = inflightResponses.pollFirst()) != null) {
             request.cancel();
-            // Queued/running workers still own their reference and release it on completion.
+            request.releaseBuffer();
         }
     }
 

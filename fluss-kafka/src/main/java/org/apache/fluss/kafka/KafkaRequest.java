@@ -23,8 +23,6 @@ import org.apache.fluss.rpc.protocol.RequestType;
 import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.shaded.netty4.io.netty.buffer.ByteBuf;
 import org.apache.fluss.shaded.netty4.io.netty.channel.ChannelHandlerContext;
-import org.apache.fluss.shaded.netty4.io.netty.util.Attribute;
-import org.apache.fluss.shaded.netty4.io.netty.util.AttributeKey;
 import org.apache.fluss.shaded.netty4.io.netty.util.ReferenceCountUtil;
 
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -44,7 +42,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Represents a request received from Kafka protocol channel. */
 public class KafkaRequest implements RpcRequest {
-    private static final AttributeKey<Long> CLOSING = AttributeKey.valueOf("fluss.kafka.closing");
     private static final AtomicLong ID_GENERATOR = new AtomicLong(0);
 
     private final ApiKeys apiKey;
@@ -60,9 +57,6 @@ public class KafkaRequest implements RpcRequest {
     private final long startTimeMs;
     private final CompletableFuture<AbstractResponse> future;
     private final AtomicBoolean bufferReleased = new AtomicBoolean();
-    private final AtomicBoolean networkCompleted = new AtomicBoolean();
-    private KafkaServiceController.Connection serviceConnection;
-    private volatile boolean suppressResponse;
     private volatile boolean cancelled = false;
     private volatile boolean closeConnectionAfterResponse;
 
@@ -158,55 +152,6 @@ public class KafkaRequest implements RpcRequest {
 
     public void cancel() {
         cancelled = true;
-        markNetworkCompleted();
-    }
-
-    void attachServiceConnection(KafkaServiceController.Connection connection) {
-        serviceConnection = connection;
-    }
-
-    void markNetworkCompleted() {
-        if (networkCompleted.compareAndSet(false, true) && serviceConnection != null) {
-            serviceConnection.finishRequest();
-        }
-    }
-
-    /** Whether an earlier request has already requested FIFO connection closure. */
-    public boolean isConnectionClosing() {
-        Long closeAfter = ctx.channel() == null ? null : ctx.channel().attr(CLOSING).get();
-        return closeAfter != null && requestId > closeAfter;
-    }
-
-    private void markClosingBoundary() {
-        if (ctx.channel() == null) {
-            return;
-        }
-        Attribute<Long> boundary = ctx.channel().attr(CLOSING);
-        while (true) {
-            Long previous = boundary.get();
-            if ((previous != null && previous <= requestId)
-                    || boundary.compareAndSet(previous, requestId)) {
-                return;
-            }
-        }
-    }
-
-    /** Whether this request may begin work in its connection generation. */
-    public boolean serviceAvailable() {
-        return serviceConnection == null || serviceConnection.isServing();
-    }
-
-    /** Closes in response order without serializing a response for this request. */
-    public void closeWithoutResponse() {
-        suppressResponse = true;
-        markClosingBoundary();
-        if (serviceConnection != null) {
-            serviceConnection.closeAfterPendingResponses();
-        }
-    }
-
-    boolean suppressResponse() {
-        return suppressResponse;
     }
 
     public boolean cancelled() {

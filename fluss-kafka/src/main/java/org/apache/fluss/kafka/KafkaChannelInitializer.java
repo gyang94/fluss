@@ -40,7 +40,6 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
     private final String listenerName;
     private final int maxRequestSize;
     private final @Nullable Supplier<ServerAuthenticator> authenticatorSupplier;
-    private final @Nullable KafkaServiceController serviceController;
     private final LengthFieldPrepender prepender = new LengthFieldPrepender(4);
 
     /** Creates a channel initializer with an optional per-connection authenticator supplier. */
@@ -50,24 +49,7 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
             long maxIdleTimeSeconds,
             int maxRequestSize,
             @Nullable Supplier<ServerAuthenticator> authenticatorSupplier) {
-        this(
-                requestChannels,
-                listenerName,
-                maxIdleTimeSeconds,
-                maxRequestSize,
-                authenticatorSupplier,
-                null);
-    }
-
-    KafkaChannelInitializer(
-            RequestChannel[] requestChannels,
-            String listenerName,
-            long maxIdleTimeSeconds,
-            int maxRequestSize,
-            @Nullable Supplier<ServerAuthenticator> authenticatorSupplier,
-            @Nullable KafkaServiceController serviceController) {
         super(maxIdleTimeSeconds);
-        this.serviceController = serviceController;
         this.requestChannels = requestChannels;
         this.listenerName = listenerName;
         this.maxRequestSize = maxRequestSize;
@@ -81,9 +63,6 @@ public class KafkaChannelInitializer extends NettyChannelInitializer {
         // credential token, so authenticated listeners must never install the payload logger.
         if (authenticatorSupplier != null && ch.pipeline().get("loggingHandler") != null) {
             ch.pipeline().remove("loggingHandler");
-        }
-        if (serviceController != null) {
-            ch.pipeline().addLast("kafkaService", serviceController.newConnection());
         }
         addIdleStateHandler(ch);
         ch.pipeline().addLast(prepender);

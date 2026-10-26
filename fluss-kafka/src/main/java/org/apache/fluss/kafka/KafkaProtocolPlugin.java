@@ -40,7 +40,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 
 import static org.apache.fluss.utils.Preconditions.checkArgument;
@@ -53,7 +52,6 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     private static final String PLAINTEXT_AUTH_PROTOCOL = "plaintext";
 
     private Configuration conf;
-    private KafkaServiceController serviceController;
     private PlainSaslServerConfigManager plainSaslServerConfigManager;
     private Map<String, Supplier<ServerAuthenticator>> authenticatorSuppliers =
             Collections.emptyMap();
@@ -66,17 +64,12 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
 
     @Override
     public void setup(Configuration conf) {
-        validateDrainTimeout(conf);
         validateKafkaAuthenticationConfiguration(conf);
         this.saslListenerNames = saslListenerNames(conf);
         this.plainSaslServerConfigManager = new PlainSaslServerConfigManager(conf);
         this.conf = plainSaslServerConfigManager.getConfiguration();
         this.authenticatorSuppliers =
                 AuthenticationFactory.loadServerAuthenticatorSuppliers(this.conf);
-        this.serviceController =
-                new KafkaServiceController(
-                        conf.get(ConfigOptions.KAFKA_ENABLED),
-                        conf.get(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT));
     }
 
     @Override
@@ -100,8 +93,7 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
                 listenerName,
                 conf.get(ConfigOptions.NETTY_CONNECTION_MAX_IDLE_TIME).getSeconds(),
                 (int) conf.get(ConfigOptions.NETTY_SERVER_MAX_REQUEST_SIZE).getBytes(),
-                authenticatorSupplier,
-                serviceController);
+                authenticatorSupplier);
     }
 
     @Override
@@ -115,7 +107,6 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
 
     @Override
     public void validate(Configuration newConfig) throws ConfigException {
-        validateDrainTimeout(newConfig);
         validateKafkaAuthenticationConfiguration(newConfig);
         plainSaslServerConfigManager.validate(newConfig);
     }
@@ -123,7 +114,6 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public void validate(Configuration newConfig, @Nullable FlussPrincipal requester)
             throws ConfigException {
-        validateDrainTimeout(newConfig);
         validateKafkaAuthenticationConfiguration(newConfig);
         plainSaslServerConfigManager.validate(newConfig, requester);
     }
@@ -131,24 +121,6 @@ public class KafkaProtocolPlugin implements NetworkProtocolPlugin, ServerReconfi
     @Override
     public void reconfigure(Configuration newConfig) throws ConfigException {
         plainSaslServerConfigManager.reconfigure(newConfig);
-        serviceController.setEnabled(newConfig.get(ConfigOptions.KAFKA_ENABLED));
-    }
-
-    @Override
-    public CompletableFuture<Void> closeAsync() {
-        serviceController.close();
-        return CompletableFuture.completedFuture(null);
-    }
-
-    private static void validateDrainTimeout(Configuration config) {
-        if (config.get(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT).isNegative()
-                || config.get(ConfigOptions.KAFKA_SERVICE_DRAIN_TIMEOUT).isZero()) {
-            throw new ConfigException("kafka.service.drain-timeout must be positive.");
-        }
-    }
-
-    KafkaServiceController getServiceControllerForTesting() {
-        return serviceController;
     }
 
     private static void validateKafkaAuthenticationConfiguration(Configuration configuration) {

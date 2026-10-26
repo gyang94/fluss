@@ -3048,18 +3048,8 @@ public class ConfigOptions {
                     .booleanType()
                     .defaultValue(false)
                     .withDescription(
-                            "Whether Kafka listeners provide service. Disabled by default and dynamically "
-                                    + "reconfigurable. Configured Kafka addresses and ports remain bound when "
-                                    + "disabled; supported requests receive Kafka service-unavailable errors.");
-
-    public static final ConfigOption<Duration> KAFKA_SERVICE_DRAIN_TIMEOUT =
-            key("kafka.service.drain-timeout")
-                    .durationType()
-                    .defaultValue(Duration.ofSeconds(30))
-                    .withDescription(
-                            "Maximum time to flush earlier Kafka responses when a request requires "
-                                    + "disconnection without a response. Startup configuration. "
-                                    + "Disconnecting does not roll back submitted native writes.");
+                            "Whether enable fluss kafka. Disabled by default. "
+                                    + "When this option is set to true, the fluss kafka will be enabled.");
 
     public static final ConfigOption<List<String>> KAFKA_LISTENER_NAMES =
             key("kafka.listener.names")

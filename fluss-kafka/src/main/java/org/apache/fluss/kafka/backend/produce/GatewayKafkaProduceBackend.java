@@ -37,6 +37,7 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.rpc.entity.ProduceLogResultForBucket;
 import org.apache.fluss.rpc.netty.server.Session;
+import org.apache.fluss.security.acl.FlussPrincipal;
 import org.apache.fluss.server.entity.UserContext;
 import org.apache.fluss.server.metadata.TabletServerMetadataCache;
 import org.apache.fluss.server.replica.ReplicaManager;
@@ -85,7 +86,8 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     public CompletableFuture<KafkaProduceResult> write(KafkaProduceCommand command) {
         setCurrentSession(command);
         List<CompletableFuture<TopicResult>> topics = new ArrayList<>();
-        try (AppendBatch batch = new AppendBatch(command)) {
+        try (AppendBatch batch =
+                new AppendBatch(command.timeoutMs(), command.acks(), command.principal())) {
             for (TopicWrite topic : command.topics()) {
                 List<CompletableFuture<PartitionResult>> partitions = new ArrayList<>();
                 for (PartitionWrite partition : topic.partitions()) {
@@ -161,14 +163,18 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
     }
 
     private final class AppendBatch implements AutoCloseable {
-        private final KafkaProduceCommand command;
+        private final int timeoutMs;
+        private final short acks;
+        private final FlussPrincipal principal;
         private final Map<TableBucket, MemoryLogRecords> entriesPerBucket = new HashMap<>();
         private final Map<TableBucket, CompletableFuture<PartitionResult>> results =
                 new HashMap<>();
         private final List<EncodedRecords> convertedRecords = new ArrayList<>();
 
-        private AppendBatch(KafkaProduceCommand command) {
-            this.command = command;
+        private AppendBatch(int timeoutMs, short acks, FlussPrincipal principal) {
+            this.timeoutMs = timeoutMs;
+            this.acks = acks;
+            this.principal = principal;
         }
 
         private void appendLogs() {
@@ -180,10 +186,10 @@ public final class GatewayKafkaProduceBackend implements KafkaProduceBackend {
             Map<TableBucket, CompletableFuture<PartitionResult>> pending = new HashMap<>(results);
             try {
                 replicaManager.appendRecordsToLog(
-                        command.timeoutMs(),
-                        command.acks(),
+                        timeoutMs,
+                        acks,
                         entriesPerBucket,
-                        new UserContext(command.principal()),
+                        new UserContext(principal),
                         responses -> completeResults(pending, responses));
             } catch (Exception failure) {
                 pending.forEach(
