@@ -17,30 +17,52 @@
 
 package org.apache.fluss.server.replica.delay;
 
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.fs.FsPath;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.record.MemoryLogRecords;
 import org.apache.fluss.rpc.entity.FetchLogResultForBucket;
 import org.apache.fluss.rpc.entity.ProduceLogResultForBucket;
+import org.apache.fluss.rpc.messages.ApiMessage;
+import org.apache.fluss.rpc.messages.ProduceLogRequest;
+import org.apache.fluss.rpc.messages.ProduceLogResponse;
+import org.apache.fluss.rpc.netty.server.FlussRequest;
+import org.apache.fluss.rpc.netty.server.FlussRequestHandler;
+import org.apache.fluss.rpc.protocol.ApiKeys;
+import org.apache.fluss.rpc.protocol.ApiManager;
+import org.apache.fluss.security.acl.FlussPrincipal;
+import org.apache.fluss.server.DynamicConfigManager;
+import org.apache.fluss.server.coordinator.LakeCatalogDynamicLoader;
+import org.apache.fluss.server.coordinator.MetadataManager;
 import org.apache.fluss.server.entity.FetchReqInfo;
 import org.apache.fluss.server.log.FetchParams;
 import org.apache.fluss.server.log.LogOffsetMetadata;
 import org.apache.fluss.server.metrics.group.TestingMetricGroups;
+import org.apache.fluss.server.replica.Replica;
 import org.apache.fluss.server.replica.ReplicaTestBase;
 import org.apache.fluss.server.replica.delay.DelayedFetchLog.FetchBucketStatus;
+import org.apache.fluss.server.tablet.TabletService;
+import org.apache.fluss.shaded.netty4.io.netty.buffer.Unpooled;
 
 import org.junit.jupiter.api.Test;
 
+import java.net.InetAddress;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 import static org.apache.fluss.record.TestData.DATA1;
 import static org.apache.fluss.record.TestData.DATA1_ROW_TYPE;
 import static org.apache.fluss.record.TestData.DATA1_TABLE_ID;
+import static org.apache.fluss.server.testutils.RpcMessageTestUtils.assertProduceLogResponse;
+import static org.apache.fluss.server.testutils.RpcMessageTestUtils.newProduceLogRequest;
 import static org.apache.fluss.testutils.DataTestUtils.assertLogRecordsEquals;
 import static org.apache.fluss.testutils.DataTestUtils.genMemoryLogRecordsByObject;
 import static org.apache.fluss.testutils.common.CommonTestUtils.retry;
@@ -175,6 +197,138 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
     }
 
     @Test
+    void testDelayedFollowerFetchesWithAllAcks() throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 1);
+        int firstFollowerId = 2;
+        int secondFollowerId = 3;
+        List<Integer> replicas = Arrays.asList(TABLET_SERVER_ID, firstFollowerId, secondFollowerId);
+        makeLogTableAsLeader(tableBucket, replicas, replicas, false);
+        Replica leader = replicaManager.getReplicaOrException(tableBucket);
+        long logEndOffset = DATA1.size();
+
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> firstFollowerFetch =
+                fetchLog(tableBucket, firstFollowerId, 0L, 1);
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> secondFollowerFetch =
+                fetchLog(tableBucket, secondFollowerId, 0L, 1);
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> consumerFetch =
+                fetchLog(tableBucket, -1, 0L, 1);
+        assertThat(firstFollowerFetch).isNotDone();
+        assertThat(secondFollowerFetch).isNotDone();
+        assertThat(consumerFetch).isNotDone();
+        assertThat(replicaManager.getDelayedFetchLogManager().numDelayed()).isEqualTo(3);
+
+        CompletableFuture<List<ProduceLogResultForBucket>> produceResponse =
+                new CompletableFuture<>();
+        replicaManager.appendRecordsToLog(
+                (int) Duration.ofMinutes(3).toMillis(),
+                -1,
+                Collections.singletonMap(tableBucket, genMemoryLogRecordsByObject(DATA1)),
+                null,
+                produceResponse::complete);
+
+        assertThat(leader.getLogTablet().localLogEndOffset()).isEqualTo(logEndOffset);
+        assertThat(leader.getLogHighWatermark()).isZero();
+        assertThat(produceResponse).isNotDone();
+        assertThat(firstFollowerFetch).isNotDone();
+        assertThat(secondFollowerFetch).isNotDone();
+        assertThat(consumerFetch).isNotDone();
+        assertThat(replicaManager.getDelayedWriteManager().numDelayed()).isOne();
+
+        replicaManager.tryCompleteActions();
+
+        // Followers read up to LEO, while the consumer and acks=all produce must wait for HW.
+        assertFetchedRecords(firstFollowerFetch, tableBucket, 0L);
+        assertFetchedRecords(secondFollowerFetch, tableBucket, 0L);
+        assertThat(leader.getLogHighWatermark()).isZero();
+        assertThat(produceResponse).isNotDone();
+        assertThat(consumerFetch).isNotDone();
+        assertThat(replicaManager.getDelayedFetchLogManager().numDelayed()).isOne();
+
+        // Fetching from the new LEO acknowledges the records returned by the previous fetch.
+        acknowledgeFetchedRecords(tableBucket, firstFollowerId, logEndOffset);
+        assertThat(leader.getLogHighWatermark()).isZero();
+        assertThat(produceResponse).isNotDone();
+        assertThat(consumerFetch).isNotDone();
+
+        acknowledgeFetchedRecords(tableBucket, secondFollowerId, logEndOffset);
+        assertThat(leader.getLogHighWatermark()).isEqualTo(logEndOffset);
+        assertThat(produceResponse).isDone();
+        assertThat(produceResponse.join())
+                .containsExactly(new ProduceLogResultForBucket(tableBucket, 0L, logEndOffset));
+        assertFetchedRecords(consumerFetch, tableBucket, logEndOffset);
+        assertThat(replicaManager.getDelayedWriteManager().numDelayed()).isZero();
+        assertThat(replicaManager.getDelayedFetchLogManager().numDelayed()).isZero();
+    }
+
+    @Test
+    void testRpcHandlerWakesFollowerBeforeProduceCompletes() throws Exception {
+        TableBucket tableBucket = new TableBucket(DATA1_TABLE_ID, 1);
+        int followerId = 2;
+        List<Integer> replicas = Arrays.asList(TABLET_SERVER_ID, followerId);
+        makeLogTableAsLeader(tableBucket, replicas, replicas, false);
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> followerFetch =
+                fetchLog(tableBucket, followerId, 0L, 1);
+        assertThat(followerFetch).isNotDone();
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        DynamicConfigManager dynamicConfigManager = new DynamicConfigManager(zkClient, conf);
+        try {
+            TabletService service =
+                    new TabletService(
+                            TABLET_SERVER_ID,
+                            new FsPath(conf.get(ConfigOptions.REMOTE_DATA_DIR)).getFileSystem(),
+                            zkClient,
+                            replicaManager,
+                            serverMetadataCache,
+                            new MetadataManager(
+                                    zkClient, conf, new LakeCatalogDynamicLoader(conf, null, true)),
+                            null,
+                            dynamicConfigManager,
+                            executor,
+                            executor,
+                            scannerManager,
+                            testCoordinatorGateway,
+                            "CLIENT");
+            ProduceLogRequest produceRequest =
+                    newProduceLogRequest(
+                            tableBucket.getTableId(),
+                            tableBucket.getBucket(),
+                            -1,
+                            genMemoryLogRecordsByObject(DATA1));
+            produceRequest.setTimeoutMs((int) Duration.ofMinutes(3).toMillis());
+            FlussRequest request =
+                    new FlussRequest(
+                            ApiKeys.PRODUCE_LOG.id,
+                            ApiKeys.PRODUCE_LOG.highestSupportedVersion,
+                            1,
+                            ApiManager.forApiKey(ApiKeys.PRODUCE_LOG.id),
+                            produceRequest,
+                            Unpooled.EMPTY_BUFFER,
+                            "CLIENT",
+                            false,
+                            FlussPrincipal.ANONYMOUS,
+                            InetAddress.getLoopbackAddress(),
+                            new CompletableFuture<ApiMessage>());
+
+            new FlussRequestHandler(service).processRequest(request);
+
+            // No manual drain: the real handler and TabletService must wake the follower.
+            assertFetchedRecords(followerFetch, tableBucket, 0L);
+            assertThat(request.getResponseFuture()).isNotDone();
+
+            acknowledgeFetchedRecords(tableBucket, followerId, DATA1.size());
+            assertThat(request.getResponseFuture()).isDone();
+            assertProduceLogResponse(
+                    (ProduceLogResponse) request.getResponseFuture().join(),
+                    tableBucket.getBucket(),
+                    0L);
+        } finally {
+            dynamicConfigManager.close();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void testDelayFetchLogTimeout() {
         TableBucket tb = new TableBucket(DATA1_TABLE_ID, 1);
         makeLogTableAsLeader(tb.getBucket());
@@ -215,6 +369,46 @@ public class DelayedFetchLogTest extends ReplicaTestBase {
                     assertThat(resultForBucket.getHighWatermark()).isEqualTo(0L);
                     assertThat(resultForBucket.recordsOrEmpty()).isEqualTo(MemoryLogRecords.EMPTY);
                 });
+    }
+
+    private CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> fetchLog(
+            TableBucket tableBucket, int replicaId, long fetchOffset, int minFetchBytes) {
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> response =
+                new CompletableFuture<>();
+        replicaManager.fetchLogRecords(
+                new FetchParams(
+                        replicaId,
+                        Integer.MAX_VALUE,
+                        minFetchBytes,
+                        Duration.ofMinutes(3).toMillis()),
+                Collections.singletonMap(
+                        tableBucket,
+                        new FetchReqInfo(tableBucket.getTableId(), fetchOffset, Integer.MAX_VALUE)),
+                null,
+                response::complete);
+        return response;
+    }
+
+    private void acknowledgeFetchedRecords(TableBucket tableBucket, int followerId, long offset) {
+        CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> response =
+                fetchLog(tableBucket, followerId, offset, 0);
+        assertThat(response).isDone();
+        FetchLogResultForBucket result = response.join().get(tableBucket);
+        assertThat(result.succeeded()).isTrue();
+        assertThat(result.recordsOrEmpty().sizeInBytes()).isZero();
+    }
+
+    private void assertFetchedRecords(
+            CompletableFuture<Map<TableBucket, FetchLogResultForBucket>> response,
+            TableBucket tableBucket,
+            long expectedHighWatermark)
+            throws Exception {
+        assertThat(response).isDone();
+        assertThat(response.join()).containsOnlyKeys(tableBucket);
+        FetchLogResultForBucket result = response.join().get(tableBucket);
+        assertThat(result.succeeded()).isTrue();
+        assertThat(result.getHighWatermark()).isEqualTo(expectedHighWatermark);
+        assertLogRecordsEquals(DATA1_ROW_TYPE, result.records(), DATA1);
     }
 
     private DelayedFetchLog createDelayedFetchLogRequest(
